@@ -21,7 +21,7 @@ type ArtifactType =
   | "OUTPUT_DATABASE";
 
 interface GoldenApp { id: string; name: string; runtime_url?: string | null; status: string }
-interface Suite { id: string; suite_code: string; exam_id?: string; golden_app_id: string; name: string; status: string; database_contract?: JsonMap; recordings?: Recording[]; scenarios?: JsonMap[] }
+interface Suite { id: string; suite_code: string; exam_id?: string; golden_app_id: string; name: string; status: string; database_contract?: JsonMap; runtime_config?: JsonMap; recordings?: Recording[]; scenarios?: JsonMap[] }
 interface Recording { id: string; suite_id: string; name: string; status: string; revision_scenario_id?: string | null; raw_trace?: JsonMap[]; initial_state?: JsonMap }
 interface Artifact { id: string; type: ArtifactType; version: number; file_name: string; size_bytes: number; active: boolean; sha256: string }
 interface Readiness { ready: boolean; missing: ArtifactType[]; artifacts: Partial<Record<ArtifactType, Artifact | null>> }
@@ -38,6 +38,15 @@ const ARTIFACTS: { type: ArtifactType; title: string; owner: "teacher" | "system
   { type: "GRADING_ENVIRONMENT", title: "5. Môi trường chấm", owner: "system", accept: ".json", hint: "API, driver, browser và timeout của suite.", icon: MonitorPlay },
   { type: "TESTCASE_DEFINITION", title: "6. File testcase", owner: "system", accept: ".json", hint: "7 cột Stage, Attribute, AttributeValue, ValueType, Value, Action, Browser.", icon: FileJson },
   { type: "OUTPUT_DATABASE", title: "7. Output Database", owner: "system", accept: ".db,.sqlite,.sqlite3", hint: "Hệ thống replay Golden trên DB ẩn rồi tự capture trạng thái DB sau thao tác.", icon: Database },
+];
+
+// Khớp BASE_PACKAGES trong SubmissionPackagePolicy.java — dùng làm mặc định khi tạo suite mới và
+// làm gợi ý bấm-thêm-nhanh, tránh lặp lại lỗi PE_PRM: contract sinh ra chỉ có 5 package tối thiểu,
+// chặn nhầm bài dùng riverpod.
+const DEFAULT_ALLOWED_PACKAGES = [
+  "flutter", "flutter_test", "flutter_riverpod", "riverpod", "riverpod_annotation",
+  "path", "sqflite", "sqflite_common", "sqflite_common_ffi", "sqflite_common_ffi_web",
+  "path_provider", "sembast_web", "image_picker", "intl",
 ];
 
 const ACTIONS = ["boot", "tap", "enter_text", "clear_text", "scroll", "back", "restart", "wait_until"];
@@ -87,6 +96,8 @@ function BehaviorAuthoringEditor() {
   const [name, setName] = useState("");
   const [runtimeUrl, setRuntimeUrl] = useState("");
   const [databaseName, setDatabaseName] = useState("");
+  const [allowedPackages, setAllowedPackages] = useState<string[]>(DEFAULT_ALLOWED_PACKAGES);
+  const [packageDraft, setPackageDraft] = useState("");
   const [suite, setSuite] = useState<Suite | null>(null);
   const [availableSuites, setAvailableSuites] = useState<Suite[]>([]);
   const [recording, setRecording] = useState<Recording | null>(null);
@@ -152,6 +163,21 @@ function BehaviorAuthoringEditor() {
       || "",
   ).trim();
   const databaseNameChanged = Boolean(suite && databaseName.trim() !== savedDatabaseName);
+  const savedAllowedPackages = Array.isArray(suite?.runtime_config?.allowed_packages)
+    ? (suite.runtime_config.allowed_packages as unknown[]).map(String)
+    : [];
+  const allowedPackagesChanged = Boolean(
+    suite && JSON.stringify([...allowedPackages].sort()) !== JSON.stringify([...savedAllowedPackages].sort()),
+  );
+  const packageSuggestions = DEFAULT_ALLOWED_PACKAGES.filter((pkg) => !allowedPackages.includes(pkg));
+
+  const addPackage = (raw: string) => {
+    const names = raw.split(",").map((p) => p.trim()).filter(Boolean);
+    if (!names.length) return;
+    setAllowedPackages((current) => [...current, ...names.filter((n) => !current.includes(n))]);
+    setPackageDraft("");
+  };
+  const removePackage = (name: string) => setAllowedPackages((current) => current.filter((p) => p !== name));
 
   useEffect(() => setRecorderReady(false), [previewUrl]);
 
@@ -195,6 +221,10 @@ function BehaviorAuthoringEditor() {
         || "",
     );
     setDatabaseName(contractName);
+    setAllowedPackages(Array.isArray(suiteData.runtime_config?.allowed_packages)
+      ? (suiteData.runtime_config.allowed_packages as unknown[]).map(String)
+      : DEFAULT_ALLOWED_PACKAGES);
+    setPackageDraft("");
     if (suiteData.golden_app_id) {
       const golden = await api<GoldenApp>(`/behavior-authoring/golden-apps/${suiteData.golden_app_id}`);
       const hasUploadedGolden = artifactData.some((item) => item.active && item.type === "GOLDEN_SOLUTION");
@@ -233,6 +263,7 @@ function BehaviorAuthoringEditor() {
     const cleanExam = examId.trim();
     if (!databaseName.trim()) throw new Error("Cần nhập đúng tên file SQLite mà Golden App mở, ví dụ user_manager.db.");
     if (!cleanExam || !name.trim()) throw new Error("Cần nhập mã đề và tên bộ chấm.");
+    if (!allowedPackages.length) throw new Error("Cần ít nhất 1 package được phép, ví dụ flutter, flutter_test.");
     const golden = await api<GoldenApp>("/behavior-authoring/golden-apps", {
       method: "POST",
       body: JSON.stringify({ name: `${name.trim()} - Golden`, exam_id: cleanExam, runtime_url: runtimeUrl.trim() || null, platform: "WEB", ready: Boolean(runtimeUrl.trim()) }),
@@ -246,6 +277,7 @@ function BehaviorAuthoringEditor() {
         name: name.trim(),
         description: "Bộ chấm Record–Abstract–Replay",
         database_contract: { enabled: true, driver: "sqlite", database_name: databaseName.trim(), ignore_columns: ["created_at", "updated_at"] },
+        runtime_config: { allowed_packages: allowedPackages },
       }),
     });
     await refresh(created.id);
@@ -278,6 +310,17 @@ function BehaviorAuthoringEditor() {
     });
     await refresh(suite.id);
     setNotice(`Đã đổi Database runtime thành ${nextDatabaseName}. Oracle cũ đã hết hiệu lực; cần sinh lại và chạy lại preflight.`);
+  });
+
+  const saveAllowedPackages = () => suite && run("save-allowed-packages", async () => {
+    if (!allowedPackages.length) throw new Error("Cần ít nhất 1 package được phép, ví dụ flutter, flutter_test.");
+    const nextRuntimeConfig: JsonMap = { ...(suite.runtime_config || {}), allowed_packages: allowedPackages };
+    await api<Suite>(`/behavior-authoring/suites/${suite.id}`, {
+      method: "PUT",
+      body: JSON.stringify({ runtime_config: nextRuntimeConfig }),
+    });
+    await refresh(suite.id);
+    setNotice(`Đã lưu ${allowedPackages.length} package (chưa áp dụng vào bài chấm). Không cần record/capture lại oracle, nhưng execution plan đã đổi nên cần chạy lại "Chạy thử trên Golden" ở Bước 5 rồi mới bấm "Publish bộ chấm" được — publish xong contract.json mới thật sự ghi ra đĩa.`);
   });
 
   const openSuite = async (selected: Suite) => {
@@ -632,6 +675,65 @@ function BehaviorAuthoringEditor() {
                 )}
               </div>
               <p className="mt-1 text-xs text-slate-500">Phải trùng chính xác tên file trong <span className="font-mono">openDatabase(...)</span> của Golden/starter.</p>
+            </div>
+          </div>
+          <div className="mt-3">
+            <label className="mb-1 block text-xs font-bold uppercase tracking-widest text-slate-500" htmlFor="golden-allowed-packages">
+              Package được phép dùng trong bài sinh viên
+            </label>
+            <div className="flex min-w-0 flex-wrap items-center gap-1.5 rounded-xl border border-slate-300 bg-transparent px-3 py-2 focus-within:border-indigo-500 dark:border-slate-700">
+              {allowedPackages.map((pkg) => (
+                <span key={pkg} className="inline-flex items-center gap-1 rounded-full bg-indigo-100 py-1 pl-3 pr-1.5 font-mono text-xs font-semibold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">
+                  {pkg}
+                  <button type="button" onClick={() => removePackage(pkg)} title={`Bỏ ${pkg}`} className="rounded-full p-0.5 text-indigo-400 hover:bg-indigo-200 hover:text-indigo-800 dark:hover:bg-indigo-900 dark:hover:text-indigo-100">
+                    <X size={12} />
+                  </button>
+                </span>
+              ))}
+              <input
+                id="golden-allowed-packages"
+                value={packageDraft}
+                onChange={(e) => setPackageDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === ",") { e.preventDefault(); addPackage(packageDraft); }
+                  else if (e.key === "Backspace" && !packageDraft && allowedPackages.length) removePackage(allowedPackages[allowedPackages.length - 1]);
+                }}
+                onBlur={() => packageDraft.trim() && addPackage(packageDraft)}
+                placeholder={allowedPackages.length ? "Thêm package, Enter để xác nhận" : "flutter, flutter_test, flutter_riverpod, sqflite, ..."}
+                className="min-w-[160px] flex-1 bg-transparent px-1 py-1 font-mono text-sm outline-none"
+              />
+            </div>
+            {packageSuggestions.length > 0 && (
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                <span className="text-xs text-slate-400">Gợi ý bấm thêm nhanh:</span>
+                {packageSuggestions.map((pkg) => (
+                  <button
+                    key={pkg}
+                    type="button"
+                    onClick={() => addPackage(pkg)}
+                    className="inline-flex items-center gap-1 rounded-full border border-dashed border-slate-300 px-2.5 py-0.5 font-mono text-xs text-slate-500 hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-700 dark:hover:border-indigo-500"
+                  >
+                    <Plus size={10} /> {pkg}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
+              <p className="max-w-2xl text-xs text-slate-500">
+                Thiếu package nào đang dùng thật (ví dụ flutter_riverpod) sẽ bị chặn ở bước preflight và chấm 0đ dù
+                code đúng. Sửa mục này không làm mất oracle đã capture — không cần record/replay lại.
+              </p>
+              {suite && (
+                <button
+                  type="button"
+                  onClick={saveAllowedPackages}
+                  disabled={!allowedPackagesChanged || !allowedPackages.length || Boolean(busy)}
+                  className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-indigo-400 px-3 py-2 text-sm font-bold text-indigo-600 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-40 dark:text-indigo-300 dark:hover:bg-indigo-950"
+                >
+                  {busy === "save-allowed-packages" ? <Loader2 size={16} className="animate-spin" /> : <ShieldCheck size={16} />}
+                  Lưu package
+                </button>
+              )}
             </div>
           </div>
           {!suite && <><button onClick={createSuite} disabled={Boolean(busy)} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-3 font-bold text-white hover:bg-indigo-500 disabled:opacity-50">{busy === "create" ? <Loader2 className="animate-spin" size={18} /> : <Plus size={18} />} Tạo bộ chấm mới</button>{availableSuites.length > 0 && <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">{availableSuites.map((item) => <div key={item.id} className="relative rounded-xl border border-slate-200 transition hover:border-indigo-400 hover:bg-indigo-50/50 dark:border-slate-700 dark:hover:bg-indigo-950/20"><button onClick={() => void openSuite(item)} className="block w-full p-4 pr-14 text-left"><div className="flex items-center justify-between gap-2"><span className="font-bold">{item.name}</span><span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">{item.status}</span></div><p className="mt-1 font-mono text-xs text-indigo-500">{item.suite_code}</p><p className="mt-2 text-xs text-slate-500">Mã đề: {item.exam_id || "chưa gắn"}</p></button><button onClick={() => deleteSuite(item)} disabled={Boolean(busy)} title="Xóa bộ chấm" className="absolute bottom-3 right-3 rounded-lg border border-rose-300 p-2 text-rose-500 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-800 dark:hover:bg-rose-950"><Trash2 size={16} /></button></div>)}</div>}</>}
