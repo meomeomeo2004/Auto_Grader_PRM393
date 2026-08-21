@@ -184,7 +184,7 @@ public class BehaviorAuthoringService {
         ensureEditable(suite);
         boolean invalidatesReplay = body.containsKey("public_contract")
                 || body.containsKey("database_contract")
-                || body.containsKey("runtime_config");
+                || runtimeConfigChangeInvalidatesReplay(suite, body);
         if (body.containsKey("name")) suite.setName(required(body, "name"));
         if (body.containsKey("description")) suite.setDescription(optional(body, "description"));
         if (body.containsKey("public_contract")) {
@@ -1094,6 +1094,21 @@ public class BehaviorAuthoringService {
     private GoldenRecording recordingForUpdate(String id) {
         return recordings.findByIdForUpdate(id)
                 .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy phiên record: " + id));
+    }
+
+    /**
+     * allowed_packages chỉ gate dependency phía bài sinh viên trước khi compile (SubmissionPackagePolicy),
+     * không ảnh hưởng hành vi Golden Solution hay oracle đã capture. Đổi riêng field này không cần
+     * record/capture lại; chỉ các key runtime khác (driver, timeout, api_base_url...) mới invalidate.
+     */
+    private boolean runtimeConfigChangeInvalidatesReplay(BehaviorSuite suite, Map<String, Object> body) {
+        if (!body.containsKey("runtime_config")) return false;
+        Object raw = body.get("runtime_config");
+        Map<String, Object> incoming = raw instanceof String s ? readObject(s) : map(raw);
+        Map<String, Object> current = readObject(suite.getRuntimeConfigJson());
+        current.remove("allowed_packages");
+        incoming.remove("allowed_packages");
+        return !current.equals(incoming);
     }
 
     private void ensureEditable(BehaviorSuite suite) {
