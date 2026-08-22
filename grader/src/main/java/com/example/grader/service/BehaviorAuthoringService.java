@@ -24,7 +24,12 @@ public class BehaviorAuthoringService {
     public static final String SCHEMA_VERSION = "1.0";
     private static final Pattern CODE = Pattern.compile("[A-Z0-9][A-Z0-9_-]{2,79}");
     private static final Set<String> EVENT_KINDS = Set.of(
-            "action", "ui_observation", "database_observation", "checkpoint", "navigation", "exception");
+            "action", "ui_observation", "database_observation", "checkpoint", "navigation", "exception",
+            // Tiêu chí "thành phần giao diện có mặt" — sinh từ bảng tick trên trang soạn đề.
+            // Mỗi event là MỘT thành phần; engine có nhánh riêng cho kind này.
+            "component_present",
+            // So bố cục màn hình với ảnh chuẩn chụp từ Golden trong cùng container.
+            "screen_match");
     private static final Set<String> ACTIONS = Set.of(
             "boot", "tap", "enter_text", "clear_text", "scroll", "back", "restart", "wait_until");
     private static final int MAX_EVENTS = 2_000;
@@ -320,6 +325,23 @@ public class BehaviorAuthoringService {
             validateDatabaseObservation(event);
         } else if ("checkpoint".equals(kind) || "ui_observation".equals(kind)) {
             validateUiObservation(event);
+        } else if ("screen_match".equals(kind)) {
+            event.putIfAbsent("checkpoint", true);
+            event.putIfAbsent("threshold", 0.85);
+            event.putIfAbsent("stage", "ASSERT");
+            event.putIfAbsent("action", "observe_ui");
+            event.putIfAbsent("browser", "flutter_tester");
+        } else if ("component_present".equals(kind)) {
+            // Không có target thì lúc chấm không biết tìm widget nào — chặn ngay lúc ghi,
+            // đừng để lỗi trôi tới preflight.
+            if (map(event.get("target")).isEmpty()) {
+                throw new IllegalArgumentException("Tiêu chí giao diện phải có target (label/hint/text)");
+            }
+            event.putIfAbsent("checkpoint", true);
+            event.putIfAbsent("visible", true);
+            event.putIfAbsent("stage", "ASSERT");
+            event.putIfAbsent("action", "observe_ui");
+            event.putIfAbsent("browser", "flutter_tester");
         }
         event.put("kind", kind);
         event.put("sequence", trace.size() + 1);
@@ -433,6 +455,8 @@ public class BehaviorAuthoringService {
                 step.put("timeout_ms", number(event.get("timeout_ms"), 5_000));
                 steps.add(step);
             } else if ("checkpoint".equals(kind)
+                    || "component_present".equals(kind)
+                    || "screen_match".equals(kind)
                     || (bool(event.get("checkpoint"), false)
                     && Set.of("ui_observation", "database_observation", "navigation").contains(kind))) {
                 Map<String, Object> checkpoint = new LinkedHashMap<>(event);

@@ -2,9 +2,13 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 import 'dart:ui' show Size;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart' show FontLoader;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -68,6 +72,7 @@ Future<void> _runBehaviorScenario(
     if (_bool(_asMap(testCase['initial_state'])['reset_storage'], true)) {
       await tester.runAsync(() => _resetDatabase(databaseContract, variables));
     }
+    await tester.runAsync(_loadRealFonts);
     stdout.writeln('${_stageMarker}STUDENT_APP_BOOT');
     await _bootStudentApp(tester, timeout);
 
@@ -86,6 +91,19 @@ Future<void> _runBehaviorScenario(
     await tester.runAsync(
       () => _captureOutputDatabase(databaseContract, variables),
     );
+    // CAPTURE MODE: chup man hinh cuoi luong lam ANH CHUAN cho tieu chi screen_match.
+    // Cham bai sinh vien khong dat bien moi truong nay nen khong phat sinh file nao.
+    if ((Platform.environment['GRADER_CAPTURE_OUTPUT_PATH'] ?? '').isNotEmpty) {
+      await _saveGoldenScreenshot(tester);
+    } else {
+      // GRADING MODE: luu anh man hinh cuoi luong lam BANG CHUNG phuc khao — di vao
+      // ho so ZIP cua sinh vien. Bao loi nuot: thieu anh chi mat mot dong bang chung,
+      // khong duoc lam hong luot cham.
+      await _saveEvidenceScreenshot(
+        tester,
+        _text(cases.first, 'execution_code', _text(cases.first, 'scenario_code')),
+      );
+    }
 
     for (final checkpointCase in cases) {
       final checkpoint = _asMap(checkpointCase['checkpoint']);
@@ -97,6 +115,11 @@ Future<void> _runBehaviorScenario(
           databaseContract,
           variables,
           timeout,
+          executionCode: _text(
+            checkpointCase,
+            'execution_code',
+            _text(checkpointCase, 'scenario_code'),
+          ),
         );
         _throwPendingException(tester, 'checkpoint');
         _printCheckpoint(checkpointCase, true, 'Đã đáp ứng yêu cầu');
@@ -231,9 +254,20 @@ Future<void> _assertCheckpoint(
   Map<String, dynamic> checkpoint,
   Map<String, dynamic> databaseContract,
   Map<String, String> variables,
-  Duration timeout,
-) async {
+  Duration timeout, {
+  String executionCode = '',
+}) async {
   final kind = _text(checkpoint, 'kind');
+  // SO BO CUC VOI ANH CHUAN. Anh chuan duoc chup tu chinh Golden Solution trong
+  // cung container Docker luc capture oracle — cung renderer, cung font, nen khong
+  // dinh sai so Windows/macOS. Nguong khop la chinh sach cua de (mac dinh 85%).
+  if (kind == 'screen_match') {
+    if ((Platform.environment['GRADER_CAPTURE_OUTPUT_PATH'] ?? '').isNotEmpty) {
+      return; // dang capture chinh anh chuan, chua co gi de so
+    }
+    await _assertScreenMatch(tester, checkpoint, executionCode);
+    return;
+  }
   if (kind == 'entity_consistency' ||
       _text(checkpoint, 'scope') == 'cross_layer') {
     await tester.runAsync(
@@ -258,9 +292,39 @@ Future<void> _assertCheckpoint(
     return;
   }
 
+  // THÀNH PHẦN GIAO DIỆN CÓ MẶT — dùng cho nhóm tiêu chí "Giao diện".
+  // Chỉ NHÌN màn hình hiện tại, không thao tác gì. Mỗi tiêu chí một thành phần,
+  // nhị phân; điểm lẻ của nhóm nổi lên từ số thành phần đạt, không từ điểm lẻ
+  // của từng dòng. Thiếu target là lỗi ĐỀ, phải ném chứ không được im lặng.
+  if (kind == 'component_present') {
+    final target = _asMap(checkpoint['target']);
+    if (target.isEmpty) {
+      throw ArgumentError(
+        'Checkpoint component_present thiếu target — không biết phải tìm thành phần nào.',
+      );
+    }
+    final visible = _bool(
+      checkpoint['visible'] ?? _asMap(checkpoint['expect'])['visible'],
+      true,
+    );
+    final moTa = _moTaTarget(target);
+    await _waitUntil(
+      tester,
+      () => _finder(target).evaluate().isNotEmpty == visible,
+      timeout,
+      visible
+          ? 'Không thấy $moTa trên màn hình.'
+          : 'Vẫn thấy $moTa trên màn hình dù lẽ ra phải ẩn.',
+    );
+    return;
+  }
+
   final expectValue = _asMap(checkpoint['expect']);
+  // Đếm số phép kiểm THẬT SỰ chạy. Xem chốt chặn cuối hàm.
+  var soPhepKiem = 0;
   for (final raw in _asList(expectValue['semantic_nodes'])) {
     await _assertSemanticNode(tester, _asMap(raw), variables, timeout);
+    soPhepKiem++;
   }
   final target = _asMap(checkpoint['target']);
   if (target.isNotEmpty) {
@@ -274,6 +338,7 @@ Future<void> _assertCheckpoint(
       timeout,
       'Widget không có trạng thái hiển thị mong đợi: $target',
     );
+    soPhepKiem++;
   }
 
   for (final raw in _asList(expectValue['visible_texts'])) {
@@ -284,6 +349,7 @@ Future<void> _assertCheckpoint(
       timeout,
       'Không thấy nội dung "$value" trên UI.',
     );
+    soPhepKiem++;
   }
   for (final raw in _asList(expectValue['hidden_texts'])) {
     final value = _expand(raw, variables);
@@ -292,15 +358,39 @@ Future<void> _assertCheckpoint(
       findsNothing,
       reason: 'Nội dung "$value" vẫn còn trên UI.',
     );
+    soPhepKiem++;
   }
 
   final expectedText = checkpoint['text'] ?? expectValue['text'];
   if (expectedText != null) {
     final value = _expand(expectedText, variables);
     expect(find.text(value), findsAtLeastNWidgets(1));
+    soPhepKiem++;
   }
   final noException = checkpoint['no_exception'] ?? expectValue['no_exception'];
-  if (_bool(noException, false)) _throwPendingException(tester, 'checkpoint');
+  if (_bool(noException, false)) {
+    _throwPendingException(tester, 'checkpoint');
+    soPhepKiem++;
+  }
+
+  // CHỐT CHẶN PASS CÂM. Trước đây một checkpoint mang `kind` mà engine không biết
+  // sẽ rơi vào nhánh này, không khớp nhánh con nào, rồi TRẢ VỀ BÌNH THƯỜNG — tức
+  // cho điểm mà chưa kiểm gì. Đó là kiểu hỏng tệ nhất: im lặng và có lợi cho bài nộp.
+  if (soPhepKiem == 0) {
+    throw StateError(
+      'Checkpoint không kiểm điều gì (kind="$kind"). Bộ đề khai sai hoặc engine '
+      'trong bộ đề cũ hơn engine đã sinh ra checkpoint này — xuất bản lại bộ đề.',
+    );
+  }
+}
+
+/// Mô tả target bằng tiếng Việt cho người đọc log phúc khảo, thay vì in Map thô.
+String _moTaTarget(Map<String, dynamic> target) {
+  for (final khoa in const <String>['label', 'hint', 'text', 'tooltip']) {
+    final v = _text(target, khoa);
+    if (v.isNotEmpty) return '"$v"';
+  }
+  return target.toString();
 }
 
 Future<void> _assertSemanticNode(
@@ -527,6 +617,149 @@ Future<void> _resetDatabase(
   await fixture.copy(path);
 }
 
+/// Chụp cây widget hiện tại thành ảnh RGBA. Chạy BÊN TRONG tester.runAsync vì
+/// toImage là I/O thật. Trả null nếu cây chưa có layer (app chưa vẽ được khung nào).
+Future<ui.Image?> _captureScreenImage(WidgetTester tester) async {
+  final elements = find.byType(WidgetsApp).evaluate();
+  if (elements.isEmpty) return null;
+  RenderObject? node = elements.first.renderObject;
+  while (node != null && !node.isRepaintBoundary) {
+    node = node.parent;
+  }
+  final layer = node?.debugLayer;
+  if (node == null || layer is! OffsetLayer) return null;
+  return layer.toImage(node.paintBounds);
+}
+
+/// Nạp font thật (Roboto trong Flutter SDK) để chữ trên ảnh là chữ thật thay vì
+/// khối vuông Ahem. Roboto phủ đầy đủ tiếng Việt. Nạp CÙNG font cho cả lúc chụp
+/// ảnh chuẩn lẫn lúc chấm nên hai bên luôn công bằng; SDK thiếu font thì bỏ qua —
+/// hai bên cùng Ahem, phép so vẫn đúng.
+bool _fontsLoaded = false;
+Future<void> _loadRealFonts() async {
+  if (_fontsLoaded) return;
+  _fontsLoaded = true;
+  final root = Platform.environment['FLUTTER_ROOT'] ?? '';
+  if (root.isEmpty) return;
+  final dir = Directory(p.join(root, 'bin', 'cache', 'artifacts', 'material_fonts'));
+  if (!dir.existsSync()) return;
+  try {
+    final loader = FontLoader('Roboto');
+    for (final file in dir.listSync().whereType<File>()) {
+      final name = p.basename(file.path);
+      if (name.startsWith('Roboto-') && name.endsWith('.ttf')) {
+        loader.addFont(Future.value(ByteData.view(file.readAsBytesSync().buffer)));
+      }
+    }
+    await loader.load();
+  } catch (_) {
+    // Thiếu font không được làm hỏng lượt chấm.
+  }
+}
+
+/// Ghi ảnh chuẩn lúc capture oracle: nằm cạnh captured-output.db để
+/// GoldenOracleCaptureService nhặt về cùng một chỗ.
+Future<void> _saveGoldenScreenshot(WidgetTester tester) async {
+  await tester.runAsync(() async {
+    final outputPath = Platform.environment['GRADER_CAPTURE_OUTPUT_PATH'] ?? '';
+    if (outputPath.isEmpty) return;
+    final image = await _captureScreenImage(tester);
+    if (image == null) return;
+    final png = await image.toByteData(format: ui.ImageByteFormat.png);
+    if (png == null) return;
+    final target = File(p.join(File(outputPath).parent.path, 'captured-screen.png'));
+    target.parent.createSync(recursive: true);
+    target.writeAsBytesSync(png.buffer.asUint8List());
+    stdout.writeln('Đã chụp ảnh chuẩn: ${target.path}');
+  });
+}
+
+/// Ảnh bằng chứng lúc CHẤM: mỗi luồng một tệp <execution_code>.png trong thư mục
+/// GRADER_EVIDENCE_DIR do backend mount riêng cho từng bài. Không đặt biến = không ghi gì.
+Future<void> _saveEvidenceScreenshot(WidgetTester tester, String executionCode) async {
+  final dir = Platform.environment['GRADER_EVIDENCE_DIR'] ?? '';
+  if (dir.isEmpty || executionCode.isEmpty) return;
+  try {
+    await tester.runAsync(() async {
+      final image = await _captureScreenImage(tester);
+      if (image == null) return;
+      final png = await image.toByteData(format: ui.ImageByteFormat.png);
+      if (png == null) return;
+      final target = File(p.join(dir, '$executionCode.png'));
+      target.parent.createSync(recursive: true);
+      target.writeAsBytesSync(png.buffer.asUint8List());
+    });
+  } catch (e) {
+    // Bang chung la phu, diem la chinh — nhung PHAI de lai dau vet, khong duoc cam.
+    stdout.writeln('Không chụp được ảnh bằng chứng ($executionCode): $e');
+  }
+}
+
+/// So màn hình hiện tại với ảnh chuẩn của luồng. Mỗi pixel lệch quá 16/255 ở bất kỳ
+/// kênh màu nào tính là KHÁC; tỉ lệ pixel giống phải đạt ngưỡng của checkpoint.
+Future<void> _assertScreenMatch(
+  WidgetTester tester,
+  Map<String, dynamic> checkpoint,
+  String executionCode,
+) async {
+  final goldenFile = File(p.join('test', 'fixtures', 'screens', '$executionCode.png'));
+  if (!goldenFile.existsSync()) {
+    throw StateError(
+      'Bộ đề thiếu ảnh chuẩn ${goldenFile.path} — hãy capture lại oracle rồi publish lại.',
+    );
+  }
+  final threshold = _double(checkpoint['threshold'], 0.85);
+  double? ratio;
+  await tester.runAsync(() async {
+    final golden = await _decodeRgba(goldenFile.readAsBytesSync());
+    final current = await _captureScreenImage(tester);
+    if (current == null) {
+      throw StateError('Không chụp được màn hình bài làm để so với ảnh mẫu.');
+    }
+    final actual = await current.toByteData(format: ui.ImageByteFormat.rawRgba);
+    if (actual == null) throw StateError('Không đọc được ảnh màn hình bài làm.');
+    if (golden.$2 != current.width || golden.$3 != current.height) {
+      throw StateError(
+        'Kích thước màn hình ${current.width}x${current.height} khác ảnh mẫu '
+        '${golden.$2}x${golden.$3} — viewport của bộ đề đã đổi sau khi chụp ảnh chuẩn.',
+      );
+    }
+    ratio = _matchRatio(golden.$1, actual.buffer.asUint8List());
+  });
+  final measured = ratio ?? 0;
+  if (measured < threshold) {
+    throw StateError(
+      'Bố cục khớp ${(measured * 100).toStringAsFixed(1)}% với ảnh mẫu, '
+      'dưới ngưỡng ${(threshold * 100).toStringAsFixed(0)}%.',
+    );
+  }
+}
+
+/// Giải mã PNG về (bytes RGBA, rộng, cao).
+Future<(Uint8List, int, int)> _decodeRgba(Uint8List png) async {
+  final codec = await ui.instantiateImageCodec(png);
+  final frame = await codec.getNextFrame();
+  final data = await frame.image.toByteData(format: ui.ImageByteFormat.rawRgba);
+  if (data == null) throw StateError('Không giải mã được ảnh mẫu.');
+  return (data.buffer.asUint8List(), frame.image.width, frame.image.height);
+}
+
+double _matchRatio(Uint8List a, Uint8List b) {
+  final length = a.length < b.length ? a.length : b.length;
+  final pixels = length ~/ 4;
+  if (pixels == 0) return 0;
+  var same = 0;
+  for (var i = 0; i < pixels; i++) {
+    final o = i * 4;
+    if ((a[o] - b[o]).abs() <= 16 &&
+        (a[o + 1] - b[o + 1]).abs() <= 16 &&
+        (a[o + 2] - b[o + 2]).abs() <= 16) {
+      same++;
+    }
+  }
+  return same / pixels;
+}
+
 Future<void> _captureOutputDatabase(
   Map<String, dynamic> contract,
   Map<String, String> variables,
@@ -632,8 +865,18 @@ Finder _finder(Map<String, dynamic> target) {
   }
   final text = _text(target, 'text');
   if (text.isNotEmpty) return find.text(text);
+  // TIỀN TỐ VĂN BẢN. Hợp đồng nhãn của đề khai `text_prefix` cho những dòng mà phần
+  // đuôi thay đổi theo dữ liệu — ví dụ "Tổng tháng: 608.000 ₫". find.text so khớp
+  // TUYỆT ĐỐI nên không dùng được ở đây; thiếu nhánh này thì đúng những mục hợp đồng
+  // ấy không có cách nào kiểm.
+  final textPrefix = _text(target, 'text_prefix');
+  if (textPrefix.isNotEmpty) {
+    return find.byWidgetPredicate(
+      (widget) => widget is Text && (widget.data ?? '').startsWith(textPrefix),
+    );
+  }
   throw ArgumentError(
-    'Target không có semanticId/key/label/hint/text: $target',
+    'Target không có semanticId/key/label/hint/text/text_prefix: $target',
   );
 }
 

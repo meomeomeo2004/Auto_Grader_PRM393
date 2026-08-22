@@ -108,7 +108,15 @@ public class GoldenOracleCaptureService {
             }
             reader.join(5_000);
             if (process.exitValue() != 0) {
-                throw new IllegalStateException("Golden replay thất bại: " + limitLog(output.toString()));
+                // Bóc đúng CHECKPOINT NÀO trượt ra đầu thông báo. Không có nó, giáo viên chỉ
+                // thấy "replay thất bại" kèm log thô — không biết phải sửa tiêu chí nào
+                // (đã gặp thật: tick nhầm thành phần của extension trình duyệt, capture chết
+                // mà thông báo không nói lý do).
+                String hong = failedCheckpointSummary(output.toString());
+                throw new IllegalStateException(hong.isBlank()
+                        ? "Golden replay thất bại: " + limitLog(output.toString())
+                        : "Golden replay thất bại — checkpoint không đạt trên chính Golden App:\n" + hong
+                                + "\nKiểm lại các tiêu chí vừa thêm (thành phần có thật trên màn hình đó không?).");
             }
             if (!Files.isRegularFile(captured) || Files.size(captured) == 0) {
                 throw new IllegalStateException("Golden replay kết thúc nhưng không sinh captured-output.db");
@@ -128,6 +136,16 @@ public class GoldenOracleCaptureService {
                             "scenario_id", scenarioId,
                             "execution_code", executionCode,
                             "golden_sha256", golden.getSha256()));
+            // Ảnh chuẩn cho tiêu chí screen_match — engine ghi cạnh captured-output.db.
+            // Bản engine cũ không chụp: vắng file thì bỏ qua, không phải lỗi.
+            Path screenshot = captured.resolveSibling("captured-screen.png");
+            if (Files.isRegularFile(screenshot) && Files.size(screenshot) > 0) {
+                Path screens = artifacts.goldenScreenshotDir(suiteId);
+                Files.createDirectories(screens);
+                Files.copy(screenshot, screens.resolve(executionCode + ".png"),
+                        StandardCopyOption.REPLACE_EXISTING);
+            }
+
             List<Map<String, Object>> checkpoints = artifacts.databaseDiffCheckpoints(suiteId);
             Map<String, Object> completedScenario = authoring.applyDerivedDatabaseCheckpoints(
                     scenarioId, checkpoints, variables, String.valueOf(outputArtifact.get("sha256")));
@@ -217,6 +235,27 @@ public class GoldenOracleCaptureService {
             for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) Files.deleteIfExists(path);
         } catch (Exception ignored) {
         }
+    }
+
+    /** Nhặt các dòng ###RAR_CHECKPOINT### có passed=false: "tên — lý do", mỗi checkpoint một dòng. */
+    private String failedCheckpointSummary(String output) {
+        StringBuilder sb = new StringBuilder();
+        for (String line : output.split("\n")) {
+            int at = line.indexOf("###RAR_CHECKPOINT###");
+            if (at < 0) continue;
+            try {
+                Map<String, Object> item = mapper.readValue(
+                        line.substring(at + "###RAR_CHECKPOINT###".length()).trim(),
+                        new TypeReference<Map<String, Object>>() {});
+                if (Boolean.TRUE.equals(item.get("passed"))) continue;
+                String message = String.valueOf(item.getOrDefault("message", ""));
+                sb.append("  · ").append(item.getOrDefault("test_id", "?"))
+                  .append(": ").append(message.length() > 200 ? message.substring(0, 200) + "…" : message)
+                  .append('\n');
+            } catch (Exception ignored) {
+            }
+        }
+        return sb.toString().trim();
     }
 
     private String limitLog(String value) {

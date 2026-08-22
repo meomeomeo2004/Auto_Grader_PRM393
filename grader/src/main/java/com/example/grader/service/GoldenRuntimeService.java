@@ -29,7 +29,7 @@ import java.util.zip.ZipFile;
 public class GoldenRuntimeService {
     private static final long MAX_EXPANDED_BYTES = 1_000L * 1024 * 1024;
     private static final int MAX_ZIP_ENTRIES = 20_000;
-    private static final String RECORDER_BRIDGE_VERSION = "semantic-v2";
+    private static final String RECORDER_BRIDGE_VERSION = "semantic-v4";   // v4: quét thành phần CHỈ trong flutter-view (v3 vớ nhầm DOM của extension)
 
     @Value("${grader.base-image:grading-base:latest}")
     private String baseImage;
@@ -384,22 +384,43 @@ public class GoldenRuntimeService {
                       send({kind: 'action', stage: 'ACTION', action: 'scroll', ...found, delta: {x: previous.x - current.x, y: previous.y - current.y}, valueType: 'json', value: '', browser: 'flutter_tester'});
                     }, 250));
                   }, true);
-                  function snapshot() {
-                    const nodes = [];
+                  // Phan loai MOT node thanh locator ma engine cham tim lai duoc, DUNG thu tu
+                  // uu tien cua semanticNode (label -> hint -> text). Dong bo hai ham nay la
+                  // bat buoc: item duoc tick phai tro vao dung widget ma luc replay tim thay.
+                  function semanticState(node) {
+                    const label = node.getAttribute('aria-label') || node.getAttribute('data-semantics-label');
+                    if (label && label !== 'Enable accessibility') {
+                      return {target: {label}, attribute: 'label', attributeValue: label, role: node.getAttribute('role') || ''};
+                    }
+                    const hint = node.getAttribute('placeholder');
+                    if (hint) return {target: {hint}, attribute: 'hint', attributeValue: hint, role: 'text_field'};
+                    const text = textOf(node);
+                    if (!text || textLeafCount(node) > 1 || text.length > MAX_TEXT_LOCATOR) return null;
+                    return {target: {text}, attribute: 'text', attributeValue: text, role: node.getAttribute('role') || 'text'};
+                  }
+                  // LIET KE thanh phan man hinh hien tai cho bang tick ben trang soan de.
+                  // Truoc day lenh nay goi ham semanticState CHUA TON TAI — ReferenceError,
+                  // chet im lang, giao vien bam nut ma khong thay gi.
+                  function inventory() {
+                    const items = [];
                     const seen = new Set();
-                    document.querySelectorAll('[aria-label], [data-semantics-label], [data-semantic-id], [data-semantics-id], input, textarea, button, [role]').forEach(node => {
+                    // CHI quet ben trong flutter-view. Quet ca document se vo nham DOM cua
+                    // extension trinh duyet (tu dien, dich thuat...) — nhung thanh phan do
+                    // khong ton tai trong app, tick vao la capture oracle chet vi tim khong thay.
+                    const root = document.querySelector('flutter-view') || document.body;
+                    root.querySelectorAll('[aria-label], [data-semantics-label], input, textarea, [role]').forEach(node => {
                       if (!(node instanceof Element)) return;
                       const state = semanticState(node);
-                      if (!state || state.target.label === 'Enable accessibility') return;
-                      const signature = JSON.stringify([state.target, state.role, state.value, state.enabled, state.checked]);
-                      if (seen.has(signature)) return;
-                      seen.add(signature);
-                      nodes.push(state);
+                      if (!state) return;
+                      const key = state.attribute + '=' + state.attributeValue;
+                      if (seen.has(key)) return;
+                      seen.add(key);
+                      items.push(state);
                     });
-                    send({kind: 'checkpoint', checkpoint: true, scope: 'ui', stage: 'ASSERT', attribute: 'semantic_nodes', attributeValue: '', valueType: 'json', value: nodes, action: 'observe_ui', browser: 'flutter_tester', expect: {semantic_nodes: nodes, no_exception: true}});
+                    window.parent.postMessage({type: 'GOLDEN_RECORDER_INVENTORY', payload: {items}}, '*');
                   }
                   window.addEventListener('message', event => {
-                    if (event.data && event.data.type === COMMAND && event.data.action === 'snapshot_ui') snapshot();
+                    if (event.data && event.data.type === COMMAND && event.data.action === 'snapshot_ui') inventory();
                   });
                   const enable = () => {
                     const placeholder = document.querySelector('flt-semantics-placeholder[aria-label="Enable accessibility"]');

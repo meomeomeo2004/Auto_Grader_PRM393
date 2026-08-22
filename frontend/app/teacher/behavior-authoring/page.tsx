@@ -120,6 +120,15 @@ function BehaviorAuthoringEditor() {
   const [scenarioCode, setScenarioCode] = useState("MAIN_FLOW");
   const [scenarioName, setScenarioName] = useState("Luồng chính");
   const [scenarioWeight, setScenarioWeight] = useState(10);
+  // Bảng tick thành phần giao diện — đổ về từ lệnh quét màn hình của bridge.
+  // null = chưa quét; mảng = đang mở bảng tick.
+  const [uiInventory, setUiInventory] = useState<{ attribute: string; value: string; role: string; checked: boolean }[] | null>(null);
+  const [uiScreenName, setUiScreenName] = useState("");
+  const [uiGroupWeight, setUiGroupWeight] = useState(20);
+  // So bố cục với ảnh chuẩn (chụp từ Golden trong cùng Docker lúc capture oracle).
+  const [screenMatchOn, setScreenMatchOn] = useState(true);
+  const [screenMatchWeight, setScreenMatchWeight] = useState(2);
+  const [screenMatchThreshold, setScreenMatchThreshold] = useState(90);
   const [viewportWidth, setViewportWidth] = useState(390);
   const [viewportHeight, setViewportHeight] = useState(844);
   const [testDesktop, setTestDesktop] = useState(true);
@@ -374,6 +383,61 @@ function BehaviorAuthoringEditor() {
     });
   };
 
+  /**
+   * Lưu các thành phần đã tick thành tiêu chí `component_present` trên phiên ghi hiện tại.
+   * Điểm nhóm chia đều theo bội 0,25; phần dư dồn vào dòng cuối để tổng khớp tuyệt đối.
+   * Tiêu chí neo vào TRẠNG THÁI CUỐI của luồng đang ghi — muốn chấm màn nào, đưa app tới
+   * màn đó rồi quét.
+   */
+  const saveUiCriteria = () => {
+    const recordingId = activeRecordingId.current;
+    const chosen = (uiInventory || []).filter((it) => it.checked);
+    const anything = chosen.length > 0 || (screenMatchOn && Number(screenMatchWeight) > 0);
+    if (!recordingId || !acceptsRecorderEvents.current || recording?.status !== "ACTIVE" || !suite || !anything) return;
+    run("record-ui-criteria", async () => {
+      const screen = uiScreenName.trim() || "Màn hình";
+      const groupId = "G_UI_" + screen.normalize("NFD").replace(/[̀-ͯ]/g, "")
+        .replace(/đ/g, "d").replace(/Đ/g, "D").replace(/[^a-zA-Z0-9]+/g, "_").toUpperCase().replace(/^_+|_+$/g, "");
+      const total = Math.max(0.25, Number(uiGroupWeight) || 0);
+      const per = Math.round((total / chosen.length) * 4) / 4;
+      for (let i = 0; i < chosen.length; i++) {
+        const it = chosen[i];
+        const weight = i === chosen.length - 1
+          ? Math.round((total - per * (chosen.length - 1)) * 4) / 4
+          : per;
+        await api(`/behavior-authoring/recordings/${recordingId}/events`, {
+          method: "POST",
+          body: JSON.stringify({
+            kind: "component_present", checkpoint: true, stage: "ASSERT", action: "observe_ui",
+            browser: "flutter_tester",
+            target: { [it.attribute]: it.value }, visible: true,
+            attribute: it.attribute, attributeValue: it.value, valueType: "string", value: "",
+            name: `${screen} — có ${it.value}`, weight,
+            ui_group: { id: groupId, name: `Giao diện — ${screen}` },
+          }),
+        });
+      }
+      let extra = 0;
+      if (screenMatchOn && Number(screenMatchWeight) > 0) {
+        await api(`/behavior-authoring/recordings/${recordingId}/events`, {
+          method: "POST",
+          body: JSON.stringify({
+            kind: "screen_match", checkpoint: true, stage: "ASSERT", action: "observe_ui",
+            browser: "flutter_tester",
+            threshold: Math.min(100, Math.max(1, Number(screenMatchThreshold))) / 100,
+            weight: Math.round(Number(screenMatchWeight) * 4) / 4,
+            name: `${screen} — bố cục khớp ảnh mẫu (≥${screenMatchThreshold}%)`,
+            ui_group: { id: groupId, name: `Giao diện — ${screen}` },
+          }),
+        });
+        extra = 1;
+      }
+      setUiInventory(null);
+      setNotice(`Đã lưu ${chosen.length + extra} tiêu chí giao diện (nhóm "${screen}").`);
+      await refresh(suite.id);
+    });
+  };
+
   const appendUiCheckpoint = () => {
     const recordingId = activeRecordingId.current;
     const textReady = Boolean(checkpointText.trim() || hiddenCheckpointText.trim());
@@ -587,6 +651,18 @@ function BehaviorAuthoringEditor() {
         setRecorderReady(true);
         return;
       }
+      if (event.data.type === "GOLDEN_RECORDER_INVENTORY") {
+        const items = Array.isArray(event.data.payload?.items) ? event.data.payload.items : [];
+        setUiInventory(items
+          .filter((it: JsonMap) => typeof it?.attribute === "string" && typeof it?.attributeValue === "string")
+          .map((it: JsonMap) => ({
+            attribute: String(it.attribute), value: String(it.attributeValue), role: String(it.role || ""),
+            // label/hint là thành phần ngữ nghĩa thật (nút, ô nhập) → tick sẵn. Chữ trần có
+            // thể là DỮ LIỆU đang hiển thị chứ không phải khung màn hình — để giảng viên tự cân nhắc.
+            checked: it.attribute === "label" || it.attribute === "hint",
+          })));
+        return;
+      }
       if (event.data.type === "GOLDEN_RECORDER_WARNING") {
         const message = event.data.payload?.message;
         if (typeof message === "string") setNotice(message);
@@ -659,8 +735,46 @@ function BehaviorAuthoringEditor() {
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 <button onClick={deployGoldenRuntime} disabled={!activeByType.GOLDEN_SOLUTION || Boolean(busy)} className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-40">{busy === "runtime-deploy" ? <Loader2 size={16} className="animate-spin" /> : <MonitorPlay size={16} />} Build & mở Golden</button>
                 <span className={`rounded-full px-3 py-1 text-xs font-bold ${recorderReady ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300" : "bg-slate-100 text-slate-500 dark:bg-slate-800"}`}>{recorderReady ? "Recorder đã kết nối" : runtimeStatus?.status || "Chưa build"}</span>
-                {recording && recorderReady && <button onClick={captureUiSnapshot} className="inline-flex items-center gap-2 rounded-lg border border-emerald-400 px-3 py-2 text-xs font-bold text-emerald-700 dark:text-emerald-300"><Check size={15} /> Chụp semantic UI</button>}
+                {recording && recorderReady && <button onClick={captureUiSnapshot} title="Liệt kê thành phần của màn hình đang mở trong Golden App để tick thành tiêu chí giao diện" className="inline-flex items-center gap-2 rounded-lg border border-emerald-400 px-3 py-2 text-xs font-bold text-emerald-700 dark:text-emerald-300"><Check size={15} /> Quét thành phần UI</button>}
               </div>
+              {uiInventory && (
+                <div className="mt-3 rounded-xl border border-emerald-300 bg-emerald-50/40 p-3 dark:border-emerald-800 dark:bg-emerald-950/20">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-bold">Tiêu chí giao diện — tick thành phần được tính điểm</span>
+                    <input value={uiScreenName} onChange={(e) => setUiScreenName(e.target.value)} placeholder="Tên màn (vd: Màn danh sách)" className="rounded-lg border border-slate-300 px-2 py-1 text-sm dark:border-slate-600 dark:bg-slate-800" />
+                    <label className="flex items-center gap-1 text-sm">Điểm nhóm
+                      <input type="number" min={0.25} step={0.25} value={uiGroupWeight} onChange={(e) => setUiGroupWeight(Number(e.target.value))} className="w-20 rounded-lg border border-slate-300 px-2 py-1 text-sm dark:border-slate-600 dark:bg-slate-800" />
+                    </label>
+                    <button onClick={saveUiCriteria} disabled={Boolean(busy) || (!uiInventory.some((it) => it.checked) && !screenMatchOn)} className="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-bold text-white disabled:opacity-40">
+                      Lưu {uiInventory.filter((it) => it.checked).length + (screenMatchOn ? 1 : 0)} tiêu chí
+                    </button>
+                    <button onClick={() => setUiInventory(null)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-bold text-slate-600 dark:border-slate-600 dark:text-slate-300">Đóng</button>
+                  </div>
+                  <label className="mt-2 flex cursor-pointer flex-wrap items-center gap-2 rounded-lg border border-dashed border-emerald-400 px-2 py-1.5 text-sm dark:border-emerald-700">
+                    <input type="checkbox" checked={screenMatchOn} onChange={() => setScreenMatchOn((v) => !v)} />
+                    <span className="font-bold">So bố cục với ảnh mẫu</span>
+                    <span className="text-[11px] text-slate-500">(đo thật trên đề POC: cùng app ≈100% · chỉ sai màu chủ đạo ≈97% · bố cục khác hẳn ≈83% — muốn bắt cả sai màu thì đặt ngưỡng 98)</span>
+                    <span className="ml-auto flex items-center gap-1 text-xs">
+                      <input type="number" min={0.25} step={0.25} value={screenMatchWeight} onChange={(e) => setScreenMatchWeight(Number(e.target.value))} className="w-16 rounded border border-slate-300 px-1.5 py-0.5 dark:border-slate-600 dark:bg-slate-800" /> điểm ·
+                      ngưỡng <input type="number" min={50} max={100} value={screenMatchThreshold} onChange={(e) => setScreenMatchThreshold(Number(e.target.value))} className="w-14 rounded border border-slate-300 px-1.5 py-0.5 dark:border-slate-600 dark:bg-slate-800" />%
+                    </span>
+                  </label>
+                  <div className="mt-2 grid max-h-56 gap-1 overflow-auto pr-1">
+                    {uiInventory.map((it, i) => (
+                      <label key={`${it.attribute}-${it.value}`} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 text-sm hover:bg-emerald-100/60 dark:hover:bg-emerald-900/30">
+                        <input type="checkbox" checked={it.checked} onChange={() => setUiInventory((prev) => prev ? prev.map((x, j) => (j === i ? { ...x, checked: !x.checked } : x)) : prev)} />
+                        <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold ${it.attribute === "label" ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300" : it.attribute === "hint" ? "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300" : "bg-slate-100 text-slate-500 dark:bg-slate-800"}`}>{it.attribute}</span>
+                        <span className="truncate">{it.value}</span>
+                        {it.role && <span className="ml-auto text-[10px] text-slate-400">{it.role}</span>}
+                      </label>
+                    ))}
+                  </div>
+                  <p className="mt-2 text-[11px] text-slate-500">
+                    Nút và ô nhập (label/hint) được tick sẵn. Chữ trần (text) có thể là dữ liệu đang hiển thị — chỉ tick khi nó là khung màn hình
+                    (tiêu đề, nhãn cố định). Tiêu chí neo vào trạng thái cuối của luồng đang ghi: đưa app tới đúng màn cần chấm rồi mới quét.
+                  </p>
+                </div>
+              )}
               {previewUrl ? <div className="mt-4 w-full overflow-auto rounded-xl border border-slate-300 bg-slate-100 p-3 dark:border-slate-700 dark:bg-slate-950"><iframe ref={goldenFrame} title="Golden App" src={previewUrl} style={{ width: Math.min(viewportWidth, 900), minWidth: Math.min(viewportWidth, 900), height: Math.min(viewportHeight, 700) }} className="mx-auto block rounded-lg border border-slate-300 bg-white dark:border-slate-700" /></div> : <div className="mt-4 flex h-[300px] flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 text-center dark:border-slate-700"><MonitorPlay size={42} className="text-slate-400" /><p className="mt-3 font-bold">Golden Solution chưa được build để thao tác</p><p className="mt-1 max-w-md text-sm text-slate-500">Upload Golden ZIP rồi bấm “Build & mở Golden”. Hệ thống tự host app và ghi click/nhập liệu bằng semantic locator.</p></div>}
             </div>
 

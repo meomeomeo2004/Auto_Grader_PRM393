@@ -344,7 +344,28 @@ public class BehaviorSuiteMaterializer {
         manifest.put("criterion_count", cases.size());
         manifest.put("artifact_manifest", Optional.ofNullable(artifacts.activeManifest(suiteId)).orElse(Map.of()));
         writeJson(target.resolve("suite_manifest.json"), manifest);
+
+        // Ảnh chuẩn cho screen_match: chép nguyên thư mục <artifactRoot>/<suite>/golden_screenshot
+        // (mỗi luồng một tệp <execution_code>.png, capture ghi đè) vào bộ đề đã publish.
+        Path screens = artifacts.goldenScreenshotDir(suiteId);
+        if (Files.isDirectory(screens)) {
+            Path dest = target.resolve("fixtures").resolve("screens");
+            Files.createDirectories(dest);
+            try (var pngs = Files.list(screens)) {
+                for (Path png : pngs.filter(f -> f.getFileName().toString().endsWith(".png")).toList()) {
+                    Files.copy(png, dest.resolve(png.getFileName().toString()),
+                            StandardCopyOption.REPLACE_EXISTING);
+                }
+            }
+        }
     }
+
+    /**
+     * Checkpoint mang trọng số TUYỆT ĐỐI (điểm khai lúc tick, không chia theo scenario)
+     * và chỉ chạy trên viewport đầu: thành phần giao diện và so ảnh bố cục.
+     */
+    private static final java.util.Set<String> ABSOLUTE_WEIGHT_KINDS =
+            java.util.Set.of("component_present", "screen_match");
 
     private List<Map<String, Object>> expandCases(Map<String, Object> plan, String suiteCode) {
         List<Map<String, Object>> out = new ArrayList<>();
@@ -358,10 +379,15 @@ public class BehaviorSuiteMaterializer {
                         "name", "default", "width", 390, "height", 844, "device_pixel_ratio", 1));
             }
             double scenarioWeight = number(scenario.get("weight"), 1.0);
+            // Tiêu chí GIAO DIỆN mang trọng số TUYỆT ĐỐI (điểm của nhóm chia đều lúc tick),
+            // KHÔNG tham gia phần chia trọng số của scenario — nếu tham gia, thêm một thành
+            // phần giao diện sẽ pha loãng điểm của chính các checkpoint chức năng cùng luồng.
             double checkpointTotal = checkpoints.stream()
                     .map(BehaviorSuiteMaterializer::map)
+                    .filter(item -> !ABSOLUTE_WEIGHT_KINDS.contains(text(item, "kind")))
                     .mapToDouble(item -> Math.max(0.0001, number(item.get("weight"), 1.0)))
                     .sum();
+            if (checkpointTotal <= 0) checkpointTotal = 1.0;
             int index = 0;
             for (Object rawCheckpoint : checkpoints) {
                 Map<String, Object> checkpoint = map(rawCheckpoint);
@@ -370,12 +396,17 @@ public class BehaviorSuiteMaterializer {
                 if (checkpointId.isBlank()) checkpointId = "CHECKPOINT_" + index;
                 boolean databaseCheckpoint = "database_observation".equals(text(checkpoint, "kind"))
                         || "database".equals(text(checkpoint, "scope"));
-                List<Object> checkpointViewports = databaseCheckpoint
+                boolean componentCheckpoint = ABSOLUTE_WEIGHT_KINDS.contains(text(checkpoint, "kind"));
+                // Thành phần giao diện không đổi theo bề ngang màn hình (đó là việc của tầng
+                // bố cục) → chỉ chạy trên viewport đầu, khỏi nhân bản testcase lẫn trọng số.
+                List<Object> checkpointViewports = databaseCheckpoint || componentCheckpoint
                         ? List.of(first(scenarioViewports))
                         : scenarioViewports;
-                double checkpointWeight = scenarioWeight
-                        * Math.max(0.0001, number(checkpoint.get("weight"), 1.0))
-                        / checkpointTotal;
+                double checkpointWeight = componentCheckpoint
+                        ? number(checkpoint.get("weight"), 1.0)
+                        : scenarioWeight
+                                * Math.max(0.0001, number(checkpoint.get("weight"), 1.0))
+                                / checkpointTotal;
                 int viewportIndex = 0;
                 for (Object rawViewport : checkpointViewports) {
                     viewportIndex++;
@@ -416,19 +447,28 @@ public class BehaviorSuiteMaterializer {
             Map<String, Object> checkpoint = map(item.get("checkpoint"));
             String expected = text(checkpoint, "expected");
             if (expected.isBlank()) expected = "Kết quả phải khớp observation của Golden App.";
+            boolean component = ABSOLUTE_WEIGHT_KINDS.contains(text(checkpoint, "kind"));
+            Map<String, Object> uiGroup = map(checkpoint.get("ui_group"));
             Map<String, Object> metadata = new LinkedHashMap<>();
             metadata.put("instance_id", item.get("test_id"));
             metadata.put("runner", "BEHAVIOR_REPLAY");
             metadata.put("scenario_code", item.get("scenario_code"));
             metadata.put("execution_code", item.get("execution_code"));
             metadata.put("checkpoint_id", checkpoint.get("id"));
-            metadata.put("skill_code", item.get("skill_code"));
-            metadata.put("testcase_group", "BEHAVIOR");
-            metadata.put("layer", "behavior");
-            metadata.put("name", item.get("name"));
+            metadata.put("skill_code", component ? "UI_LAYOUT" : item.get("skill_code"));
+            metadata.put("testcase_group", component ? "UI" : "BEHAVIOR");
+            metadata.put("layer", component ? "ui" : "behavior");
+            // Nhóm là cấp mà điểm lẻ nổi lên (đạt 3/4 thành phần = 15/20) và là cấp đối
+            // chiếu với phiếu chấm tay — thiếu group_id thì mỗi dòng lẻ loi không quy về đâu.
+            if (!uiGroup.isEmpty()) {
+                metadata.put("group_id", uiGroup.get("id"));
+                metadata.put("group_name", uiGroup.get("name"));
+            }
+            metadata.put("name", component && !text(checkpoint, "name").isBlank()
+                    ? checkpoint.get("name") : item.get("name"));
             metadata.put("description", item.get("description"));
             metadata.put("expected", expected);
-            metadata.put("difficulty", "intermediate");
+            metadata.put("difficulty", component ? "basic" : "intermediate");
             metadata.put("weight", item.get("weight"));
             matrix.put(String.valueOf(item.get("test_id")), metadata);
         }
