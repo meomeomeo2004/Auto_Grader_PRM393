@@ -6,7 +6,6 @@ import SidebarLayout from "@/components/layout/SidebarLayout";
 import { API_BASE, PASS_THRESHOLD } from "@/lib/config";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { Tooltip } from "@/components/ui/Tooltip";
-import CompetencyPanel, { CompetencyItem } from "@/components/grading/CompetencyPanel";
 import { gradingStatusLabel, gradingStatusTone, type GradingOutcome } from "@/lib/gradingStatus";
 import { findRunningSession, upsertStoredSession } from "@/lib/gradingSessions";
 import SelectMenu from "@/components/ui/SelectMenu";
@@ -20,9 +19,9 @@ import {
 interface ExamOption { examId: string; examName: string; }
 interface TestCaseItem {
   test_id?: string; name?: string; status?: string; executed?: boolean; weight?: number;
-  skill_code?: string; skill_name?: string; category_label?: string;
+  skill_code?: string;
   difficulty?: string; skill?: string;
-  expected?: string; actual?: string; error_log?: string;
+  actual?: string; error_log?: string;
   // `actual_source === "observation"` = `actual` đã là câu tiếng Việt sạch, hiển thị thẳng.
   // Vắng cờ = dữ liệu chấm trước P5, `actual` có thể còn là log thô → phải parse.
   actual_source?: string;
@@ -45,7 +44,6 @@ interface DetailData {
     total_scenarios?: number;
     total_criteria?: number;
   };
-  competency_assessment?: CompetencyItem[];
   test_cases?: TestCaseItem[];
 }
 interface ResultRow {
@@ -141,13 +139,17 @@ const ERR_BADGE: Record<string, string> = {
  *
  * P2b đã bỏ `error.message` và `student_safe_summary` — hai câu tra bảng theo mã lỗi, không phải
  * điều quan sát được. Chỉ còn `error_code` làm nhãn phân loại.
+ *
+ * 2026-08-22 bỏ tiếp `expected`: tên tiêu chí đã tự mô tả đủ, in thêm một câu đặc tả nữa chỉ
+ * làm khối lỗi dài ra mà không nói thêm điều gì về BÀI NÀY.
  */
-function FailureDetail({ requirement, actual, errorCode, actualSource }:
-  { requirement?: string; actual?: string; errorCode?: string; actualSource?: string }) {
-  if (actualSource === "observation") {
+function FailureDetail({ actual, errorCode, actualSource }:
+  { actual?: string; errorCode?: string; actualSource?: string }) {
+  // CÓ cờ nguồn = câu đã được tầng chấm viết sẵn, in thẳng. Vắng cờ = dữ liệu đời cũ,
+  // `actual` có thể còn là log thô của flutter test nên mới phải bóc.
+  if (actualSource) {
     return (
       <div className="mt-1 space-y-0.5 pl-3.5 text-[11px] text-rose-500">
-        {requirement && <p><span className="font-semibold">Đề yêu cầu:</span> {requirement}</p>}
         {actual && <p><span className="font-semibold">Quan sát được:</span> {actual}</p>}
         {errorCode && (
           <p className="flex flex-wrap items-baseline gap-1.5">
@@ -180,7 +182,6 @@ function FailureDetail({ requirement, actual, errorCode, actualSource }:
 
   return (
     <div className="mt-1 space-y-0.5 pl-3.5 text-[11px] text-rose-500">
-      {requirement && <p><span className="font-semibold">Yêu cầu:</span> {requirement}</p>}
       <Row label="Expected" value={exp} />
       <Row label="Actual (thực tế)" value={act} />
       {lyDo && <p><span className="font-semibold">Lý do:</span> {lyDo}</p>}
@@ -419,7 +420,7 @@ export default function HistoryPage() {
     setQ("");
   };
 
-  // Mở modal chi tiết: tải result_json đầy đủ (có competency_assessment + test_cases)
+  // Mở modal chi tiết: tải result_json đầy đủ (test_cases)
   const openDetail = async (r: ResultRow) => {
     if (!selected || !r.hasJson) return;
     setDetailRow(r);
@@ -1160,12 +1161,10 @@ export default function HistoryPage() {
                         / {detail.grading_result?.total_scenarios ?? detail.grading_result?.total_tests ?? 0}
                       </p>
                       {detail.grading_result?.total_criteria != null && (
-                        <p>{detail.grading_result.total_criteria} tiêu chí rubric</p>
+                        <p>{detail.grading_result.total_criteria} tiêu chí</p>
                       )}
                     </div>
                   </div>
-
-                  <CompetencyPanel items={detail.competency_assessment} />
 
                   {/* Danh sách testcase */}
                   {detail.test_cases && detail.test_cases.length > 0 && (
@@ -1196,12 +1195,12 @@ export default function HistoryPage() {
                                     Chưa chạy
                                   </span>
                                 )}
-                                {(tc.skill_name || tc.skill_code) && (
+                                {tc.skill_code && (
                                   <span
                                     className="shrink-0 rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600"
-                                    title={`${tc.category_label ? tc.category_label + " · " : ""}${tc.skill_code || ""}`}
+                                    title={tc.skill_code || ""}
                                   >
-                                    {tc.skill_name || tc.skill_code}
+                                    {tc.skill_code}
                                   </span>
                                 )}
                                 {tc.difficulty && (
@@ -1210,16 +1209,13 @@ export default function HistoryPage() {
                                   </span>
                                 )}
                               </div>
-                              {(tc.category_label || tc.skill_code) && (
+                              {tc.skill_code && (
                                 <p className="mt-0.5 pl-3.5 text-[10px] text-slate-400">
-                                  {tc.category_label}
-                                  {tc.category_label && tc.skill_code ? " · " : ""}
                                   {tc.skill_code}
                                 </p>
                               )}
-                              {!passed && (tc.expected || tc.actual || tc.error_log || tc.error_code) && (
+                              {!passed && (tc.actual || tc.error_log || tc.error_code) && (
                                 <FailureDetail
-                                  requirement={tc.expected}
                                   actual={tc.actual || tc.error_log}
                                   errorCode={tc.error_code}
                                   actualSource={tc.actual_source}
