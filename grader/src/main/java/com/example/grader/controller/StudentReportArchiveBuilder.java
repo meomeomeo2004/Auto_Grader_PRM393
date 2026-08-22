@@ -2,15 +2,37 @@ package com.example.grader.controller;
 
 import com.example.grader.entity.ExamResult;
 import com.example.grader.entity.GradingOutcome;
+import org.apache.poi.ss.usermodel.BorderStyle;
+import org.apache.poi.ss.usermodel.ClientAnchor;
+import org.apache.poi.ss.usermodel.Drawing;
+import org.apache.poi.ss.usermodel.FillPatternType;
+import org.apache.poi.ss.usermodel.HorizontalAlignment;
+import org.apache.poi.ss.usermodel.Picture;
+import org.apache.poi.ss.usermodel.VerticalAlignment;
+import org.apache.poi.ss.usermodel.Workbook;
+import org.apache.poi.ss.util.CellRangeAddress;
+import org.apache.poi.xssf.usermodel.XSSFCell;
+import org.apache.poi.xssf.usermodel.XSSFCellStyle;
+import org.apache.poi.xssf.usermodel.XSSFColor;
+import org.apache.poi.xssf.usermodel.XSSFFont;
+import org.apache.poi.xssf.usermodel.XSSFRow;
+import org.apache.poi.xssf.usermodel.XSSFSheet;
+import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
 import java.util.function.UnaryOperator;
+import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -21,32 +43,36 @@ import java.util.zip.ZipOutputStream;
  * Result_of_&lt;đề&gt;/
  * └── HE180037/
  *     ├── HE180037.json      kết quả đầy đủ (đúng bản "Xuất JSON")
- *     ├── HE180037.xls       bảng tối giản: từng testcase passed/failed/not_run
- *     ├── feedback.txt       nhận xét của feedback bot; chưa chạy bot thì là placeholder
- *     └── logs/grading.log   bằng chứng chấm: chẩn đoán, lỗi runner, danh sách testcase hỏng
+ *     ├── HE180037.xlsx      bảng điểm theo NHÓM tiêu chí + chi tiết + ảnh màn hình đối chứng
+ *     └── logs/grading.log   bằng chứng chấm: chẩn đoán, SHA đối chứng, danh sách testcase hỏng
  * </pre>
  *
- * <p><b>Vì sao logs/ chỉ chứa bằng chứng ĐÃ LƯU, không chứa log thô của flutter test:</b> pipeline
- * hiện chỉ giữ lại JSON đã lắp ráp + chẩn đoán (log thô bị bỏ sau khi bóc). Muốn log thô phải sửa
- * đường chấm để chép từng file ra đĩa — đắt và phình dung lượng, trong khi zip bài nộp gốc đã được
- * giữ ở submissions/ cho tranh chấp sâu. File grading.log vì thế là bản TÓM TẮT truy vết đủ để
- * trả lời khiếu nại thường gặp, không phải dump.
+ * <p>feedback.txt (nhận xét bot NLP) đã bỏ khỏi hồ sơ 2026-08-22 — hệ thống chỉ còn tập trung
+ * vào chấm điểm và bằng chứng phúc khảo; nhận xét vẫn xuất riêng được ở nút "Sinh feedback".
+ *
+ * <p>Ảnh trong .xlsx: mỗi luồng thao tác một cặp <b>ảnh mẫu (Golden)</b> — <b>ảnh bài làm</b>,
+ * chụp tại cùng điểm dừng, cùng container Docker, cùng font. Sinh viên phúc khảo nhìn thẳng
+ * vào thứ máy đã nhìn.
  */
 final class StudentReportArchiveBuilder {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final DateTimeFormatter TIME =
             DateTimeFormatter.ofPattern("HH:mm:ss dd/M/yyyy").withZone(ZoneId.systemDefault());
-    /** Ô Excel: viền + cỡ chữ pt (Excel đọc px sai — xem exportExcel bên frontend). */
-    private static final String CELL = "border:1px solid #CBD5E1;font-size:12.0pt;";
-    /** Ép ô dạng CHỮ — thiếu nó thì "12/30" bị Excel đổi thành ngày 30/12. */
-    private static final String AS_TEXT = "mso-number-format:'\\@';";
 
     /** Chuẩn hoá JSON trước khi ghi (controller đưa {@code pretty} của nó vào để dùng chung). */
     private final UnaryOperator<String> jsonNormalizer;
+    /** fixtures/screens của bộ đề — ảnh chuẩn theo execution_code; null/không tồn tại = bỏ qua. */
+    private final Path goldenScreensDir;
+    /** Thư mục ảnh bằng chứng của TỪNG bài (submissions/&lt;đề&gt;/&lt;batch&gt;/_evidence/&lt;SV&gt;). */
+    private final Function<ExamResult, Path> evidenceDirFor;
 
-    StudentReportArchiveBuilder(UnaryOperator<String> jsonNormalizer) {
+    StudentReportArchiveBuilder(UnaryOperator<String> jsonNormalizer,
+                                Path goldenScreensDir,
+                                Function<ExamResult, Path> evidenceDirFor) {
         this.jsonNormalizer = jsonNormalizer;
+        this.goldenScreensDir = goldenScreensDir;
+        this.evidenceDirFor = evidenceDirFor == null ? row -> null : evidenceDirFor;
     }
 
     byte[] build(String examId, List<ExamResult> rows) throws Exception {
@@ -68,8 +94,7 @@ final class StudentReportArchiveBuilder {
                 String studentJson = jsonNormalizer.apply(json);
                 dir(zip, home);
                 file(zip, home + sid + ".json", studentJson);
-                file(zip, home + sid + ".xls", studentXls(row, result));
-                file(zip, home + "feedback.txt", feedbackText(row));
+                binary(zip, home + sid + ".xlsx", studentXlsx(row, result));
                 dir(zip, home + "logs/");
                 file(zip, home + "logs/grading.log", gradingLog(examId, row, result, sha256(studentJson)));
             }
@@ -77,86 +102,239 @@ final class StudentReportArchiveBuilder {
         return bytes.toByteArray();
     }
 
-    // ── Excel tối giản cho sinh viên ────────────────────────────────
-    private String studentXls(ExamResult row, JsonNode result) {
-        int[] manual = manualPassCounts(row.getManualJson());
-        JsonNode grading = result.path("grading_result");
-        int passed = grading.path("passed_tests").asInt(0);
-        int total = grading.path("total_tests").asInt(0);
-        boolean edited = row.getManualScore() != null;
+    // ── .xlsx: điểm theo nhóm + chi tiết + ảnh đối chứng ────────────
+    private byte[] studentXlsx(ExamResult row, JsonNode result) throws Exception {
+        try (XSSFWorkbook wb = new XSSFWorkbook();
+             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            XSSFSheet sheet = wb.createSheet("Ket qua");
+            int[] widths = {5, 26, 40, 12, 12, 60};
+            for (int i = 0; i < widths.length; i++) sheet.setColumnWidth(i, widths[i] * 256);
 
-        StringBuilder sb = new StringBuilder("﻿<html><head><meta charset=\"utf-8\"></head><body>");
+            Styles st = new Styles(wb);
+            int r = 0;
 
-        // Khối tóm tắt — cùng thông tin với nút "Xuất Excel" của trang Lịch sử.
-        sb.append("<table style=\"border-collapse:collapse\">");
-        summaryRow(sb, "Mã SV", row.getStudentId(), true);
-        summaryRow(sb, "Bộ testcase", row.getExamId(), true);
-        summaryRow(sb, "Trạng thái", edited ? "Edited" : "Đã xong", false);
-        summaryRow(sb, "Điểm", edited
-                ? fmt(row.getManualScore()) + "/" + fmt(row.getScore())
-                : fmt(row.getScore()), true);
-        summaryRow(sb, "TC RATE", manual != null && edited
-                ? manual[0] + "/" + manual[1]
-                : passed + "/" + total, true);
-        summaryRow(sb, "Thời gian chấm", row.getUpdatedAt() == null ? "" : TIME.format(row.getUpdatedAt()), true);
-        sb.append("</table><br/>");
+            // ── Khối tóm tắt ─────────────────────────────────────
+            r = title(sheet, st, r, "HỒ SƠ KẾT QUẢ — " + nvl(row.getStudentId()));
+            int[] manual = manualPassCounts(row.getManualJson());
+            JsonNode grading = result.path("grading_result");
+            boolean edited = row.getManualScore() != null;
+            r = info(sheet, st, r, "Mã sinh viên", nvl(row.getStudentId()));
+            if (row.getStudentName() != null && !row.getStudentName().isBlank()) {
+                r = info(sheet, st, r, "Họ tên", row.getStudentName());
+            }
+            r = info(sheet, st, r, "Bộ đề", nvl(row.getExamId()));
+            r = info(sheet, st, r, "Điểm", edited
+                    ? fmt(row.getManualScore()) + " (máy chấm: " + fmt(row.getScore()) + ")"
+                    : fmt(row.getScore()));
+            r = info(sheet, st, r, "Tiêu chí đạt", manual != null && edited
+                    ? manual[0] + "/" + manual[1] + " (chấm tay)"
+                    : grading.path("passed_tests").asInt(0) + "/" + grading.path("total_tests").asInt(0));
+            r = info(sheet, st, r, "Thời gian chấm",
+                    row.getUpdatedAt() == null ? "" : TIME.format(row.getUpdatedAt()));
+            r = info(sheet, st, r, "SHA-256 bài nộp",
+                    row.getSubmissionHash() == null ? "(không ghi được)" : row.getSubmissionHash());
+            r++;
 
-        // Bảng testcase: mỗi dòng một test, màu theo trạng thái để sinh viên quét mắt là hiểu.
-        sb.append("<table style=\"border-collapse:collapse\"><thead><tr>");
-        for (String h : new String[]{"STT", "Test case", "Trạng thái", "Điểm", "Kết quả quan sát"}) {
-            sb.append("<th style=\"").append(CELL).append("background:#EEF2FF\">").append(esc(h)).append("</th>");
+            // ── Điểm theo NHÓM — đúng hình phân bổ điểm của hệ thống ──
+            // Điểm lẻ của bài nổi lên ở cấp nhóm (đạt 3/4 thành phần = 15/20), nên đây là
+            // bảng sinh viên cần đọc TRƯỚC: nó nói mất điểm Ở ĐÂU trước khi nói vì sao.
+            Map<String, double[]> groups = new LinkedHashMap<>();   // {đạt, tổng, điểm, tối đa}
+            Map<String, String> groupLabel = new LinkedHashMap<>();
+            for (JsonNode tc : result.path("test_cases")) {
+                String key = tc.path("group_id").asText("");
+                String label = tc.path("group_name").asText("");
+                if (key.isBlank()) key = label.isBlank() ? "KHAC" : label;
+                if (label.isBlank()) label = "Tiêu chí khác";
+                groupLabel.putIfAbsent(key, label);
+                double[] g = groups.computeIfAbsent(key, k -> new double[4]);
+                boolean passed = "passed".equals(tc.path("status").asText(""));
+                double max = tc.path("max_score").asDouble(0);
+                g[1]++;
+                g[3] += max;
+                if (passed) { g[0]++; g[2] += max; }
+            }
+            r = header(sheet, st, r, "ĐIỂM THEO NHÓM TIÊU CHÍ",
+                    new String[]{"", "Nhóm", "", "Đạt", "Điểm", ""});
+            double earned = 0, total = 0;
+            for (Map.Entry<String, double[]> e : groups.entrySet()) {
+                double[] g = e.getValue();
+                earned += g[2]; total += g[3];
+                XSSFRow line = sheet.createRow(r++);
+                cell(line, 1, groupLabel.get(e.getKey()), st.plain);
+                sheet.addMergedRegion(new CellRangeAddress(r - 1, r - 1, 1, 2));
+                cell(line, 3, (int) g[0] + "/" + (int) g[1], st.center);
+                cell(line, 4, num(g[2]) + "/" + num(g[3]), st.center);
+            }
+            XSSFRow sum = sheet.createRow(r++);
+            cell(sum, 1, "TỔNG", st.boldPlain);
+            sheet.addMergedRegion(new CellRangeAddress(r - 1, r - 1, 1, 2));
+            cell(sum, 4, num(earned) + "/" + num(total), st.boldCenter);
+            r++;
+
+            // ── Chi tiết từng tiêu chí ───────────────────────────
+            r = header(sheet, st, r, "CHI TIẾT TIÊU CHÍ",
+                    new String[]{"STT", "Nhóm", "Tiêu chí", "Trạng thái", "Điểm", "Quan sát được"});
+            int idx = 0;
+            for (JsonNode tc : result.path("test_cases")) {
+                idx++;
+                String status = tc.path("status").asText("");
+                XSSFCellStyle tone = switch (status) {
+                    case "passed" -> st.pass;
+                    case "failed" -> st.fail;
+                    default -> st.notRun;
+                };
+                String label = switch (status) {
+                    case "passed" -> "Đạt";
+                    case "failed" -> "Trượt";
+                    default -> "Chưa chấm";
+                };
+                String max = num(tc.path("max_score").asDouble(0));
+                XSSFRow line = sheet.createRow(r++);
+                cell(line, 0, String.valueOf(idx), tone);
+                cell(line, 1, tc.path("group_name").asText(""), tone);
+                cell(line, 2, tc.path("name").asText(tc.path("test_id").asText("")), tone);
+                cell(line, 3, label, tone);
+                cell(line, 4, ("passed".equals(status) ? max : "0") + "/" + max, tone);
+                cell(line, 5, "passed".equals(status) ? "—" : tc.path("actual").asText(""), tone);
+            }
+            r++;
+
+            // ── Ảnh đối chứng: mẫu (Golden) và bài làm, cùng điểm dừng ──
+            Path evidence = evidenceDirFor.apply(row);
+            List<Path> shots = listPngs(evidence);
+            if (!shots.isEmpty()) {
+                r = title(sheet, st, r, "ẢNH MÀN HÌNH — ĐỐI CHỨNG PHÚC KHẢO");
+                XSSFRow note = sheet.createRow(r++);
+                cell(note, 1, "Chụp tự động tại cuối mỗi luồng thao tác, trong cùng môi trường chấm.", st.plain);
+                sheet.addMergedRegion(new CellRangeAddress(r - 1, r - 1, 1, 5));
+                Drawing<?> drawing = sheet.createDrawingPatriarch();
+                for (Path shot : shots) {
+                    String exec = shot.getFileName().toString().replaceFirst("\\.png$", "");
+                    r++;
+                    XSSFRow cap = sheet.createRow(r++);
+                    cell(cap, 1, "Luồng: " + exec, st.boldPlain);
+                    XSSFRow sub = sheet.createRow(r++);
+                    Path golden = goldenScreensDir == null ? null : goldenScreensDir.resolve(exec + ".png");
+                    boolean hasGolden = golden != null && Files.isRegularFile(golden);
+                    if (hasGolden) cell(sub, 1, "Ảnh mẫu (Golden)", st.plain);
+                    cell(sub, hasGolden ? 3 : 1, "Bài làm", st.plain);
+                    int span = 0;
+                    if (hasGolden) span = Math.max(span, picture(wb, drawing, golden, 1, r));
+                    span = Math.max(span, picture(wb, drawing, shot, hasGolden ? 3 : 1, r));
+                    r += Math.max(span, 1) + 1;
+                }
+            }
+
+            wb.write(out);
+            return out.toByteArray();
         }
-        sb.append("</tr></thead><tbody>");
-        int idx = 0;
-        for (JsonNode tc : result.path("test_cases")) {
-            idx++;
-            String status = tc.path("status").asText("");
-            String tone = switch (status) {
-                case "passed" -> "background:#DCFCE7;";
-                case "failed" -> "background:#FEE2E2;";
-                default -> "background:#F1F5F9;";
-            };
-            String label = switch (status) {
-                case "passed" -> "Passed";
-                case "failed" -> "Failed";
-                default -> "Not run";
-            };
-            String name = tc.path("name").asText(tc.path("test_id").asText(""));
-            String score = trimNumber(tc.path("score").asText("0")) + "/" + trimNumber(tc.path("max_score").asText("0"));
-            String actual = "passed".equals(status) ? "—" : tc.path("actual").asText("");
-            sb.append("<tr>")
-              .append(cell(String.valueOf(idx), tone, false))
-              .append(cell(name, tone, true))
-              .append(cell(label, tone, true))
-              .append(cell(score, tone, true))
-              .append(cell(actual, tone, true))
-              .append("</tr>");
+    }
+
+    /** Chèn 1 ảnh PNG tại (col,row), thu về ~45% cỡ thật; trả số HÀNG ảnh chiếm. */
+    private int picture(XSSFWorkbook wb, Drawing<?> drawing, Path png, int col, int row) throws Exception {
+        byte[] bytes = Files.readAllBytes(png);
+        int index = wb.addPicture(bytes, Workbook.PICTURE_TYPE_PNG);
+        ClientAnchor anchor = wb.getCreationHelper().createClientAnchor();
+        anchor.setCol1(col);
+        anchor.setRow1(row);
+        Picture pic = drawing.createPicture(anchor, index);
+        pic.resize(0.45);
+        // Hàng mặc định 15pt = 20px; ảnh 844px × 0.45 ≈ 380px ≈ 19 hàng.
+        double heightPx = pic.getImageDimension().getHeight();
+        return (int) Math.ceil(heightPx / 20.0);
+    }
+
+    private List<Path> listPngs(Path dir) {
+        if (dir == null || !Files.isDirectory(dir)) return List.of();
+        try (Stream<Path> files = Files.list(dir)) {
+            return files.filter(f -> f.getFileName().toString().endsWith(".png")).sorted().toList();
+        } catch (Exception e) {
+            return List.of();
         }
-        sb.append("</tbody></table></body></html>");
-        return sb.toString();
     }
 
-    private void summaryRow(StringBuilder sb, String key, String value, boolean asText) {
-        sb.append("<tr><td style=\"").append(CELL).append("background:#F8FAFC;font-weight:bold\">")
-          .append(esc(key)).append("</td>")
-          .append(cell(value == null ? "" : value, "", asText)).append("</tr>");
+    // ── Khối dựng sheet ─────────────────────────────────────────────
+    private int title(XSSFSheet sheet, Styles st, int r, String text) {
+        XSSFRow row = sheet.createRow(r);
+        cell(row, 0, text, st.title);
+        sheet.addMergedRegion(new CellRangeAddress(r, r, 0, 5));
+        return r + 1;
     }
 
-    private String cell(String value, String tone, boolean asText) {
-        return "<td style=\"" + CELL + tone + (asText ? AS_TEXT : "") + "\">" + esc(value) + "</td>";
+    private int info(XSSFSheet sheet, Styles st, int r, String label, String value) {
+        XSSFRow row = sheet.createRow(r);
+        cell(row, 0, label, st.infoLabel);
+        sheet.addMergedRegion(new CellRangeAddress(r, r, 0, 1));
+        cell(row, 2, value, st.plain);
+        sheet.addMergedRegion(new CellRangeAddress(r, r, 2, 5));
+        return r + 1;
     }
 
-    // ── feedback.txt ────────────────────────────────────────────────
-    private String feedbackText(ExamResult row) {
-        return renderFeedbackText(row);
+    private int header(XSSFSheet sheet, Styles st, int r, String section, String[] columns) {
+        XSSFRow cap = sheet.createRow(r++);
+        cell(cap, 0, section, st.section);
+        sheet.addMergedRegion(new CellRangeAddress(r - 1, r - 1, 0, 5));
+        XSSFRow head = sheet.createRow(r++);
+        for (int i = 0; i < columns.length; i++) {
+            if (!columns[i].isBlank()) cell(head, i, columns[i], st.head);
+        }
+        return r;
+    }
+
+    private void cell(XSSFRow row, int col, String value, XSSFCellStyle style) {
+        XSSFCell c = row.createCell(col);
+        c.setCellValue(value == null ? "" : value);
+        if (style != null) c.setCellStyle(style);
+    }
+
+    /** Bộ style dùng chung một workbook — POI giới hạn số style, không tạo mới theo ô. */
+    private static final class Styles {
+        final XSSFCellStyle title, section, head, infoLabel, plain, center,
+                boldPlain, boldCenter, pass, fail, notRun;
+
+        Styles(XSSFWorkbook wb) {
+            title = base(wb, true, 13, null, HorizontalAlignment.LEFT);
+            section = base(wb, true, 11, rgb(0xEE, 0xF2, 0xFF), HorizontalAlignment.LEFT);
+            head = base(wb, true, 11, rgb(0xF1, 0xF5, 0xF9), HorizontalAlignment.CENTER);
+            infoLabel = base(wb, true, 11, rgb(0xF8, 0xFA, 0xFC), HorizontalAlignment.LEFT);
+            plain = base(wb, false, 11, null, HorizontalAlignment.LEFT);
+            center = base(wb, false, 11, null, HorizontalAlignment.CENTER);
+            boldPlain = base(wb, true, 11, null, HorizontalAlignment.LEFT);
+            boldCenter = base(wb, true, 11, null, HorizontalAlignment.CENTER);
+            pass = base(wb, false, 11, rgb(0xDC, 0xFC, 0xE7), HorizontalAlignment.LEFT);
+            fail = base(wb, false, 11, rgb(0xFE, 0xE2, 0xE2), HorizontalAlignment.LEFT);
+            notRun = base(wb, false, 11, rgb(0xF1, 0xF5, 0xF9), HorizontalAlignment.LEFT);
+        }
+
+        private static XSSFColor rgb(int r, int g, int b) {
+            return new XSSFColor(new byte[]{(byte) r, (byte) g, (byte) b}, null);
+        }
+
+        private static XSSFCellStyle base(XSSFWorkbook wb, boolean bold, int size,
+                                          XSSFColor fill, HorizontalAlignment align) {
+            XSSFCellStyle style = wb.createCellStyle();
+            XSSFFont font = wb.createFont();
+            font.setBold(bold);
+            font.setFontHeightInPoints((short) size);
+            style.setFont(font);
+            style.setAlignment(align);
+            style.setVerticalAlignment(VerticalAlignment.TOP);
+            style.setWrapText(true);
+            style.setBorderBottom(BorderStyle.THIN);
+            style.setBorderTop(BorderStyle.THIN);
+            style.setBorderLeft(BorderStyle.THIN);
+            style.setBorderRight(BorderStyle.THIN);
+            if (fill != null) {
+                style.setFillForegroundColor(fill);
+                style.setFillPattern(FillPatternType.SOLID_FOREGROUND);
+            }
+            return style;
+        }
     }
 
     /**
-     * Nội dung feedback.txt của 1 SV — static để nút "Sinh feedback" (ZIP .txt theo MSSV) dùng
-     * chung một cách trình bày; hai bản chép tay kiểu gì cũng lệch nhau.
-     *
-     * <p>Chưa sinh nhận xét → trả CHUỖI RỖNG (file trống), không phải câu placeholder: hồ sơ phát
-     * cho sinh viên, một file trống nói "chưa có" rõ hơn một đoạn văn giải thích cơ chế nội bộ.
+     * Nội dung feedback.txt của 1 SV — vẫn dùng cho nút "Sinh feedback" (ZIP .txt theo MSSV);
+     * hồ sơ phúc khảo KHÔNG còn kèm file này.
      */
     static String renderFeedbackText(ExamResult row) {
         String cached = row.getFeedbackJson();
@@ -269,13 +447,15 @@ final class StudentReportArchiveBuilder {
         zip.closeEntry();
     }
 
+    private void binary(ZipOutputStream zip, String name, byte[] content) throws Exception {
+        zip.putNextEntry(new ZipEntry(name));
+        zip.write(content);
+        zip.closeEntry();
+    }
+
     private static String safe(String value) {
         String s = value == null ? "x" : value.replaceAll("[^A-Za-z0-9_-]", "_");
         return s.isBlank() ? "x" : s;
-    }
-
-    private static String esc(String v) {
-        return String.valueOf(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
     }
 
     private static String fmt(Float v) {
@@ -284,6 +464,12 @@ final class StudentReportArchiveBuilder {
 
     private static String nvl(String v) {
         return v == null ? "?" : v;
+    }
+
+    /** 15.0 → "15", 3.75 giữ nguyên — trọng số hay mang .0 thừa. */
+    private static String num(double v) {
+        return v == Math.rint(v) ? String.valueOf((long) v)
+                : String.format(java.util.Locale.ROOT, "%.2f", v).replaceAll("0+$", "");
     }
 
     /** SHA-256 dạng hex của nội dung file kết quả — băm ĐÚNG chuỗi được ghi vào zip. */
@@ -297,10 +483,5 @@ final class StudentReportArchiveBuilder {
         } catch (Exception e) {
             return "(không tính được)";
         }
-    }
-
-    /** "2.0" → "2", "0.5" giữ nguyên — điểm testcase trong JSON hay mang .0 thừa. */
-    private static String trimNumber(String v) {
-        return v.endsWith(".0") ? v.substring(0, v.length() - 2) : v;
     }
 }

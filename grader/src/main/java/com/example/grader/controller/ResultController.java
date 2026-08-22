@@ -39,6 +39,15 @@ public class ResultController {
     @Autowired
     private ExamResultRepository resultRepo;
 
+    @Autowired
+    private com.example.grader.repository.ExamRepository examRepo;
+
+    @Autowired
+    private com.example.grader.service.ExamService examService;
+
+    @org.springframework.beans.factory.annotation.Value("${grader.submissions-dir:submissions}")
+    private String submissionsDir;
+
     private final ObjectMapper mapper = new ObjectMapper();
 
     /** Tìm kiếm nhanh (thanh search header) theo mã SV / tên / mã đề — trả tối đa 8 kết quả. */
@@ -246,7 +255,7 @@ public class ResultController {
     }
 
     /**
-     * HỒ SƠ PHÁT CHO SINH VIÊN: Result_of_&lt;đề&gt;/&lt;MSSV&gt;/{json, xls, feedback.txt, logs/}.
+     * HỒ SƠ PHÁT CHO SINH VIÊN: Result_of_&lt;đề&gt;/&lt;MSSV&gt;/{json, xlsx có ảnh đối chứng, logs/}.
      * Chỉ bài đã chấm xong; xem {@link StudentReportArchiveBuilder} cho cấu trúc và lý do từng file.
      */
     @GetMapping(value = "/exam/{examId}/report-package", produces = "application/zip")
@@ -255,7 +264,18 @@ public class ResultController {
                 .stream().filter(ResultController::exportable).toList();
         if (rows.isEmpty()) return ResponseEntity.notFound().build();
         try {
-            byte[] archive = new StudentReportArchiveBuilder(this::pretty).build(examId, rows);
+            // Ảnh chuẩn của bộ đề + ảnh bằng chứng từng bài — hai nguồn ảnh nhúng vào .xlsx.
+            java.nio.file.Path goldenScreens = examRepo.findByExamId(examId)
+                    .map(exam -> exam.getTestcasePath())
+                    .filter(path -> path != null && !path.isBlank())
+                    .map(path -> java.nio.file.Path.of(path).resolve("fixtures").resolve("screens"))
+                    .orElse(null);
+            java.nio.file.Path submissionsRoot = examService.resolveSibling(submissionsDir).resolve(examId);
+            byte[] archive = new StudentReportArchiveBuilder(this::pretty, goldenScreens,
+                    row -> row.getBatchId() == null ? null
+                            : submissionsRoot.resolve(row.getBatchId())
+                                    .resolve("_evidence").resolve(row.getStudentId()))
+                    .build(examId, rows);
             String downloadName = "Result_of_" + safeArchivePart(examId) + ".zip";
             return ResponseEntity.ok()
                     .contentType(MediaType.parseMediaType("application/zip"))
