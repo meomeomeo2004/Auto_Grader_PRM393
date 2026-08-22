@@ -45,8 +45,18 @@ grader:
   golden-runtime-build-timeout-seconds: ${GRADER_GOLDEN_RUNTIME_BUILD_TIMEOUT_SECONDS:420}
   # Replay một record trên Golden + Hidden DB và capture Output DB/oracle.
   golden-capture-timeout-seconds: ${GRADER_GOLDEN_CAPTURE_TIMEOUT_SECONDS:240}
-  # Ảnh nền dùng chung — build 1 lần, mọi đề thi kế thừa (FROM grading-base)
-  base-image: ${GRADER_BASE_IMAGE:grading-base:latest}
+  # Ảnh nền dùng chung — build 1 lần, mọi đề thi kế thừa (FROM grading-base).
+  # GHIM THEO NHÃN PHIÊN BẢN, KHÔNG dùng `latest`: điểm của sinh viên phụ thuộc vào
+  # ảnh này, nên đổi ảnh phải là một dòng nhìn thấy được trong git chứ không phải
+  # chuyện xảy ra âm thầm khi ai đó build lại máy mình.
+  # Đổi nhãn thì build trước: grader-base/build-base.ps1 hoặc
+  #   docker build -f Dockerfile.base --build-arg GRADER_BASE_VERSION=<nhãn> -t grading-base:<nhãn> .
+  # 2026-08-22:  ảnh đầu tiên có pipeline 4 tầng (static_checks + merge_grade_results
+  #              + analysis_options.yaml). Bản lùi: grading-base:pre-pipeline.
+  # 2026-08-22b: rút gọn result.json — bỏ expected, score, và 9 nhãn phân loại.
+  # 2026-08-22c: dòng đạt không còn 5 field mô tả lỗi (chỉ dòng trượt mới có).
+  # 2026-08-22d: checkpoint component_present (chấm giao diện) + tôn trọng actual_source.
+  base-image: ${GRADER_BASE_IMAGE:grading-base:2026-08-22d}
   # Lưu lại bài nộp (zip) để audit/chấm lại khi tranh chấp
   save-submissions: ${GRADER_SAVE_SUBMISSIONS:true}
   submissions-dir: ${GRADER_SUBMISSIONS_DIR:submissions}
