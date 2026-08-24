@@ -29,7 +29,9 @@ import java.util.zip.ZipFile;
 public class GoldenRuntimeService {
     private static final long MAX_EXPANDED_BYTES = 1_000L * 1024 * 1024;
     private static final int MAX_ZIP_ENTRIES = 20_000;
-    private static final String RECORDER_BRIDGE_VERSION = "semantic-v2";
+    // Bump khi sửa logic script recorder (targetOf/action/snapshot...) để build cache cũ
+    // (đường dẫn khoá theo SHA golden + version này) không bị dùng nhầm script cũ.
+    private static final String RECORDER_BRIDGE_VERSION = "semantic-v3";
 
     @Value("${grader.base-image:grading-base:latest}")
     private String baseImage;
@@ -278,8 +280,14 @@ public class GoldenRuntimeService {
                   function targetOf(el) {
                     const semanticId = attr(el, 'data-semantic-id', 'data-semantics-id');
                     if (semanticId) return {semanticId};
-                    const label = attr(el, 'aria-label', 'data-semantics-label');
-                    if (label && label !== 'Enable accessibility') return {label};
+                    const rawLabel = attr(el, 'aria-label', 'data-semantics-label');
+                    if (rawLabel && rawLabel !== 'Enable accessibility') {
+                      // Flutter Web gop labelText + hintText vao chung aria-label,
+                      // ngan cach boi \\n. Tach ra de khop dung decoration.labelText/hintText
+                      // ma _finder() ben phia replay (exam_test.dart) so rieng biet.
+                      const parts = rawLabel.split('\\n');
+                      return parts.length > 1 ? {label: parts[0], hint: parts.slice(1).join('\\n')} : {label: rawLabel};
+                    }
                     const hint = attr(el, 'placeholder');
                     if (hint) return {hint};
                     const text = textOf(el);
