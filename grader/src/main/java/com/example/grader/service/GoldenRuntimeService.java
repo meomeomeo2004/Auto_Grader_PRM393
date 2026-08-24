@@ -29,7 +29,9 @@ import java.util.zip.ZipFile;
 public class GoldenRuntimeService {
     private static final long MAX_EXPANDED_BYTES = 1_000L * 1024 * 1024;
     private static final int MAX_ZIP_ENTRIES = 20_000;
-    private static final String RECORDER_BRIDGE_VERSION = "semantic-v2";
+    // Bump khi sửa logic script recorder (targetOf/action/snapshot...) để build cache cũ
+    // (đường dẫn khoá theo SHA golden + version này) không bị dùng nhầm script cũ.
+    private static final String RECORDER_BRIDGE_VERSION = "semantic-v3";
 
     @Value("${grader.base-image:grading-base:latest}")
     private String baseImage;
@@ -297,13 +299,68 @@ public class GoldenRuntimeService {
                   };
                   const MAX_TEXT_LOCATOR = 80;
                   let lastReject = '';
+                  const boolAttr = (el, name, fallback) => {
+                    const value = el.getAttribute(name);
+                    return value == null ? fallback : value !== 'false';
+                  };
+                  // Flutter Web gop labelText + hintText cua TextFormField vao chung 1
+                  // aria-label, ngan cach boi \n. Tach ra de khop dung decoration.labelText/
+                  // hintText ma _finder() ben phia replay (exam_test.dart) so rieng biet.
+                  function splitLabelHint(raw) {
+                    const parts = raw.split('\\n');
+                    return parts.length > 1 ? {label: parts[0], hint: parts.slice(1).join('\\n')} : {label: raw};
+                  }
+                  function roleOf(el) {
+                    const declared = (el.getAttribute('role') || '').toLowerCase();
+                    const type = (el.getAttribute('type') || '').toLowerCase();
+                    if (type === 'checkbox' || declared === 'checkbox') return 'checkbox';
+                    if (type === 'radio' || declared === 'radio') return 'radio';
+                    if (declared === 'switch') return 'switch';
+                    if (declared === 'textbox' || el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return 'text_field';
+                    if (declared === 'button' || el instanceof HTMLButtonElement) return 'button';
+                    if (declared === 'img') return 'image';
+                    if (declared === 'link') return 'link';
+                    return 'text';
+                  }
+                  function targetOf(el) {
+                    const semanticId = el.getAttribute('data-semantic-id') || el.getAttribute('data-semantics-id');
+                    if (semanticId) return {semanticId};
+                    const rawLabel = el.getAttribute('aria-label') || el.getAttribute('data-semantics-label');
+                    if (rawLabel && rawLabel !== 'Enable accessibility') return splitLabelHint(rawLabel);
+                    const hint = el.getAttribute('placeholder');
+                    if (hint) return {hint};
+                    const text = textOf(el);
+                    return text && text.length <= 120 ? {text} : {};
+                  }
+                  // Dung cho nut "Chup semantic UI" (checkpoint UI dang component/snapshot) —
+                  // khac muc dich voi semanticNode() ben duoi (dung khi ghi action tap/enter_text).
+                  function semanticState(el) {
+                    const target = targetOf(el);
+                    if (!Object.keys(target).length) return null;
+                    const role = roleOf(el);
+                    const rect = el.getBoundingClientRect();
+                    const style = getComputedStyle(el);
+                    const state = {target, role, visible: rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden'};
+                    const value = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+                      ? el.value : (el.getAttribute('aria-valuetext') || el.getAttribute('aria-value-now'));
+                    if (value !== '' && value != null) state.value = value;
+                    if (['text_field', 'button', 'checkbox', 'switch', 'radio'].includes(role)) {
+                      state.enabled = !('disabled' in el && el.disabled) && !boolAttr(el, 'aria-disabled', false);
+                    }
+                    if (['checkbox', 'switch', 'radio'].includes(role)) {
+                      state.checked = el instanceof HTMLInputElement ? el.checked : boolAttr(el, 'aria-checked', false);
+                    }
+                    return state;
+                  }
                   function semanticNode(event) {
                     lastReject = '';
                     const path = event.composedPath ? event.composedPath() : [];
                     for (const node of path) {
                       if (!(node instanceof Element)) continue;
-                      const label = node.getAttribute('aria-label') || node.getAttribute('data-semantics-label');
-                      if (label && label !== 'Enable accessibility') return {target: {label}, attribute: 'label', attributeValue: label};
+                      const rawLabel = node.getAttribute('aria-label') || node.getAttribute('data-semantics-label');
+                      if (rawLabel && rawLabel !== 'Enable accessibility') {
+                        return {target: splitLabelHint(rawLabel), attribute: 'label', attributeValue: rawLabel};
+                      }
                       const hint = node.getAttribute('placeholder');
                       if (hint) return {target: {hint}, attribute: 'hint', attributeValue: hint};
                       const text = textOf(node);
