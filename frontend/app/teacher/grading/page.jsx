@@ -8,17 +8,107 @@ import PerformanceSettings from "@/components/grading/PerformanceSettings";
 import { gradingStatusLabel, gradingStatusTone } from "@/lib/gradingStatus";
 // Kho phiên chấm dùng chung với trang Lịch sử (nút "Chấm lại" bên đó ghi vào cùng chỗ này).
 import { readStoredSessions, writeStoredSessions } from "@/lib/gradingSessions";
-import { UploadCloud, Play, Pause, FileArchive, X, CheckCircle, Clock, AlertCircle, Loader2, CheckSquare, BarChart2, Users, TrendingUp, StopCircle, Ban, RotateCcw, ListFilter, ChevronDown } from "lucide-react";
+import { UploadCloud, Play, Pause, FileArchive, X, CheckCircle, Clock, AlertCircle, Loader2, CheckSquare, BarChart2, Users, TrendingUp, StopCircle, Ban, RotateCcw, ListFilter, ChevronDown, FileJson } from "lucide-react";
 
 const normalizedPath = (value) => String(value || "").replace(/\\/g, "/");
 
+/**
+ * Tên thư mục KHÔNG mang thông tin sinh viên: thư mục nén của bài làm (lib), thư mục trung gian
+ * do LMS sinh ra… Gặp mấy tên này thì phải trèo lên thư mục cha mới lấy đúng tên sinh viên.
+ */
+const GENERIC_FOLDERS = new Set([
+  "lib", "src", "code", "source", "submission", "submissions", "bai", "bailam", "bai_lam",
+  "baithi", "bai_thi", "nop", "nopbai", "assignment", "upload", "uploads", "zip", "files",
+]);
+
+const genericFolder = (name) =>
+  GENERIC_FOLDERS.has(String(name || "").toLowerCase().replace(/[\s-]+/g, "_"));
+
+/**
+ * Suy một bài nộp từ một file trong cây thư mục đã thả/chọn.
+ *
+ * <p>KHÔNG ràng buộc tên thư mục: tên có dấu, có khoảng trắng, có ngoặc đều nhận. Backend tự rút
+ * mã SV (mẫu 2 chữ + ≥6 số ở bất kỳ đâu, không có thì rút gọn cả tên) — xem parseStudentInfo.
+ */
 const submissionFromFile = (file, suppliedPath = "") => {
   const relativePath = normalizedPath(suppliedPath || file.webkitRelativePath || file.name);
   const segments = relativePath.split("/").filter(Boolean);
-  if (segments.length < 2 || !segments.at(-1)?.toLowerCase().endsWith(".zip")) return null;
-  const username = segments.at(-2)?.trim();
-  if (!username || !/^[A-Za-z0-9_-]{1,60}$/.test(username)) return null;
-  return { file, username, relativePath, key: username.toLowerCase() };
+  if (!segments.at(-1)?.toLowerCase().endsWith(".zip")) return null;
+
+  // Tên sinh viên = thư mục gần file zip nhất mà KHÔNG phải tên chung chung (lib, src…).
+  let username = "";
+  for (let i = segments.length - 2; i >= 0; i--) {
+    const name = segments[i]?.trim();
+    if (!name) continue;
+    if (genericFolder(name) && i > 0) continue;
+    username = name;
+    break;
+  }
+  // Zip nằm trần (kéo thẳng nhiều file .zip vào): lấy luôn tên file làm tên sinh viên.
+  // Trừ khi nó tên "lib.zip" — không có thư mục cha thì chẳng biết đó là bài của ai.
+  if (!username) {
+    const base = segments.at(-1).replace(/\.zip$/i, "").trim();
+    if (!base || genericFolder(base)) return null;
+    username = base;
+  }
+
+  return { file, username: username.slice(0, 100), relativePath, key: username.toLowerCase() };
+};
+
+/**
+ * Duyệt một thư mục chọn bằng File System Access API (showDirectoryPicker).
+ *
+ * <p>Đường này KHÔNG bật hộp thoại "Tải N tệp lên trang này?" của trình duyệt như
+ * {@code <input webkitdirectory>}, nên chọn xong là bài hiện thẳng vào khu vực chờ.
+ */
+const collectFromDirectoryHandle = async (dirHandle, parentPath = "") => {
+  const path = parentPath ? `${parentPath}/${dirHandle.name}` : dirHandle.name;
+  const out = [];
+  for await (const entry of dirHandle.values()) {
+    if (entry.kind === "file") {
+      if (!entry.name.toLowerCase().endsWith(".zip")) continue;   // bỏ qua rác, đỡ đọc thừa
+      out.push({ file: await entry.getFile(), relativePath: `${path}/${entry.name}` });
+    } else {
+      out.push(...await collectFromDirectoryHandle(entry, path));
+    }
+  }
+  return out;
+};
+
+/**
+ * Quét thư mục vừa chọn theo TỪNG thư mục con: chọn một lần thư mục lớp là lấy được cả lớp.
+ *
+ * <p>Trình duyệt không cho chọn nhiều thư mục trong một hộp thoại, nên "nhiều thư mục cùng lúc"
+ * đi bằng đường này — mỗi thư mục con là một sinh viên. Thư mục con nào không có .zip thì trả tên
+ * ra để báo, chứ bỏ qua lặng lẽ là mất bài mà không ai biết.
+ */
+const scanPickedDirectory = async (handle) => {
+  const nested = [];          // .zip nằm trong thư mục con → thư mục con là tên sinh viên
+  const loose = [];           // .zip nằm ngay trong thư mục vừa chọn
+  const emptyFolders = [];
+  for await (const entry of handle.values()) {
+    if (entry.kind === "file") {
+      if (entry.name.toLowerCase().endsWith(".zip")) loose.push(entry);
+      continue;
+    }
+    const found = await collectFromDirectoryHandle(entry, handle.name);
+    if (found.length) nested.push(...found);
+    else emptyFolders.push(entry.name);
+  }
+
+  // Thư mục vừa chọn là THƯ MỤC LỚP hay thư mục của MỘT sinh viên? Có bài trong thư mục con, hoặc
+  // có từ hai file .zip nằm trần trở lên → là thư mục lớp: tên nó KHÔNG phải tên sinh viên, nên
+  // mỗi zip trần phải tự lấy tên file (Lớp cô Huệ/HE180412.zip → HE180412). Nếu cứ ghép tên thư
+  // mục lớp vào thì cả lớp mang chung một tên và gộp lại thành đúng một bài.
+  const rootIsContainer = nested.length > 0 || loose.length > 1;
+  const entries = [...nested];
+  for (const entry of loose) {
+    entries.push({
+      file: await entry.getFile(),
+      relativePath: rootIsContainer ? entry.name : `${handle.name}/${entry.name}`,
+    });
+  }
+  return { entries, emptyFolders };
 };
 
 const readDirectoryEntries = async (reader) => {
@@ -276,6 +366,36 @@ export default function AutomaticGradingPage() {
     }
   }, [addFiles]);
 
+  /**
+   * Chọn thư mục bài nộp — chọn THƯ MỤC LỚP là lấy hết bài của cả lớp trong một lần.
+   *
+   * <p>Ưu tiên showDirectoryPicker: chọn xong là bài vào thẳng khu vực chờ, KHÔNG qua hộp thoại
+   * "Tải N tệp lên trang này?" mà {@code <input webkitdirectory>} luôn bật lên. Hộp thoại xin
+   * quyền đọc thư mục là của trình duyệt, trang web không tắt được — nhưng chọn cả thư mục lớp
+   * thì chỉ phải qua nó ĐÚNG MỘT LẦN thay vì mỗi sinh viên một lần.
+   */
+  const pickFolders = useCallback(async () => {
+    if (typeof window === "undefined" || !window.showDirectoryPicker) {
+      fileRef.current?.click();
+      return;
+    }
+    let handle;
+    try {
+      handle = await window.showDirectoryPicker({ id: "grader-submissions", mode: "read" });
+    } catch (error) {
+      if (error?.name !== "AbortError") {                // AbortError = người dùng bấm Huỷ
+        setUploadErr("Không mở được thư mục: " + (error?.message || "lỗi không xác định"));
+      }
+      return;
+    }
+    try {
+      const { entries } = await scanPickedDirectory(handle);
+      addFiles(entries);
+    } catch (error) {
+      setUploadErr("Không đọc được thư mục đã chọn: " + (error?.message || "lỗi không xác định"));
+    }
+  }, [addFiles]);
+
   const removeFile = (key) => setFilesFor(examId.trim(), (current) => current.filter((entry) => entry.key !== key));
 
   // Upload + poll
@@ -446,6 +566,47 @@ export default function AutomaticGradingPage() {
     }
   };
 
+  /**
+   * Tải về thư mục kết quả: bấm một cái là tải ngay, giải nén ra `Json/<MSSV>.json`.
+   *
+   * <p>KHÔNG dùng `showDirectoryPicker`: nó bắt người dùng chọn thư mục, và Chrome từ chối phần
+   * lớn thư mục quen tay ("thư mục này chứa tệp hệ thống") nên thao tác hay chết giữa chừng.
+   * Trình duyệt không tải xuống được một thư mục thật, nên ZIP là lớp vận chuyển duy nhất —
+   * bên trong vẫn đúng một thư mục `Json` với các file rời, không phải JSON gộp.
+   */
+  const downloadResultsFolder = async () => {
+    if (!batchId) return;
+    try {
+      const res = await fetch(`${API_BASE}/results/batch/${encodeURIComponent(batchId)}/archive`);
+      if (res.status === 404) throw new Error("Chưa có bài nào chấm xong để xuất.");
+      if (!res.ok) throw new Error("Không tạo được thư mục kết quả.");
+      const blob = await res.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "Json.zip";
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (error) {
+      setUploadErr(error?.message || "Không xuất được thư mục JSON.");
+    }
+  };
+
+  // Tải JSON riêng của 1 sinh viên → MaSV.json
+  const downloadStudentJson = async (r) => {
+    const exId = r.examId || trimmedExam;
+    try {
+      const res = await fetch(`${API_BASE}/results/${encodeURIComponent(exId)}/${encodeURIComponent(r.studentId)}`);
+      if (!res.ok) return;
+      const text = await res.text();
+      const blob = new Blob([text], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `${r.studentId}.json`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (_) {}
+  };
+
   const p = progress;
   const isPaused = p?.status === "PAUSED";
 
@@ -576,7 +737,7 @@ export default function AutomaticGradingPage() {
                     onDrop={onDrop}
                     onDragOver={e => { e.preventDefault(); setDragging(true); }}
                     onDragLeave={() => setDragging(false)}
-                    onClick={() => fileRef.current.click()}
+                    onClick={pickFolders}
                     className={`cursor-pointer rounded-xl border-2 border-dashed p-8 text-center transition-all ${
                       dragging ? "border-indigo-500 bg-indigo-50 scale-[1.01]" : "border-slate-200 bg-slate-50 hover:border-indigo-300 hover:bg-slate-100"
                     }`}
@@ -919,6 +1080,14 @@ export default function AutomaticGradingPage() {
               <div className="card min-w-0 overflow-hidden">
                 <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/50 px-6 py-4">
                   <h3 className="text-sm font-bold uppercase tracking-wider text-slate-700">Chi tiết kết quả</h3>
+                  <button
+                    onClick={downloadResultsFolder}
+                    disabled={!allResultRows.length}
+                    title="Xuất thư mục gồm một JSON cho mỗi sinh viên"
+                    className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 shadow-sm transition-all hover:text-slate-900 hover:shadow active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <FileJson size={16} /> Xuất JSON
+                  </button>
                 </div>
 
                 {/* Sự cố HỆ THỐNG — thứ duy nhất người chấm phải xử lý. Bài 0 điểm do sinh viên
@@ -1021,11 +1190,12 @@ export default function AutomaticGradingPage() {
                 <div className="max-w-full overflow-x-auto">
                   <table className="w-full min-w-[680px] table-fixed border-collapse text-left">
                     <colgroup>
+                      <col className="w-[22%]" />
+                      <col className="w-[18%]" />
+                      <col className="w-[13%]" />
                       <col className="w-[24%]" />
-                      <col className="w-[20%]" />
-                      <col className="w-[15%]" />
-                      <col className="w-[27%]" />
-                      <col className="w-[14%]" />
+                      <col className="w-[13%]" />
+                      <col className="w-[10%]" />
                     </colgroup>
                     <thead>
                       <tr className="border-b border-slate-100 bg-white text-xs font-bold uppercase tracking-wider text-slate-500">
@@ -1034,6 +1204,7 @@ export default function AutomaticGradingPage() {
                         <th className="px-3 py-3.5 text-center">Tỉ lệ Pass</th>
                         <th className="px-3 py-3.5 text-center">Sự cố hệ thống</th>
                         <th className="px-3 py-3.5 text-center">Điểm số</th>
+                        <th className="px-3 py-3.5 text-center">Thao tác</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -1123,12 +1294,21 @@ export default function AutomaticGradingPage() {
                                 <span className="font-medium text-slate-300">—</span>
                               )}
                             </td>
+                            <td className="px-3 py-3.5 text-center">
+                              <button
+                                onClick={() => downloadStudentJson(r)}
+                                title="Tải JSON kết quả của sinh viên này"
+                                className="inline-flex items-center justify-center rounded-lg border border-slate-200 p-1.5 text-slate-500 transition-colors hover:border-indigo-300 hover:text-indigo-600"
+                              >
+                                <FileJson size={15} />
+                              </button>
+                            </td>
                           </tr>
                         );
                       })}
                       {allResultRows.length === 0 && (
                         <tr>
-                          <td colSpan="5" className="px-6 py-10 text-center text-sm text-slate-500">
+                          <td colSpan="6" className="px-6 py-10 text-center text-sm text-slate-500">
                             <Loader2 size={20} className="mx-auto mb-2 animate-spin text-slate-300" />
                             Đang chờ dữ liệu...
                           </td>
@@ -1136,7 +1316,7 @@ export default function AutomaticGradingPage() {
                       )}
                       {allResultRows.length > 0 && filteredResultRows.length === 0 && (
                         <tr>
-                          <td colSpan="5" className="px-6 py-10 text-center text-sm">
+                          <td colSpan="6" className="px-6 py-10 text-center text-sm">
                             {/* Lọc "Lỗi hệ thống" mà rỗng là TIN TỐT, không phải kết quả trống —
                                 nói thẳng ra thay vì để người chấm tự suy từ một bảng trắng. */}
                             {rowFilter === "blocked" ? (

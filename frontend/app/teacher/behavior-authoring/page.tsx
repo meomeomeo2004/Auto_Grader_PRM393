@@ -80,6 +80,36 @@ function bytes(value: number) {
   return `${(value / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`;
 }
 
+interface CheckpointResult { test_id: string; scenario_code: string; passed: boolean; message: string }
+
+/**
+ * Log preflight là output thô của `flutter test` — mỗi checkpoint nằm trên một dòng
+ * đánh dấu bằng marker này (xem exam_test.dart). Preflight backend chỉ giữ lại boolean
+ * pass/fail tổng, bỏ mất scenario_code/test_id/message — nên phải tự bóc lại từ log thô
+ * ở đây để giáo viên biết đúng checkpoint nào fail, thay vì chỉ thấy "5/6".
+ */
+function parseCheckpointLog(log?: string): CheckpointResult[] {
+  if (!log) return [];
+  const marker = "###RAR_CHECKPOINT###";
+  const results: CheckpointResult[] = [];
+  for (const line of log.split(/\r?\n/)) {
+    const at = line.indexOf(marker);
+    if (at < 0) continue;
+    try {
+      const parsed = JSON.parse(line.slice(at + marker.length).trim());
+      results.push({
+        test_id: String(parsed.test_id || ""),
+        scenario_code: String(parsed.scenario_code || ""),
+        passed: Boolean(parsed.passed),
+        message: String(parsed.message || ""),
+      });
+    } catch {
+      // Dòng log không phải JSON hợp lệ (hiếm, ví dụ log bị cắt) — bỏ qua, không chặn cả danh sách.
+    }
+  }
+  return results;
+}
+
 function absoluteRuntimeUrl(value?: string | null) {
   if (!value) return "";
   try {
@@ -104,6 +134,7 @@ function BehaviorAuthoringEditor() {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [readiness, setReadiness] = useState<Readiness | null>(null);
   const [validation, setValidation] = useState<GoldenValidation | null>(null);
+  const checkpointResults = useMemo(() => parseCheckpointLog(validation?.log), [validation?.log]);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [recorderReady, setRecorderReady] = useState(false);
   const [busy, setBusy] = useState("");
@@ -847,6 +878,31 @@ function BehaviorAuthoringEditor() {
 
           <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
             <div className="flex flex-wrap items-center justify-between gap-4"><div><p className="text-xs font-bold uppercase tracking-widest text-indigo-500">Bước 5</p><h2 className="text-xl font-bold">Kiểm chứng Golden và publish</h2><p className="mt-1 text-sm text-slate-500">Còn thiếu: {readiness?.missing.join(", ") || "không"}. Preflight chạy chính plan trên Golden; publish chỉ mở khi toàn bộ checkpoint pass.</p><p className={`mt-2 text-sm font-bold ${validation?.status === "PASSED" && validation.current ? "text-emerald-600" : "text-amber-600"}`}>Preflight: {validation?.status || "NOT_RUN"}{validation?.total_checkpoints !== undefined ? ` · ${validation.passed_checkpoints}/${validation.total_checkpoints}` : ""}{validation && !validation.current ? " · plan đã thay đổi" : ""}</p></div><div className="flex flex-wrap gap-2"><button onClick={() => openCodePreview()} disabled={!suite.scenarios?.length || Boolean(busy)} className="inline-flex items-center gap-2 rounded-xl border border-slate-300 px-5 py-3 font-bold text-slate-700 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:text-slate-200">{busy === "code-preview" ? <Loader2 className="animate-spin" size={18} /> : <Code2 size={18} />} Xem code bộ chấm</button><button onClick={validateGolden} disabled={!readiness?.ready || Boolean(recording) || Boolean(busy)} className="inline-flex items-center gap-2 rounded-xl border border-indigo-300 px-5 py-3 font-bold text-indigo-700 disabled:cursor-not-allowed disabled:opacity-40 dark:border-indigo-700 dark:text-indigo-300">{busy === "validate-golden" ? <Loader2 className="animate-spin" size={18} /> : <Play size={18} />} Chạy thử trên Golden</button><button onClick={publish} disabled={!readiness?.ready || !validation?.current || validation.status !== "PASSED" || Boolean(recording) || Boolean(busy)} className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40">{busy === "publish" ? <Loader2 className="animate-spin" size={18} /> : <Send size={18} />} Publish bộ chấm</button></div></div>
+            {(() => {
+              const failed = checkpointResults.filter((c) => !c.passed);
+              if (!failed.length) return null;
+              return (
+                <div className="mt-3 rounded-xl border border-rose-200 dark:border-rose-900">
+                  <div className="flex items-center justify-between gap-2 border-b border-rose-200 px-4 py-2 dark:border-rose-900">
+                    <p className="text-xs font-bold text-rose-600">Checkpoint fail ({failed.length})</p>
+                  </div>
+                  <div className="max-h-64 space-y-1.5 overflow-auto p-3">
+                    {failed.map((c, index) => (
+                      <div key={`${c.test_id}-${index}`} className="flex items-start gap-2 rounded-lg bg-rose-50 px-2.5 py-1.5 text-xs dark:bg-rose-950/30">
+                        <XCircle size={15} className="mt-0.5 shrink-0 text-rose-500" />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="rounded bg-indigo-100 px-1.5 py-0.5 font-mono font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">{c.scenario_code}</span>
+                            <span className="font-mono text-slate-500">{c.test_id}</span>
+                          </div>
+                          {c.message && <p className="mt-1 break-words text-rose-700 dark:text-rose-300">{c.message}</p>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
             <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
               {(suite.scenarios || []).map((item, index) => <div key={String(item.id || index)} className="rounded-xl border border-slate-200 px-4 py-3 dark:border-slate-700"><div className="flex items-center justify-between gap-2"><span className="font-bold">{String(item.name || item.scenario_code)}</span><span className="rounded-full bg-indigo-100 px-2 py-1 text-xs font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">{String(item.weight)} điểm</span></div><p className="mt-1 font-mono text-[11px] text-indigo-500">{String(item.scenario_code || "")}</p><p className="mt-2 text-xs text-slate-500">{Array.isArray(item.steps) ? item.steps.length : 0} action · {Array.isArray(item.checkpoints) ? item.checkpoints.length : 0} checkpoint</p><div className="mt-3 flex flex-wrap gap-2"><button onClick={() => openCodePreview(String(item.scenario_code || ""))} disabled={Boolean(busy)} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-bold text-slate-700 hover:border-indigo-400 disabled:opacity-40 dark:border-slate-700 dark:text-slate-200"><Code2 size={14} /> Xem testcase</button><button onClick={() => openScenarioEditor(item)} disabled={Boolean(busy) || Boolean(recording)} title={recording ? "Hãy kết thúc phiên đang soạn trước" : "Nạp lại các bước vào khung record để chỉnh sửa"} className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-300 px-2.5 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50 disabled:opacity-40 dark:border-indigo-800 dark:text-indigo-300 dark:hover:bg-indigo-950"><Pencil size={14} /> Sửa thao tác</button><button onClick={() => deleteScenario(item)} disabled={Boolean(busy) || Boolean(recording)} className="inline-flex items-center gap-1.5 rounded-lg border border-rose-300 px-2.5 py-1.5 text-xs font-bold text-rose-600 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-900 dark:hover:bg-rose-950"><Trash2 size={14} /> Xóa</button></div></div>)}
               {!suite.scenarios?.length && <p className="text-sm text-slate-500">Chưa có scenario. Hãy record ít nhất một luồng và sinh testcase.</p>}
