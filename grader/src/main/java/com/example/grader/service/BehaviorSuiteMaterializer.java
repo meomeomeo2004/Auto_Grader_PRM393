@@ -35,15 +35,18 @@ public class BehaviorSuiteMaterializer {
 
     private final BehaviorAuthoringService authoring;
     private final BehaviorArtifactService artifacts;
+    private final StaticRuleService staticRules;
     private final ExamRepository exams;
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules()
             .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
 
     public BehaviorSuiteMaterializer(BehaviorAuthoringService authoring,
                                      BehaviorArtifactService artifacts,
+                                     StaticRuleService staticRules,
                                      ExamRepository exams) {
         this.authoring = authoring;
         this.artifacts = artifacts;
+        this.staticRules = staticRules;
         this.exams = exams;
     }
 
@@ -59,7 +62,9 @@ public class BehaviorSuiteMaterializer {
 
         List<Map<String, Object>> cases = expandCases(plan, suiteCode);
         if (cases.isEmpty()) throw new IllegalStateException("Bộ chấm không có checkpoint để publish");
-        Map<String, Object> matrix = buildMatrix(cases);
+        // Golden có thể đã đổi sau khi lưu luật tĩnh — kiểm lại trước khi phát hành.
+        staticRules.requireGoldenCompliance(suiteId);
+        Map<String, Object> matrix = fullMatrix(suiteId, suiteCode, cases);
 
         Path examDir = examsRoot().resolve(examId).normalize();
         Path target = examDir.resolve("testcase").normalize();
@@ -98,7 +103,7 @@ public class BehaviorSuiteMaterializer {
             result.put("exam_id", examId);
             result.put("testcase_path", target.toAbsolutePath().toString());
             result.put("scenario_count", list(plan.get("scenarios")).size());
-            result.put("criterion_count", cases.size());
+            result.put("criterion_count", matrix.size());
             result.put("files", List.of(
                     "exam_test.dart", "grader.dart", "behavior_plan.json",
                     "skills_matrix.json", "contract.json", "suite_manifest.json",
@@ -130,7 +135,8 @@ public class BehaviorSuiteMaterializer {
         Path target = root.toAbsolutePath().normalize().resolve("test");
         try {
             Files.createDirectories(target);
-            writeBundle(target, suiteId, plan, suite, suiteCode, cases, buildMatrix(cases), true, false);
+            writeBundle(target, suiteId, plan, suite, suiteCode, cases,
+                    fullMatrix(suiteId, suiteCode, cases), true, false);
             return target;
         } catch (Exception e) {
             throw new IllegalStateException("Không sinh được bundle preflight: " + e.getMessage(), e);
@@ -152,7 +158,8 @@ public class BehaviorSuiteMaterializer {
         Path target = root.toAbsolutePath().normalize().resolve("test");
         try {
             Files.createDirectories(target);
-            writeBundle(target, suiteId, plan, suite, suiteCode, cases, buildMatrix(cases), false, true);
+            writeBundle(target, suiteId, plan, suite, suiteCode, cases,
+                    fullMatrix(suiteId, suiteCode, cases), false, true);
             return target;
         } catch (Exception e) {
             throw new IllegalStateException("Không sinh được bundle capture Golden: " + e.getMessage(), e);
@@ -169,7 +176,7 @@ public class BehaviorSuiteMaterializer {
             Map<String, Object> suite = map(plan.get("suite"));
             String suiteCode = ExamService.safeId(text(suite, "suite_code"), "bộ chấm");
             List<Map<String, Object>> cases = expandCases(plan, suiteCode);
-            Map<String, Object> matrix = buildMatrix(cases);
+            Map<String, Object> matrix = fullMatrix(suiteId, suiteCode, cases);
 
             String requestedCode = selectedScenarioCode == null ? "" : selectedScenarioCode.trim();
             Map<String, Object> selectedScenario = new LinkedHashMap<>();
@@ -236,7 +243,7 @@ public class BehaviorSuiteMaterializer {
             result.put("selected_scenario_code",
                     selectedScenario.isEmpty() ? null : selectedScenario.get("scenario_code"));
             result.put("scenario_count", list(plan.get("scenarios")).size());
-            result.put("criterion_count", cases.size());
+            result.put("criterion_count", matrix.size());
             result.put("files", files);
             return result;
         } catch (IllegalArgumentException e) {
@@ -341,7 +348,7 @@ public class BehaviorSuiteMaterializer {
         manifest.put("suite_code", suiteCode);
         manifest.put("revision", suite.getOrDefault("revision", 1));
         manifest.put("scenario_count", list(plan.get("scenarios")).size());
-        manifest.put("criterion_count", cases.size());
+        manifest.put("criterion_count", matrix.size());
         manifest.put("artifact_manifest", Optional.ofNullable(artifacts.activeManifest(suiteId)).orElse(Map.of()));
         writeJson(target.resolve("suite_manifest.json"), manifest);
 
@@ -365,7 +372,8 @@ public class BehaviorSuiteMaterializer {
      * và chỉ chạy trên viewport đầu: thành phần giao diện và so ảnh bố cục.
      */
     private static final java.util.Set<String> ABSOLUTE_WEIGHT_KINDS =
-            java.util.Set.of("component_present", "screen_match");
+            java.util.Set.of("component_present", "component_position", "component_color",
+                    "theme_color", "screen_match");
 
     private List<Map<String, Object>> expandCases(Map<String, Object> plan, String suiteCode) {
         List<Map<String, Object>> out = new ArrayList<>();
@@ -376,7 +384,10 @@ public class BehaviorSuiteMaterializer {
             List<Object> scenarioViewports = list(scenario.get("viewports"));
             if (scenarioViewports.isEmpty()) {
                 scenarioViewports = List.of(Map.of(
-                        "name", "default", "width", 390, "height", 844, "device_pixel_ratio", 1));
+                        // Máy Android tầm trung (Pixel): 412×915 dp. Khung desktop đã bỏ —
+                        // sinh viên chỉ làm bài trên máy ảo Android. Mật độ để 1 vì chấm bố
+                        // cục đo bằng dp, mật độ chỉ ảnh hưởng độ nét ảnh bằng chứng.
+                        "name", "phone", "width", 412, "height", 915, "device_pixel_ratio", 1));
             }
             double scenarioWeight = number(scenario.get("weight"), 1.0);
             // Tiêu chí GIAO DIỆN mang trọng số TUYỆT ĐỐI (điểm của nhóm chia đều lúc tick),
@@ -422,6 +433,7 @@ public class BehaviorSuiteMaterializer {
                     item.put("test_id", testId);
                     item.put("scenario_id", scenario.get("id"));
                     item.put("scenario_code", scenario.get("scenario_code"));
+                    item.put("scenario_name", scenario.get("name"));
                     item.put("execution_code", executionCode);
                     item.put("name", checkpointName(scenario, checkpoint, index)
                             + (checkpointViewports.size() > 1 ? " [" + viewportName + "]" : ""));
@@ -439,6 +451,23 @@ public class BehaviorSuiteMaterializer {
             }
         }
         return out;
+    }
+
+    /**
+     * Ma trận ĐẦY ĐỦ của bộ đề = dòng sinh từ checkpoint + dòng luật tĩnh của suite.
+     * Luật tĩnh sống trong DB (static_rules_json) nên republish không nuốt mất chúng.
+     */
+    private Map<String, Object> fullMatrix(String suiteId,
+                                           String suiteCode,
+                                           List<Map<String, Object>> cases) {
+        Map<String, Object> matrix = buildMatrix(cases);
+        staticRules.matrixRows(suiteId, suiteCode).forEach((id, row) -> {
+            if (matrix.containsKey(id)) {
+                throw new IllegalStateException("Mã tiêu chí tĩnh trùng với checkpoint: " + id);
+            }
+            matrix.put(id, row);
+        });
+        return matrix;
     }
 
     private Map<String, Object> buildMatrix(List<Map<String, Object>> cases) {
@@ -460,9 +489,15 @@ public class BehaviorSuiteMaterializer {
             metadata.put("layer", component ? "ui" : "behavior");
             // Nhóm là cấp mà điểm lẻ nổi lên (đạt 3/4 thành phần = 15/20) và là cấp đối
             // chiếu với phiếu chấm tay — thiếu group_id thì mỗi dòng lẻ loi không quy về đâu.
+            // Dòng behavior không có ui_group thì mỗi SCENARIO là một nhóm: "Thêm khoản chi"
+            // trên phiếu tay chính là toàn bộ checkpoint của luồng thêm.
             if (!uiGroup.isEmpty()) {
                 metadata.put("group_id", uiGroup.get("id"));
                 metadata.put("group_name", uiGroup.get("name"));
+            } else if (!text(item, "scenario_code").isBlank()) {
+                metadata.put("group_id", "G_" + text(item, "scenario_code"));
+                metadata.put("group_name", text(item, "scenario_name").isBlank()
+                        ? text(item, "scenario_code") : text(item, "scenario_name"));
             }
             metadata.put("name", component && !text(checkpoint, "name").isBlank()
                     ? checkpoint.get("name") : item.get("name"));

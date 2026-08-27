@@ -56,7 +56,9 @@ grader:
   # 2026-08-22b: rút gọn result.json — bỏ expected, score, và 9 nhãn phân loại.
   # 2026-08-22c: dòng đạt không còn 5 field mô tả lỗi (chỉ dòng trượt mới có).
   # 2026-08-22d: checkpoint component_present (chấm giao diện) + tôn trọng actual_source.
-  base-image: ${GRADER_BASE_IMAGE:grading-base:2026-08-22d}
+  # 2026-08-22e: luật tĩnh source_pattern (chấm Kiến trúc MVVM/Riverpod qua cây file
+  #              + regex nội dung; chạy được cả khi bài không biên dịch).
+  base-image: ${GRADER_BASE_IMAGE:grading-base:2026-08-22e}
   # Lưu lại bài nộp (zip) để audit/chấm lại khi tranh chấp
   save-submissions: ${GRADER_SAVE_SUBMISSIONS:true}
   submissions-dir: ${GRADER_SUBMISSIONS_DIR:submissions}

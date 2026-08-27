@@ -56,6 +56,10 @@ Future<void> _runBehaviorScenario(
     milliseconds: _int(runtime['default_timeout_ms'], 5000),
   );
   final variables = _materializeVariables(testCase);
+  // Mỗi luồng chụp lại màn hình cuối đúng một lần; xoá đệm của luồng trước.
+  _anhCuoi = null;
+  _daChupAnhCuoi = false;
+  _mauNenAnh = null;
 
   try {
     sqfliteFfiInit();
@@ -95,6 +99,9 @@ Future<void> _runBehaviorScenario(
     // Cham bai sinh vien khong dat bien moi truong nay nen khong phat sinh file nao.
     if ((Platform.environment['GRADER_CAPTURE_OUTPUT_PATH'] ?? '').isNotEmpty) {
       await _saveGoldenScreenshot(tester);
+      // Đo luôn vị trí + màu chuẩn của mọi thành phần được chấm giao diện. Cùng một
+      // khoảnh khắc với ảnh chuẩn nên hai thứ không thể lệch nhau.
+      await _luuBoCucChuan(tester, cases);
     } else {
       // GRADING MODE: luu anh man hinh cuoi luong lam BANG CHUNG phuc khao — di vao
       // ho so ZIP cua sinh vien. Bao loi nuot: thieu anh chi mat mot dong bang chung,
@@ -139,8 +146,13 @@ Future<void> _runBehaviorScenario(
 }
 
 void _applyViewport(WidgetTester tester, Map<String, dynamic> viewport) {
-  final width = _double(viewport['width'], 390);
-  final height = _double(viewport['height'], 844);
+  // Mặc định = máy Android tầm trung (Pixel): 412×915 dp — đúng cỡ Android Studio hiện
+  // cho máy ảo. Sinh viên làm bài trên máy ảo Android nên khung này mới sát thực tế.
+  //
+  // Mật độ để 1: vị trí thành phần và sai số bố cục đều đo bằng dp nên mật độ KHÔNG đổi
+  // một điểm nào; nó chỉ quyết định ảnh bằng chứng nét tới đâu và nặng bao nhiêu.
+  final width = _double(viewport['width'], 412);
+  final height = _double(viewport['height'], 915);
   final ratio = _double(viewport['device_pixel_ratio'], 1);
   if (width <= 0 || height <= 0 || ratio <= 0) {
     throw ArgumentError('Viewport không hợp lệ: $viewport');
@@ -316,6 +328,49 @@ Future<void> _assertCheckpoint(
           ? 'Không thấy $moTa trên màn hình.'
           : 'Vẫn thấy $moTa trên màn hình dù lẽ ra phải ẩn.',
     );
+    return;
+  }
+
+  // VỊ TRÍ THÀNH PHẦN. Lúc capture oracle chưa có giá trị chuẩn để so nên bỏ qua —
+  // chính lượt capture đó sinh ra giá trị chuẩn.
+  if (kind == 'component_position') {
+    if ((Platform.environment['GRADER_CAPTURE_OUTPUT_PATH'] ?? '').isNotEmpty) {
+      return;
+    }
+    await _assertComponentPosition(tester, checkpoint, timeout);
+    return;
+  }
+
+  // MÀU CHỦ ĐẠO CỦA APP — đọc thẳng ColorScheme, không lấy mẫu pixel.
+  if (kind == 'theme_color') {
+    if ((Platform.environment['GRADER_CAPTURE_OUTPUT_PATH'] ?? '').isNotEmpty) {
+      return;
+    }
+    final mauChuan = _text(_asMap(checkpoint['expect']), 'color');
+    if (mauChuan.isEmpty) {
+      throw StateError(
+        'Tiêu chí màu chủ đạo chưa có giá trị chuẩn — hãy capture lại oracle rồi publish lại.',
+      );
+    }
+    final mauBai = _mauChuDao(tester);
+    if (mauBai == null) {
+      throw StateError('Không đọc được bảng màu của app để so màu chủ đạo.');
+    }
+    _soMau(
+      mauChuan,
+      mauBai,
+      _double(checkpoint['tolerance_pct'], 20),
+      'Màu chủ đạo của app',
+    );
+    return;
+  }
+
+  // MÀU CHÍNH CỦA THÀNH PHẦN.
+  if (kind == 'component_color') {
+    if ((Platform.environment['GRADER_CAPTURE_OUTPUT_PATH'] ?? '').isNotEmpty) {
+      return;
+    }
+    await _assertComponentColor(tester, checkpoint, timeout);
     return;
   }
 
@@ -695,6 +750,344 @@ Future<void> _saveEvidenceScreenshot(WidgetTester tester, String executionCode) 
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// CHẤM GIAO DIỆN THEO TỪNG THÀNH PHẦN
+//
+// Ảnh màn hình cuối luồng, chụp MỘT LẦN rồi dùng lại cho mọi tiêu chí màu của
+// luồng đó — chụp lại cho từng tiêu chí thì 16 tiêu chí là 16 lần toImage.
+Uint8List? _anhCuoi;
+int _anhCuoiW = 0;
+int _anhCuoiH = 0;
+bool _daChupAnhCuoi = false;
+List<int>? _mauNenAnh;
+
+/// Bảo đảm đã có ảnh màn hình cuối luồng trong bộ đệm. Trả false nếu không chụp được.
+Future<bool> _baoDamAnhCuoi(WidgetTester tester) async {
+  if (_daChupAnhCuoi) return _anhCuoi != null;
+  _daChupAnhCuoi = true;
+  await tester.runAsync(() async {
+    final image = await _captureScreenImage(tester);
+    if (image == null) return;
+    final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+    if (data == null) return;
+    _anhCuoi = data.buffer.asUint8List();
+    _anhCuoiW = image.width;
+    _anhCuoiH = image.height;
+  });
+  return _anhCuoi != null;
+}
+
+/// Màu nền của ảnh = màu xuất hiện nhiều nhất trên toàn màn hình. Dùng để loại nền
+/// ra khỏi phép lấy "màu chính" — nếu không loại thì mọi thành phần trên nền trắng
+/// đều trả về màu trắng và tiêu chí màu thành vô nghĩa.
+List<int> _timMauNen() {
+  if (_mauNenAnh != null) return _mauNenAnh!;
+  final bytes = _anhCuoi!;
+  final dem = <int, int>{};
+  final tong = _anhCuoiW * _anhCuoiH;
+  // Lấy mẫu thưa: đủ để tìm màu chiếm đa số mà không quét 300k pixel.
+  final buoc = tong > 20000 ? tong ~/ 20000 : 1;
+  for (var i = 0; i < tong; i += buoc) {
+    final o = i * 4;
+    final khoa = (bytes[o] << 16) | (bytes[o + 1] << 8) | bytes[o + 2];
+    dem[khoa] = (dem[khoa] ?? 0) + 1;
+  }
+  var tot = 0;
+  var soLan = -1;
+  dem.forEach((k, v) {
+    if (v > soLan) {
+      soLan = v;
+      tot = k;
+    }
+  });
+  return _mauNenAnh = [(tot >> 16) & 0xFF, (tot >> 8) & 0xFF, tot & 0xFF];
+}
+
+/// MÀU CHÍNH của một vùng: màu xuất hiện nhiều nhất trong số các pixel KHÁC NỀN.
+///
+/// Vì sao bỏ nền: chip viền trắng hay dòng chữ trên nền trắng thì phần lớn pixel
+/// trong khung là nền — lấy màu trội thô sẽ ra màu nền cho mọi bài, kể cả bài tô
+/// sai màu. Bỏ nền đi thì chip tô đặc trả về màu tô, chữ trả về màu chữ.
+/// Vì sao lấy màu TRỘI chứ không lấy trung bình: trung bình của chữ đen khử răng
+/// cưa trên nền trắng ra màu xám, không phải màu sinh viên đặt.
+String? _mauChinhTrongVung(Rect rect, double tiLe) {
+  final bytes = _anhCuoi;
+  if (bytes == null) return null;
+  final nen = _timMauNen();
+  final x0 = (rect.left * tiLe).round().clamp(0, _anhCuoiW - 1);
+  final x1 = (rect.right * tiLe).round().clamp(0, _anhCuoiW);
+  final y0 = (rect.top * tiLe).round().clamp(0, _anhCuoiH - 1);
+  final y1 = (rect.bottom * tiLe).round().clamp(0, _anhCuoiH);
+  final dem = <int, int>{};
+  for (var y = y0; y < y1; y++) {
+    for (var x = x0; x < x1; x++) {
+      final o = (y * _anhCuoiW + x) * 4;
+      final r = bytes[o], g = bytes[o + 1], b = bytes[o + 2];
+      if ((r - nen[0]).abs() <= 16 &&
+          (g - nen[1]).abs() <= 16 &&
+          (b - nen[2]).abs() <= 16) {
+        continue; // là nền
+      }
+      final khoa = (r << 16) | (g << 8) | b;
+      dem[khoa] = (dem[khoa] ?? 0) + 1;
+    }
+  }
+  if (dem.isEmpty) return null;
+  var tot = 0;
+  var soLan = -1;
+  dem.forEach((k, v) {
+    if (v > soLan) {
+      soLan = v;
+      tot = k;
+    }
+  });
+  return '#' + tot.toRadixString(16).padLeft(6, '0').toUpperCase();
+}
+
+/// MÀU CHỦ ĐẠO của app: `colorScheme.primary` của theme ĐANG CÓ HIỆU LỰC.
+///
+/// Đọc từ cây widget chứ không lấy mẫu pixel, nên đây là giá trị CHÍNH XÁC sinh viên
+/// đặt — không dính khử răng cưa, không lẫn màu nền, không phụ thuộc thành phần nào
+/// có được tô màu hay không.
+///
+/// Lấy context SÂU trong cây (Scaffold/Material) chứ không lấy chính element của
+/// MaterialApp: Theme.of tra ngược LÊN trên, đứng ngay tại MaterialApp thì trượt qua
+/// chính theme mà app khai và trả về theme mặc định.
+String? _mauChuDao(WidgetTester tester) {
+  for (final finder in <Finder>[
+    find.byType(Scaffold),
+    find.byType(Material),
+  ]) {
+    if (finder.evaluate().isEmpty) continue;
+    try {
+      final scheme = Theme.of(tester.element(finder.first)).colorScheme;
+      return _hex(scheme.primary);
+    } catch (_) {
+      // Thử nguồn kế tiếp.
+    }
+  }
+  // Dự phòng: đọc thẳng ThemeData sinh viên truyền cho MaterialApp.
+  final app = find.byType(MaterialApp);
+  if (app.evaluate().isEmpty) return null;
+  final scheme = tester.widget<MaterialApp>(app.first).theme?.colorScheme;
+  return scheme == null ? null : _hex(scheme.primary);
+}
+
+String _hex(Color c) =>
+    '#' + (c.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase();
+
+/// So hai màu theo SAI SỐ % CỦA 255 trên từng kênh R/G/B. Ném lỗi khi vượt ngưỡng.
+/// Dùng chung cho cả màu thành phần lẫn màu chủ đạo để hai bên không lệch cách tính.
+void _soMau(String mauChuan, String mauBai, double saiSoPct, String moTa) {
+  final a = _mauTuChuoi(mauChuan);
+  final b = _mauTuChuoi(mauBai);
+  final choPhep = (saiSoPct / 100 * 255).round();
+  final lech = [
+    (((a >> 16) & 0xFF) - ((b >> 16) & 0xFF)).abs(),
+    (((a >> 8) & 0xFF) - ((b >> 8) & 0xFF)).abs(),
+    ((a & 0xFF) - (b & 0xFF)).abs(),
+  ].reduce((x, y) => x > y ? x : y);
+  if (lech > choPhep) {
+    throw StateError(
+      '$moTa là $mauBai, lệch $lech/255 so với màu mẫu $mauChuan — '
+      'quá mức cho phép $choPhep/255 (${saiSoPct.toStringAsFixed(0)}%).',
+    );
+  }
+}
+
+/// Khoá của một mục trong manifest bố cục: `id` của CHÍNH CHECKPOINT.
+///
+/// KHÔNG dùng test_id: test_id do materializer sinh lúc bung ma trận nên không tồn tại
+/// ở tầng soạn đề — nướng số chuẩn ngược lại sẽ không tìm thấy dòng nào để gán.
+String _khoaBoCuc(Map<String, dynamic> c, Map<String, dynamic> checkpoint) {
+  final id = _text(checkpoint, 'id');
+  return id.isNotEmpty ? id : _text(c, 'test_id');
+}
+
+/// Khung của thành phần theo pixel LOGIC. Trả null khi không tìm thấy thành phần —
+/// đó là lỗi thiếu nội dung, tiêu chí nội dung đã bắt riêng.
+Rect? _khungThanhPhan(WidgetTester tester, Map<String, dynamic> target) {
+  final finder = _finder(target);
+  if (finder.evaluate().isEmpty) return null;
+  try {
+    return tester.getRect(finder.first);
+  } catch (_) {
+    return null;
+  }
+}
+
+int _mauTuChuoi(String hex) {
+  final s = hex.replaceAll('#', '').trim();
+  return int.parse(s.length == 8 ? s.substring(2) : s, radix: 16);
+}
+
+/// Kích thước màn hình theo pixel logic.
+Size _coManHinh(WidgetTester tester) {
+  final r = tester.view.devicePixelRatio;
+  final kt = tester.view.physicalSize;
+  return Size(kt.width / r, kt.height / r);
+}
+
+/// VỊ TRÍ: so tâm thành phần với tâm trên ảnh mẫu. Sai số khai theo % chiều rộng
+/// (trục X) và % chiều cao (trục Y) của màn hình, nên đổi viewport không làm lệch
+/// chính sách chấm.
+Future<void> _assertComponentPosition(
+  WidgetTester tester,
+  Map<String, dynamic> checkpoint,
+  Duration timeout,
+) async {
+  final target = _asMap(checkpoint['target']);
+  if (target.isEmpty) {
+    throw ArgumentError('Checkpoint component_position thiếu target.');
+  }
+  final mongDoi = _asMap(checkpoint['expect']);
+  if (mongDoi['center_x'] == null || mongDoi['center_y'] == null) {
+    throw StateError(
+      'Tiêu chí vị trí chưa có giá trị chuẩn — hãy capture lại oracle rồi publish lại.',
+    );
+  }
+  final moTa = _moTaTarget(target);
+  await _waitUntil(
+    tester,
+    () => _finder(target).evaluate().isNotEmpty,
+    timeout,
+    'Không thấy $moTa trên màn hình nên không chấm được vị trí.',
+  );
+  final khung = _khungThanhPhan(tester, target);
+  if (khung == null) {
+    throw StateError('Không đo được vị trí của $moTa.');
+  }
+  final man = _coManHinh(tester);
+  final saiSo = _double(checkpoint['tolerance_pct'], 5) / 100;
+  final choPhepX = man.width * saiSo;
+  final choPhepY = man.height * saiSo;
+  final lechX = (khung.center.dx - _double(mongDoi['center_x'], 0)).abs();
+  final lechY = (khung.center.dy - _double(mongDoi['center_y'], 0)).abs();
+  if (lechX > choPhepX || lechY > choPhepY) {
+    throw StateError(
+      'Vị trí $moTa lệch ${lechX.toStringAsFixed(0)}px ngang và '
+      '${lechY.toStringAsFixed(0)}px dọc so với ảnh mẫu, quá mức cho phép '
+      '${choPhepX.toStringAsFixed(0)}x${choPhepY.toStringAsFixed(0)}px '
+      '(${(saiSo * 100).toStringAsFixed(0)}% màn hình).',
+    );
+  }
+}
+
+/// MÀU SẮC: so màu chính của thành phần với màu trên ảnh mẫu. Sai số khai theo %
+/// của 255 trên TỪNG kênh R/G/B — 5% ~ ±13, đủ chặt để lệch một nấc Material shade
+/// vẫn bị bắt (green.shade500 -> shade600 lệch 5.9%).
+Future<void> _assertComponentColor(
+  WidgetTester tester,
+  Map<String, dynamic> checkpoint,
+  Duration timeout,
+) async {
+  final target = _asMap(checkpoint['target']);
+  if (target.isEmpty) {
+    throw ArgumentError('Checkpoint component_color thiếu target.');
+  }
+  final mauChuan = _text(_asMap(checkpoint['expect']), 'color');
+  if (mauChuan.isEmpty) {
+    throw StateError(
+      'Tiêu chí màu chưa có giá trị chuẩn — hãy capture lại oracle rồi publish lại.',
+    );
+  }
+  final moTa = _moTaTarget(target);
+  await _waitUntil(
+    tester,
+    () => _finder(target).evaluate().isNotEmpty,
+    timeout,
+    'Không thấy $moTa trên màn hình nên không chấm được màu.',
+  );
+  final khung = _khungThanhPhan(tester, target);
+  if (khung == null) throw StateError('Không đo được khung của $moTa.');
+  if (!await _baoDamAnhCuoi(tester)) {
+    throw StateError('Không chụp được màn hình để lấy màu của $moTa.');
+  }
+  final man = _coManHinh(tester);
+  final tiLe = man.width > 0 ? _anhCuoiW / man.width : 1.0;
+  final mauBai = _mauChinhTrongVung(khung, tiLe);
+  if (mauBai == null) {
+    throw StateError('Vùng của $moTa không có pixel nào khác màu nền để lấy màu.');
+  }
+  _soMau(
+    mauChuan,
+    mauBai,
+    _double(checkpoint['tolerance_pct'], 5),
+    'Màu của $moTa',
+  );
+}
+
+/// Đo vị trí + màu chuẩn của mọi thành phần được chấm giao diện, ghi cạnh
+/// captured-output.db. GoldenOracleCaptureService nhặt về rồi nướng vào chính
+/// checkpoint trong behavior_plan.json — người ra đề không phải gõ tay toạ độ nào.
+Future<void> _luuBoCucChuan(
+  WidgetTester tester,
+  List<Map<String, dynamic>> cases,
+) async {
+  final outputPath = Platform.environment['GRADER_CAPTURE_OUTPUT_PATH'] ?? '';
+  if (outputPath.isEmpty) return;
+  const loaiGiaoDien = {
+    'component_present',
+    'component_position',
+    'component_color',
+  };
+  // LUÔN chụp ảnh khi capture oracle, kể cả khi đề chưa có tiêu chí màu nào: capture
+  // vốn đã chụp một tấm cho ảnh chuẩn nên thêm phép đo màu gần như miễn phí, mà nhờ
+  // vậy người ra đề bật chấm màu sau này thì số chuẩn đã nằm sẵn trong manifest.
+  await _baoDamAnhCuoi(tester);
+  final man = _coManHinh(tester);
+  final tiLe = man.width > 0 && _anhCuoiW > 0 ? _anhCuoiW / man.width : 1.0;
+
+  final thanhPhan = <String, dynamic>{};
+  final mauApp = _mauChuDao(tester);
+  for (final c in cases) {
+    final checkpoint = _asMap(c['checkpoint']);
+    final kind = _text(checkpoint, 'kind');
+    final khoa = _khoaBoCuc(c, checkpoint);
+    if (khoa.isEmpty) continue;
+    // Màu chủ đạo không gắn với thành phần nào nên không có khung để đo.
+    if (kind == 'theme_color') {
+      if (mauApp != null) thanhPhan[khoa] = <String, dynamic>{'color': mauApp};
+      continue;
+    }
+    if (!loaiGiaoDien.contains(kind)) continue;
+    final khung = _khungThanhPhan(tester, _asMap(checkpoint['target']));
+    if (khung == null) continue;
+    thanhPhan[khoa] = <String, dynamic>{
+      'test_id': _text(c, 'test_id'),
+      'left': khung.left,
+      'top': khung.top,
+      'width': khung.width,
+      'height': khung.height,
+      'center_x': khung.center.dx,
+      'center_y': khung.center.dy,
+      if (_anhCuoi != null) 'color': _mauChinhTrongVung(khung, tiLe),
+    };
+  }
+  if (thanhPhan.isEmpty) return;
+  final tep = File(
+    p.join(File(outputPath).parent.path, 'captured-layout.json'),
+  );
+  tep.parent.createSync(recursive: true);
+  tep.writeAsStringSync(
+    jsonEncode(<String, dynamic>{
+      'schema_version': '1.0',
+      'execution_code': _text(
+        cases.first,
+        'execution_code',
+        _text(cases.first, 'scenario_code'),
+      ),
+      'screen': <String, dynamic>{
+        'width': man.width,
+        'height': man.height,
+        'device_pixel_ratio': tester.view.devicePixelRatio,
+      },
+      'components': thanhPhan,
+    }),
+  );
+  stdout.writeln('Đã đo bố cục chuẩn: ${thanhPhan.length} thành phần.');
+}
+
 /// So màn hình hiện tại với ảnh chuẩn của luồng. Mỗi pixel lệch quá 16/255 ở bất kỳ
 /// kênh màu nào tính là KHÁC; tỉ lệ pixel giống phải đạt ngưỡng của checkpoint.
 Future<void> _assertScreenMatch(
@@ -875,6 +1268,19 @@ Finder _finder(Map<String, dynamic> target) {
       (widget) => widget is Text && (widget.data ?? '').startsWith(textPrefix),
     );
   }
+  // CÓ khóa nhận diện nhưng CHƯA khớp widget nào ở nhịp poll này (ví dụ label khai
+  // đúng mà màn hình chưa mở, hoặc app dùng hint thay label). Đây là "không thấy",
+  // KHÔNG phải "target khai thiếu khóa" — phải trả finder rỗng để _waitUntil còn
+  // poll tiếp và hết giờ báo đúng bản chất. Trước đây nhánh này rơi xuống throw
+  // bên dưới: câu lỗi đổ oan cho đề ("Target không có ...") và vòng chờ chết ngay
+  // nhịp đầu — đúng ca UI_ADD_CHECKPOINT_2/3/9 của PE_PRM393_SP27.
+  const khoaNhanDien = <String>[
+    'semanticId', 'semantic_id', 'valueKey', 'value_key', 'key',
+    'label', 'hint',
+  ];
+  if (khoaNhanDien.any((k) => _text(target, k).isNotEmpty)) {
+    return find.byWidgetPredicate((_) => false);
+  }
   throw ArgumentError(
     'Target không có semanticId/key/label/hint/text/text_prefix: $target',
   );
@@ -943,6 +1349,12 @@ Map<String, String> _materializeVariables(Map<String, dynamic> testCase) {
       'first_name' => 'First${100 + random.nextInt(899)}',
       'last_name' => 'Last${100 + random.nextInt(899)}',
       'phone' => '09${10000000 + random.nextInt(89999999)}',
+      // Ô nhập có ĐỊNH DẠNG bắt buộc (số tiền, ngày). Bộ sinh phải giữ đúng định dạng,
+      // nếu không validate của chính đề chặn và luồng ghi dữ liệu không lưu được gì.
+      'integer' => '${1000 + random.nextInt(898999)}',
+      'date' =>
+        '2026-${(1 + random.nextInt(12)).toString().padLeft(2, '0')}'
+            '-${(1 + random.nextInt(28)).toString().padLeft(2, '0')}',
       _ => 'value_${100000 + random.nextInt(899999)}',
     };
   }

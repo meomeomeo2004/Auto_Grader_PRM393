@@ -28,6 +28,15 @@ public class BehaviorAuthoringService {
             // Tiêu chí "thành phần giao diện có mặt" — sinh từ bảng tick trên trang soạn đề.
             // Mỗi event là MỘT thành phần; engine có nhánh riêng cho kind này.
             "component_present",
+            // Vị trí và màu của MỘT thành phần, mỗi mặt một tiêu chí riêng. Giá trị chuẩn
+            // do engine đo trên Golden lúc capture oracle rồi nướng vào đây, không gõ tay.
+            "component_position",
+            "component_color",
+            // Màu chủ đạo của app: đọc thẳng ColorScheme từ cây widget, KHÔNG lấy mẫu
+            // pixel. Bù đúng điểm mù của component_color — Material 3 cố ý làm các vai
+            // outline/onSurfaceVariant gần như xám trung tính nên thành phần chỉ có
+            // viền hoặc chữ hầu như không mang thông tin về bảng màu.
+            "theme_color",
             // So bố cục màn hình với ảnh chuẩn chụp từ Golden trong cùng container.
             "screen_match");
     private static final Set<String> ACTIONS = Set.of(
@@ -331,6 +340,30 @@ public class BehaviorAuthoringService {
             event.putIfAbsent("stage", "ASSERT");
             event.putIfAbsent("action", "observe_ui");
             event.putIfAbsent("browser", "flutter_tester");
+        } else if ("theme_color".equals(kind)) {
+            // KHÔNG cần target: màu chủ đạo là của cả app, không gắn với thành phần nào.
+            event.putIfAbsent("checkpoint", true);
+            // 20% mặc định — rộng hơn hẳn màu thành phần. Vì phép đo này CHÍNH XÁC
+            // tuyệt đối (không nhiễu khử răng cưa, không lẫn nền) nên sai số không dùng
+            // để chống nhiễu mà để tha sắc độ lân cận trong cùng họ màu. Đo thật:
+            // xanh-vs-tím lệch 40,4% nên 20% vẫn bắt chắc.
+            event.putIfAbsent("tolerance_pct", 20);
+            event.putIfAbsent("stage", "ASSERT");
+            event.putIfAbsent("action", "observe_ui");
+            event.putIfAbsent("browser", "flutter_tester");
+        } else if ("component_position".equals(kind) || "component_color".equals(kind)) {
+            // Cùng ràng buộc với component_present: không có target thì không biết đo cái gì.
+            if (map(event.get("target")).isEmpty()) {
+                throw new IllegalArgumentException("Tiêu chí vị trí/màu phải có target (label/hint/text)");
+            }
+            event.putIfAbsent("checkpoint", true);
+            // 5% mặc định. VỊ TRÍ tính theo % chiều rộng/cao màn hình nên đổi viewport không
+            // làm lệch chính sách; MÀU tính theo % của 255 trên từng kênh R/G/B (5% ~ ±13,
+            // đủ chặt để lệch một nấc Material shade vẫn bị bắt).
+            event.putIfAbsent("tolerance_pct", 5);
+            event.putIfAbsent("stage", "ASSERT");
+            event.putIfAbsent("action", "observe_ui");
+            event.putIfAbsent("browser", "flutter_tester");
         } else if ("component_present".equals(kind)) {
             // Không có target thì lúc chấm không biết tìm widget nào — chặn ngay lúc ghi,
             // đừng để lỗi trôi tới preflight.
@@ -444,7 +477,7 @@ public class BehaviorAuthoringService {
                     int occurrence = variableOccurrences.merge(variableBase, 1, Integer::sum);
                     String variable = occurrence == 1 ? variableBase : variableBase + "_" + occurrence;
                     variables.put(variable, Map.of(
-                            "generator", generatorFor(variable),
+                            "generator", generatorFor(variable, String.valueOf(event.get("value"))),
                             "example", String.valueOf(event.get("value")),
                             "target", variableBase,
                             "version", occurrence));
@@ -456,6 +489,9 @@ public class BehaviorAuthoringService {
                 steps.add(step);
             } else if ("checkpoint".equals(kind)
                     || "component_present".equals(kind)
+                    || "component_position".equals(kind)
+                    || "component_color".equals(kind)
+                    || "theme_color".equals(kind)
                     || "screen_match".equals(kind)
                     || (bool(event.get("checkpoint"), false)
                     && Set.of("ui_observation", "database_observation", "navigation").contains(kind))) {
@@ -685,6 +721,54 @@ public class BehaviorAuthoringService {
         Map<String, Object> out = new LinkedHashMap<>(scenarioView(scenario, true));
         out.put("oracle", oracleView(oracle));
         return out;
+    }
+
+    /**
+     * Nướng VỊ TRÍ và MÀU chuẩn — do engine đo trên chính Golden lúc capture oracle — vào
+     * các tiêu chí giao diện của scenario.
+     *
+     * Vì sao không để người ra đề gõ tay toạ độ: toạ độ phụ thuộc viewport, phông chữ và
+     * bản Flutter; gõ tay thì sai ngay lần đầu và không ai kiểm được. Đo tự động thì số
+     * chuẩn luôn sinh ra từ cùng một lượt chạy với ảnh mẫu nên hai thứ không thể lệch nhau.
+     *
+     * Khoá nối là `id` của checkpoint, KHÔNG phải test_id: test_id do materializer sinh lúc
+     * bung ma trận nên không tồn tại ở tầng soạn đề.
+     */
+    @Transactional
+    public int applyCapturedLayout(String scenarioId, Map<String, Object> components) {
+        if (components == null || components.isEmpty()) return 0;
+        BehaviorScenario scenario = scenario(scenarioId);
+        ensureEditable(suite(scenario.getSuiteId()));
+        List<Map<String, Object>> checkpoints = new ArrayList<>(readObjectList(scenario.getCheckpointsJson()));
+        int daNuong = 0;
+        for (Map<String, Object> checkpoint : checkpoints) {
+            String kind = text(checkpoint, "kind", "");
+            boolean laViTri = "component_position".equals(kind);
+            boolean laMau = "component_color".equals(kind) || "theme_color".equals(kind);
+            if (!laViTri && !laMau) continue;
+            Map<String, Object> doDuoc = map(components.get(text(checkpoint, "id", "")));
+            if (doDuoc.isEmpty()) continue;
+            Map<String, Object> mongDoi = new LinkedHashMap<>(map(checkpoint.get("expect")));
+            if (laViTri) {
+                if (doDuoc.get("center_x") == null || doDuoc.get("center_y") == null) continue;
+                mongDoi.put("center_x", doDuoc.get("center_x"));
+                mongDoi.put("center_y", doDuoc.get("center_y"));
+                mongDoi.put("width", doDuoc.get("width"));
+                mongDoi.put("height", doDuoc.get("height"));
+            } else {
+                String mau = text(doDuoc, "color", "");
+                // Thành phần trong suốt hoàn toàn thì không có màu để so — bỏ qua, để tiêu chí
+                // báo "chưa có giá trị chuẩn" còn hơn nướng bừa một màu sai.
+                if (mau.isBlank()) continue;
+                mongDoi.put("color", mau);
+            }
+            checkpoint.put("expect", mongDoi);
+            daNuong++;
+        }
+        if (daNuong == 0) return 0;
+        scenario.setCheckpointsJson(json(checkpoints));
+        scenarios.save(scenario);
+        return daNuong;
     }
 
     @Transactional
@@ -1183,12 +1267,21 @@ public class BehaviorAuthoringService {
         return candidate.isBlank() ? "input_" + index : candidate;
     }
 
-    private String generatorFor(String variable) {
+    private String generatorFor(String variable, String example) {
         if (variable.contains("email")) return "email";
         if (variable.contains("uid") || variable.endsWith("_id")) return "stable_id";
         if (variable.contains("first")) return "first_name";
         if (variable.contains("last")) return "last_name";
         if (variable.contains("phone")) return "phone";
+        // ĐỊNH DẠNG CỦA Ô NHẬP QUYẾT ĐỊNH BỘ SINH. Mọi enter_text đều bị biến hoá để
+        // sinh viên không hardcode được theo đề; nhưng bộ sinh "text" trả chuỗi kiểu
+        // value_123456, nên ô Số tiền hay Ngày chi sẽ nhận chữ, validate của chính đề
+        // chặn lại và bài Golden KHÔNG lưu được gì — luồng Thêm hoá ra không thêm.
+        // Đã gặp thật ở PE_PRM393_SP27. Nhìn giá trị người ra đề gõ lúc ghi để chọn
+        // bộ sinh giữ ĐÚNG ĐỊNH DẠNG mà vẫn đổi giá trị mỗi lượt chấm.
+        String mau = example == null ? "" : example.trim();
+        if (mau.matches("\\d{4}-\\d{2}-\\d{2}")) return "date";
+        if (mau.matches("\\d+")) return "integer";
         return "text";
     }
 

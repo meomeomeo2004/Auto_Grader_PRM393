@@ -230,7 +230,19 @@ final class StudentReportArchiveBuilder {
         }
     }
 
-    /** Chèn 1 ảnh PNG tại (col,row), thu về ~45% cỡ thật; trả số HÀNG ảnh chiếm. */
+    /** Chiều cao ảnh bằng chứng khi hiển thị trong sheet, tính bằng điểm ảnh. */
+    private static final double ANH_CAO_PX = 380.0;
+
+    /**
+     * Chèn 1 ảnh PNG tại (col,row), thu về ĐÚNG {@link #ANH_CAO_PX} bất kể ảnh gốc to nhỏ;
+     * trả số HÀNG ảnh chiếm (hàng mặc định 15pt = 20px).
+     *
+     * Vì sao không thu theo tỉ lệ cố định: bản cũ dùng {@code resize(0.45)} rồi tính số hàng
+     * từ chiều cao ảnh GỐC, tức là ngầm giả định ảnh luôn cao 844px. Khung chấm nay là máy
+     * Android 412×915 dp mật độ 2.625 nên ảnh cao 2402px — tỉ lệ cố định sẽ cho ra ảnh to
+     * gấp gần ba và số hàng sai bét. Neo theo chiều cao hiển thị thì đổi khung máy bao nhiêu
+     * lần nữa cũng không hỏng.
+     */
     private int picture(XSSFWorkbook wb, Drawing<?> drawing, Path png, int col, int row) throws Exception {
         byte[] bytes = Files.readAllBytes(png);
         int index = wb.addPicture(bytes, Workbook.PICTURE_TYPE_PNG);
@@ -238,10 +250,9 @@ final class StudentReportArchiveBuilder {
         anchor.setCol1(col);
         anchor.setRow1(row);
         Picture pic = drawing.createPicture(anchor, index);
-        pic.resize(0.45);
-        // Hàng mặc định 15pt = 20px; ảnh 844px × 0.45 ≈ 380px ≈ 19 hàng.
-        double heightPx = pic.getImageDimension().getHeight();
-        return (int) Math.ceil(heightPx / 20.0);
+        double caoGoc = pic.getImageDimension().getHeight();
+        pic.resize(caoGoc > 0 ? ANH_CAO_PX / caoGoc : 0.45);
+        return (int) Math.ceil(ANH_CAO_PX / 20.0);
     }
 
     private List<Path> listPngs(Path dir) {

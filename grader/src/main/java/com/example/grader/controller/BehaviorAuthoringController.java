@@ -7,6 +7,7 @@ import com.example.grader.service.BehaviorSuiteMaterializer;
 import com.example.grader.service.GoldenValidationService;
 import com.example.grader.service.GoldenRuntimeService;
 import com.example.grader.service.GoldenOracleCaptureService;
+import com.example.grader.service.StaticRuleService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.core.io.Resource;
@@ -33,6 +34,7 @@ public class BehaviorAuthoringController {
     private final GoldenValidationService validationService;
     private final GoldenRuntimeService runtimeService;
     private final GoldenOracleCaptureService captureService;
+    private final StaticRuleService staticRuleService;
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
 
     public BehaviorAuthoringController(BehaviorAuthoringService service,
@@ -40,13 +42,27 @@ public class BehaviorAuthoringController {
                                        BehaviorArtifactService artifactService,
                                        GoldenValidationService validationService,
                                        GoldenRuntimeService runtimeService,
-                                       GoldenOracleCaptureService captureService) {
+                                       GoldenOracleCaptureService captureService,
+                                       StaticRuleService staticRuleService) {
         this.service = service;
         this.materializer = materializer;
         this.artifactService = artifactService;
         this.validationService = validationService;
         this.runtimeService = runtimeService;
         this.captureService = captureService;
+        this.staticRuleService = staticRuleService;
+    }
+
+    /** Luật chấm tĩnh (Kiến trúc/lint): trạng thái đã lưu + preset kèm đối chứng Golden. */
+    @GetMapping("/suites/{id}/static-rules")
+    public ResponseEntity<?> staticRules(@PathVariable String id) {
+        return call(() -> staticRuleService.view(id));
+    }
+
+    @PutMapping("/suites/{id}/static-rules")
+    public ResponseEntity<?> saveStaticRules(@PathVariable String id,
+                                             @RequestBody Map<String, Object> body) {
+        return call(() -> staticRuleService.save(id, body));
     }
 
     @PostMapping("/golden-apps")

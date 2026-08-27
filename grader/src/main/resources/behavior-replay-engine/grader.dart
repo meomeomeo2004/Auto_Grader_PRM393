@@ -52,6 +52,12 @@ Future<void> main() async {
         ? 'Scenario $scenarioCode vượt quá ${limit.inSeconds} giây ở ${stage ?? 'UNKNOWN'}.'
         : _shortProcessError(process);
     runnerErrors.add(message);
+    // Bài không biên dịch thì flutter test chết TRƯỚC marker STUDENT_* đầu tiên,
+    // stage rỗng và origin từng rơi về UNDETERMINED → merger loại khỏi mẫu số →
+    // bài thiếu một dấu ; được 10.0 nhờ 4 tiêu chí kiến trúc còn chấm được (đo
+    // thật 23/8). Lỗi biên dịch trỏ vào lib/ là lỗi BÀI LÀM: giữ nguyên mẫu số.
+    final compileOrigin =
+        timeout ? '' : _nguonLoiBienDich('${process.stdout}\n${process.stderr}');
     for (final id in missing) {
       results[id] = <String, dynamic>{
         'passed': false,
@@ -61,7 +67,9 @@ Future<void> main() async {
           'kind': timeout ? 'PROCESS_TIMEOUT' : 'SCENARIO_NOT_RUN',
           'scenario_code': scenarioCode,
           'stage': stage,
-          'origin': stage?.startsWith('STUDENT_') == true ? 'STUDENT' : 'UNDETERMINED',
+          'origin': stage?.startsWith('STUDENT_') == true
+              ? 'STUDENT'
+              : (compileOrigin.isNotEmpty ? compileOrigin : 'UNDETERMINED'),
         },
       };
     }
@@ -296,4 +304,19 @@ class _ProcessResult {
   final String stdout;
   final String stderr;
   final bool timedOut;
+}
+
+/// Lỗi biên dịch thuộc về ai. CFE in `đường/dẫn.dart:dòng:cột: Error:` — đường
+/// dẫn trong lib/ là mã SINH VIÊN, trong test/ là mã BỘ ĐỀ. Bài hỏng thường kéo
+/// lỗi lan sang test/ (import gãy) nên chỉ cần MỘT lỗi ở lib/ là quy cho bài.
+/// Không thấy dạng lỗi này (chết vì lý do khác) thì trả rỗng để giữ UNDETERMINED.
+String _nguonLoiBienDich(String output) {
+  final matches = RegExp(r'([^\s:]+\.dart):\d+:\d+:\s*Error:').allMatches(output);
+  var coTest = false;
+  for (final m in matches) {
+    final path = (m.group(1) ?? '').replaceAll('\\', '/');
+    if (path.startsWith('lib/') || path.contains('/lib/')) return 'STUDENT';
+    if (path.startsWith('test/') || path.contains('/test/')) coTest = true;
+  }
+  return coTest ? 'TESTCASE' : '';
 }

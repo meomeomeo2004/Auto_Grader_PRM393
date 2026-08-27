@@ -29,6 +29,9 @@ interface GoldenValidation { status: "NOT_RUN" | "RUNNING" | "PASSED" | "FAILED"
 interface RuntimeStatus { status: string; runtime_url?: string | null; runtime_path?: string | null; available?: boolean; cached?: boolean; message?: string; metadata?: JsonMap }
 interface CodePreviewFile { name: string; description: string; scope: "SCENARIO" | "BUNDLE" | "ENGINE"; content: string }
 interface CodePreview { suite_id: string; suite_code: string; selected_scenario_code?: string | null; scenario_count: number; criterion_count: number; files: CodePreviewFile[] }
+interface StaticRuleGolden { passed: boolean | null; detail: string }
+interface StaticRule { id: string; name: string; kind: "lint" | "source_pattern"; lint_code?: string; config?: JsonMap; weight: number; group_id: string; group_name: string; skill_code?: string; description?: string; golden?: StaticRuleGolden }
+interface StaticRulesView { suite_id: string; golden_available: boolean; rules: StaticRule[]; presets: StaticRule[] }
 
 const ARTIFACTS: { type: ArtifactType; title: string; owner: "teacher" | "system"; accept: string; hint: string; icon: typeof Database }[] = [
   { type: "STUDENT_DATABASE", title: "1. Database phát cho sinh viên", owner: "teacher", accept: ".db,.sqlite,.sqlite3", hint: "Dữ liệu mẫu công khai đi cùng đề.", icon: Database },
@@ -125,18 +128,33 @@ function BehaviorAuthoringEditor() {
   const [uiInventory, setUiInventory] = useState<{ attribute: string; value: string; role: string; checked: boolean }[] | null>(null);
   const [uiScreenName, setUiScreenName] = useState("");
   const [uiGroupWeight, setUiGroupWeight] = useState(20);
-  // So bố cục với ảnh chuẩn (chụp từ Golden trong cùng Docker lúc capture oracle).
-  const [screenMatchOn, setScreenMatchOn] = useState(true);
-  const [screenMatchWeight, setScreenMatchWeight] = useState(2);
-  const [screenMatchThreshold, setScreenMatchThreshold] = useState(90);
-  const [viewportWidth, setViewportWidth] = useState(390);
-  const [viewportHeight, setViewportHeight] = useState(844);
-  const [testDesktop, setTestDesktop] = useState(true);
-  const [desktopWidth, setDesktopWidth] = useState(1280);
-  const [desktopHeight, setDesktopHeight] = useState(800);
+  // Chấm VỊ TRÍ và MÀU của từng thành phần đã tick. Sai số mặc định 5%: vị trí tính theo
+  // % chiều rộng/cao màn hình, màu tính theo % của 255 trên từng kênh R/G/B.
+  const [viTriOn, setViTriOn] = useState(true);
+  const [viTriWeight, setViTriWeight] = useState(5);
+  const [viTriSaiSo, setViTriSaiSo] = useState(5);
+  const [mauOn, setMauOn] = useState(true);
+  const [mauWeight, setMauWeight] = useState(5);
+  const [mauSaiSo, setMauSaiSo] = useState(5);
+  // Màu chủ đạo của app — MỘT dòng cho cả màn, đọc thẳng ColorScheme. Sai số rộng hơn
+  // hẳn màu thành phần vì phép đo này chính xác tuyệt đối, không có nhiễu để chống.
+  const [mauAppOn, setMauAppOn] = useState(true);
+  const [mauAppWeight, setMauAppWeight] = useState(2);
+  const [mauAppSaiSo, setMauAppSaiSo] = useState(20);
+  // Khung máy Android tầm trung (Pixel): 412×915 dp. Sinh viên làm bài trên máy ảo
+  // Android nên đây là khung DUY NHẤT còn ý nghĩa; khung desktop đã bỏ hẳn.
+  //
+  // KHÔNG có ô mật độ điểm ảnh: mọi phép chấm bố cục đo bằng dp (tâm thành phần, sai số
+  // theo % chiều rộng/cao), nên mật độ không đổi một điểm nào — nó chỉ quyết định ảnh
+  // bằng chứng nét tới đâu và nặng bao nhiêu. Để cố định 1 cho ảnh gọn.
+  const [viewportWidth, setViewportWidth] = useState(412);
+  const [viewportHeight, setViewportHeight] = useState(915);
   const [codePreview, setCodePreview] = useState<CodePreview | null>(null);
   const [previewFileName, setPreviewFileName] = useState("");
   const [editingScenarioId, setEditingScenarioId] = useState<string | null>(null);
+  // Luật chấm tĩnh (Kiến trúc/lint): preset do backend cung cấp kèm đối chứng Golden.
+  const [staticRules, setStaticRules] = useState<StaticRulesView | null>(null);
+  const [staticSel, setStaticSel] = useState<Record<string, { checked: boolean; weight: number }>>({});
   const goldenFrame = useRef<HTMLIFrameElement | null>(null);
   const authoringPanel = useRef<HTMLDivElement | null>(null);
   // The Golden iframe can still emit a debounced event immediately after Stop.
@@ -187,6 +205,17 @@ function BehaviorAuthoringEditor() {
     setReadiness(readyData);
     setValidation(validationData);
     setRuntimeStatus(runtimeData);
+    // Luật tĩnh tải riêng và chịu lỗi độc lập: panel ẩn đi chứ không kéo sập cả trang.
+    try {
+      const rulesView = await api<StaticRulesView>(`/behavior-authoring/suites/${suiteId}/static-rules`);
+      setStaticRules(rulesView);
+      const sel: Record<string, { checked: boolean; weight: number }> = {};
+      rulesView.presets.forEach((p) => { sel[p.id] = { checked: false, weight: p.weight }; });
+      rulesView.rules.forEach((r) => { sel[r.id] = { checked: true, weight: r.weight }; });
+      setStaticSel(sel);
+    } catch {
+      setStaticRules(null);
+    }
     const orderedRecordings = suiteData.recordings || [];
     const active = orderedRecordings.find((item) => item.status === "ACTIVE");
     // Chỉ khôi phục STOPPED khi đó là lần thao tác mới nhất. Một phiên lỗi cũ
@@ -383,57 +412,91 @@ function BehaviorAuthoringEditor() {
     });
   };
 
+  /** Chia `total` điểm cho `n` dòng theo bội 0,25; phần dư dồn vào dòng cuối để tổng khớp tuyệt đối. */
+  const chiaDeu = (total: number, n: number) => {
+    const per = Math.round((total / n) * 4) / 4;
+    return Array.from({ length: n }, (_, i) =>
+      i === n - 1 ? Math.round((total - per * (n - 1)) * 4) / 4 : per);
+  };
+
   /**
-   * Lưu các thành phần đã tick thành tiêu chí `component_present` trên phiên ghi hiện tại.
-   * Điểm nhóm chia đều theo bội 0,25; phần dư dồn vào dòng cuối để tổng khớp tuyệt đối.
+   * Lưu các thành phần đã tick thành tiêu chí giao diện trên phiên ghi hiện tại.
+   *
+   * BA MẶT TÁCH RỜI, mỗi mặt một nhóm điểm riêng: NỘI DUNG (có mặt trên màn hình),
+   * VỊ TRÍ (tâm thành phần so với Golden) và MÀU SẮC (màu chính so với Golden).
+   * Tách ra vì một lỗi chỉ nên trừ đúng phần nó sai: tô lệch màu thì mất điểm màu chứ
+   * không mất điểm nội dung.
+   *
+   * Vì sao KHÔNG còn nút "so bố cục với ảnh chuẩn": phép so cả màn bằng pixel tính luôn
+   * nền trắng nên màn hình càng trống càng được điểm. Đo thật trên 19 bài của SP27 cho
+   * thấy xếp hạng bị đảo — app SAI HẲN ĐỀ được 90,1% còn bài làm ĐÚNG chỉ 88,7%.
+   * Không ngưỡng nào cứu được, nên bỏ hẳn thay vì chỉnh số.
+   *
+   * Giá trị chuẩn của vị trí và màu KHÔNG gõ tay: engine tự đo trên Golden lúc capture
+   * oracle rồi nướng vào tiêu chí.
+   *
    * Tiêu chí neo vào TRẠNG THÁI CUỐI của luồng đang ghi — muốn chấm màn nào, đưa app tới
    * màn đó rồi quét.
    */
   const saveUiCriteria = () => {
     const recordingId = activeRecordingId.current;
     const chosen = (uiInventory || []).filter((it) => it.checked);
-    const anything = chosen.length > 0 || (screenMatchOn && Number(screenMatchWeight) > 0);
-    if (!recordingId || !acceptsRecorderEvents.current || recording?.status !== "ACTIVE" || !suite || !anything) return;
+    if (!recordingId || !acceptsRecorderEvents.current || recording?.status !== "ACTIVE" || !suite || chosen.length === 0) return;
     run("record-ui-criteria", async () => {
       const screen = uiScreenName.trim() || "Màn hình";
-      const groupId = "G_UI_" + screen.normalize("NFD").replace(/[̀-ͯ]/g, "")
+      const slug = screen.normalize("NFD").replace(/[̀-ͯ]/g, "")
         .replace(/đ/g, "d").replace(/Đ/g, "D").replace(/[^a-zA-Z0-9]+/g, "_").toUpperCase().replace(/^_+|_+$/g, "");
-      const total = Math.max(0.25, Number(uiGroupWeight) || 0);
-      const per = Math.round((total / chosen.length) * 4) / 4;
-      for (let i = 0; i < chosen.length; i++) {
-        const it = chosen[i];
-        const weight = i === chosen.length - 1
-          ? Math.round((total - per * (chosen.length - 1)) * 4) / 4
-          : per;
-        await api(`/behavior-authoring/recordings/${recordingId}/events`, {
-          method: "POST",
-          body: JSON.stringify({
-            kind: "component_present", checkpoint: true, stage: "ASSERT", action: "observe_ui",
-            browser: "flutter_tester",
-            target: { [it.attribute]: it.value }, visible: true,
-            attribute: it.attribute, attributeValue: it.value, valueType: "string", value: "",
-            name: `${screen} — có ${it.value}`, weight,
-            ui_group: { id: groupId, name: `Giao diện — ${screen}` },
-          }),
-        });
+
+      const cacMat = [
+        { bat: true, kind: "component_present", hau: "", nhan: "có", diem: uiGroupWeight, saiSo: 0 },
+        { bat: viTriOn, kind: "component_position", hau: "_VITRI", nhan: "đúng vị trí", diem: viTriWeight, saiSo: viTriSaiSo },
+        { bat: mauOn, kind: "component_color", hau: "_MAU", nhan: "đúng màu", diem: mauWeight, saiSo: mauSaiSo },
+      ].filter((m) => m.bat && Number(m.diem) > 0);
+
+      let daLuu = 0;
+      for (const mat of cacMat) {
+        const diem = chiaDeu(Math.max(0.25, Number(mat.diem) || 0), chosen.length);
+        for (let i = 0; i < chosen.length; i++) {
+          const it = chosen[i];
+          await api(`/behavior-authoring/recordings/${recordingId}/events`, {
+            method: "POST",
+            body: JSON.stringify({
+              kind: mat.kind, checkpoint: true, stage: "ASSERT", action: "observe_ui",
+              browser: "flutter_tester",
+              target: { [it.attribute]: it.value }, visible: true,
+              attribute: it.attribute, attributeValue: it.value, valueType: "string", value: "",
+              name: `${screen} — ${mat.nhan} ${it.value}`, weight: diem[i],
+              ...(mat.saiSo > 0 ? { tolerance_pct: Math.min(50, Math.max(0.5, Number(mat.saiSo))) } : {}),
+              ui_group: {
+                id: "G_UI_" + slug + mat.hau,
+                name: `Giao diện — ${screen}${mat.hau === "" ? "" : mat.hau === "_VITRI" ? " (vị trí)" : " (màu sắc)"}`,
+              },
+            }),
+          });
+          daLuu++;
+        }
       }
-      let extra = 0;
-      if (screenMatchOn && Number(screenMatchWeight) > 0) {
+
+      // MÀU CHỦ ĐẠO — một dòng duy nhất, không nhân theo thành phần: nó là màu của cả
+      // app chứ không của riêng widget nào. Bù điểm mù của màu từng thành phần: đo thật
+      // trên SP27 cho thấy app sai hẳn bảng màu chỉ mất 4/16 tiêu chí màu, vì 12 thành
+      // phần còn lại chỉ có viền hoặc chữ nên vốn gần giống nhau ở mọi bảng màu.
+      if (mauAppOn && Number(mauAppWeight) > 0) {
         await api(`/behavior-authoring/recordings/${recordingId}/events`, {
           method: "POST",
           body: JSON.stringify({
-            kind: "screen_match", checkpoint: true, stage: "ASSERT", action: "observe_ui",
+            kind: "theme_color", checkpoint: true, stage: "ASSERT", action: "observe_ui",
             browser: "flutter_tester",
-            threshold: Math.min(100, Math.max(1, Number(screenMatchThreshold))) / 100,
-            weight: Math.round(Number(screenMatchWeight) * 4) / 4,
-            name: `${screen} — bố cục khớp ảnh mẫu (≥${screenMatchThreshold}%)`,
-            ui_group: { id: groupId, name: `Giao diện — ${screen}` },
+            weight: Math.round(Number(mauAppWeight) * 4) / 4,
+            tolerance_pct: Math.min(50, Math.max(0.5, Number(mauAppSaiSo))),
+            name: `${screen} — dùng đúng màu chủ đạo của đề`,
+            ui_group: { id: "G_UI_" + slug + "_MAU", name: `Giao diện — ${screen.toLowerCase()} (màu sắc)` },
           }),
         });
-        extra = 1;
+        daLuu++;
       }
       setUiInventory(null);
-      setNotice(`Đã lưu ${chosen.length + extra} tiêu chí giao diện (nhóm "${screen}").`);
+      setNotice(`Đã lưu ${daLuu} tiêu chí giao diện cho ${chosen.length} thành phần của màn "${screen}".`);
       await refresh(suite.id);
     });
   };
@@ -545,8 +608,9 @@ function BehaviorAuthoringEditor() {
           weight: scenarioWeight,
           ...(editingScenarioId ? { replace_scenario_id: editingScenarioId } : {}),
           viewports: [
+            // device_pixel_ratio để cố định 1: chấm bố cục đo bằng dp nên mật độ không
+            // đổi điểm, chỉ làm ảnh bằng chứng nặng thêm.
             { width: viewportWidth, height: viewportHeight, device_pixel_ratio: 1, name: "phone" },
-            ...(testDesktop ? [{ width: desktopWidth, height: desktopHeight, device_pixel_ratio: 1, name: "desktop" }] : []),
           ],
         }),
       });
@@ -559,6 +623,23 @@ function BehaviorAuthoringEditor() {
         : "Đã replay Golden trên Database ẩn, sinh Output Database, oracle và testcase-definition.json.");
     });
   };
+
+  const saveStaticRules = () => suite && run("static-rules", async () => {
+    const chosen = (staticRules?.presets || [])
+      .filter((p) => staticSel[p.id]?.checked)
+      .map((p) => ({ ...p, weight: staticSel[p.id].weight, golden: undefined }));
+    const view = await api<StaticRulesView>(`/behavior-authoring/suites/${suite.id}/static-rules`, {
+      method: "PUT",
+      body: JSON.stringify({ rules: chosen }),
+    });
+    setStaticRules(view);
+    const sel: Record<string, { checked: boolean; weight: number }> = {};
+    view.presets.forEach((p) => { sel[p.id] = { checked: false, weight: p.weight }; });
+    view.rules.forEach((r) => { sel[r.id] = { checked: true, weight: r.weight }; });
+    setStaticSel(sel);
+    const total = view.rules.reduce((sum, r) => sum + Number(r.weight || 0), 0);
+    setNotice(`Đã lưu ${view.rules.length} luật tĩnh (${total} điểm). Publish lại bộ chấm để đưa vào đề.`);
+  });
 
   const publish = () => suite && run("publish", async () => {
     await api(`/behavior-authoring/suites/${suite.id}/publish`, { method: "POST" });
@@ -589,19 +670,15 @@ function BehaviorAuthoringEditor() {
     if (!suite || !item.id || recording) return;
     run(`revise-scenario-${String(item.id)}`, async () => {
       const viewports = Array.isArray(item.viewports) ? item.viewports as JsonMap[] : [];
+      // Chỉ còn khung điện thoại. Scenario cũ có thể còn viewport "desktop" — bỏ qua,
+      // sinh lại testcase sẽ ghi đè bằng đúng một khung.
       const phone = viewports.find((viewport) => String(viewport.name || "").toLowerCase() === "phone") || viewports[0];
-      const desktop = viewports.find((viewport) => String(viewport.name || "").toLowerCase() === "desktop") || viewports[1];
       setScenarioCode(String(item.scenario_code || ""));
       setScenarioName(String(item.name || item.scenario_code || ""));
       setScenarioWeight(Number(item.weight || 1));
       if (phone) {
-        setViewportWidth(Number(phone.width || 390));
-        setViewportHeight(Number(phone.height || 844));
-      }
-      setTestDesktop(Boolean(desktop));
-      if (desktop) {
-        setDesktopWidth(Number(desktop.width || 1280));
-        setDesktopHeight(Number(desktop.height || 800));
+        setViewportWidth(Number(phone.width || 412));
+        setViewportHeight(Number(phone.height || 915));
       }
       const created = await api<Recording>(`/behavior-authoring/scenarios/${String(item.id)}/revision-recording`, { method: "POST" });
       activeRecordingId.current = created.id;
@@ -745,18 +822,36 @@ function BehaviorAuthoringEditor() {
                     <label className="flex items-center gap-1 text-sm">Điểm nhóm
                       <input type="number" min={0.25} step={0.25} value={uiGroupWeight} onChange={(e) => setUiGroupWeight(Number(e.target.value))} className="w-20 rounded-lg border border-slate-300 px-2 py-1 text-sm dark:border-slate-600 dark:bg-slate-800" />
                     </label>
-                    <button onClick={saveUiCriteria} disabled={Boolean(busy) || (!uiInventory.some((it) => it.checked) && !screenMatchOn)} className="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-bold text-white disabled:opacity-40">
-                      Lưu {uiInventory.filter((it) => it.checked).length + (screenMatchOn ? 1 : 0)} tiêu chí
+                    <button onClick={saveUiCriteria} disabled={Boolean(busy) || !uiInventory.some((it) => it.checked)} className="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-bold text-white disabled:opacity-40">
+                      Lưu {uiInventory.filter((it) => it.checked).length * (1 + (viTriOn ? 1 : 0) + (mauOn ? 1 : 0)) + (mauAppOn ? 1 : 0)} tiêu chí
                     </button>
                     <button onClick={() => setUiInventory(null)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-bold text-slate-600 dark:border-slate-600 dark:text-slate-300">Đóng</button>
                   </div>
                   <label className="mt-2 flex cursor-pointer flex-wrap items-center gap-2 rounded-lg border border-dashed border-emerald-400 px-2 py-1.5 text-sm dark:border-emerald-700">
-                    <input type="checkbox" checked={screenMatchOn} onChange={() => setScreenMatchOn((v) => !v)} />
-                    <span className="font-bold">So bố cục với ảnh mẫu</span>
-                    <span className="text-[11px] text-slate-500">(đo thật trên đề POC: cùng app ≈100% · chỉ sai màu chủ đạo ≈97% · bố cục khác hẳn ≈83% — muốn bắt cả sai màu thì đặt ngưỡng 98)</span>
+                    <input type="checkbox" checked={viTriOn} onChange={() => setViTriOn((v) => !v)} />
+                    <span className="font-bold">Chấm vị trí từng thành phần</span>
+                    <span className="text-[11px] text-slate-500">(so tâm thành phần với Golden; sai số tính theo % chiều rộng/cao màn — 8% ≈ {Math.round(viewportWidth * 0.08)}dp ngang, {Math.round(viewportHeight * 0.08)}dp dọc trên khung {viewportWidth}×{viewportHeight}. Đo thật trên SP27: 5% và 8% cho kết quả y hệt, 12% thì bài bố cục sai bắt đầu lọt)</span>
                     <span className="ml-auto flex items-center gap-1 text-xs">
-                      <input type="number" min={0.25} step={0.25} value={screenMatchWeight} onChange={(e) => setScreenMatchWeight(Number(e.target.value))} className="w-16 rounded border border-slate-300 px-1.5 py-0.5 dark:border-slate-600 dark:bg-slate-800" /> điểm ·
-                      ngưỡng <input type="number" min={50} max={100} value={screenMatchThreshold} onChange={(e) => setScreenMatchThreshold(Number(e.target.value))} className="w-14 rounded border border-slate-300 px-1.5 py-0.5 dark:border-slate-600 dark:bg-slate-800" />%
+                      <input type="number" min={0.25} step={0.25} value={viTriWeight} onChange={(e) => setViTriWeight(Number(e.target.value))} className="w-16 rounded border border-slate-300 px-1.5 py-0.5 dark:border-slate-600 dark:bg-slate-800" /> điểm ·
+                      sai số <input type="number" min={0.5} max={50} step={0.5} value={viTriSaiSo} onChange={(e) => setViTriSaiSo(Number(e.target.value))} className="w-14 rounded border border-slate-300 px-1.5 py-0.5 dark:border-slate-600 dark:bg-slate-800" />%
+                    </span>
+                  </label>
+                  <label className="mt-1 flex cursor-pointer flex-wrap items-center gap-2 rounded-lg border border-dashed border-emerald-400 px-2 py-1.5 text-sm dark:border-emerald-700">
+                    <input type="checkbox" checked={mauOn} onChange={() => setMauOn((v) => !v)} />
+                    <span className="font-bold">Chấm màu từng thành phần</span>
+                    <span className="text-[11px] text-slate-500">(so màu chính với Golden; sai số tính theo % của 255 trên từng kênh R/G/B — 5% bắt được cả lệch một nấc Material shade, xanh-vs-tím lệch tới 30%)</span>
+                    <span className="ml-auto flex items-center gap-1 text-xs">
+                      <input type="number" min={0.25} step={0.25} value={mauWeight} onChange={(e) => setMauWeight(Number(e.target.value))} className="w-16 rounded border border-slate-300 px-1.5 py-0.5 dark:border-slate-600 dark:bg-slate-800" /> điểm ·
+                      sai số <input type="number" min={0.5} max={50} step={0.5} value={mauSaiSo} onChange={(e) => setMauSaiSo(Number(e.target.value))} className="w-14 rounded border border-slate-300 px-1.5 py-0.5 dark:border-slate-600 dark:bg-slate-800" />%
+                    </span>
+                  </label>
+                  <label className="mt-1 flex cursor-pointer flex-wrap items-center gap-2 rounded-lg border border-dashed border-emerald-400 px-2 py-1.5 text-sm dark:border-emerald-700">
+                    <input type="checkbox" checked={mauAppOn} onChange={() => setMauAppOn((v) => !v)} />
+                    <span className="font-bold">Chấm màu chủ đạo của app</span>
+                    <span className="text-[11px] text-slate-500">(MỘT dòng cho cả màn, đọc thẳng ColorScheme nên chính xác tuyệt đối — sai số rộng là để tha sắc độ lân cận cùng họ màu, không phải để chống nhiễu; đo thật: xanh-vs-tím lệch 40%)</span>
+                    <span className="ml-auto flex items-center gap-1 text-xs">
+                      <input type="number" min={0.25} step={0.25} value={mauAppWeight} onChange={(e) => setMauAppWeight(Number(e.target.value))} className="w-16 rounded border border-slate-300 px-1.5 py-0.5 dark:border-slate-600 dark:bg-slate-800" /> điểm ·
+                      sai số <input type="number" min={0.5} max={50} step={0.5} value={mauAppSaiSo} onChange={(e) => setMauAppSaiSo(Number(e.target.value))} className="w-14 rounded border border-slate-300 px-1.5 py-0.5 dark:border-slate-600 dark:bg-slate-800" />%
                     </span>
                   </label>
                   <div className="mt-2 grid max-h-56 gap-1 overflow-auto pr-1">
@@ -782,8 +877,8 @@ function BehaviorAuthoringEditor() {
               <div className="flex items-center justify-between"><div><p className="text-xs font-bold uppercase tracking-widest text-indigo-500">Bước 4</p><h2 className="text-xl font-bold">Record → Abstract</h2></div>{recording ? <span className={`flex items-center gap-2 text-sm font-bold ${recording.status === "ACTIVE" ? "text-rose-500" : "text-amber-500"}`}><span className={`h-2 w-2 rounded-full ${recording.status === "ACTIVE" ? "animate-pulse bg-rose-500" : "bg-amber-500"}`} /> {recording.status === "ACTIVE" ? "Đang ghi" : "Chờ sinh testcase"}</span> : <span className="text-sm text-slate-500">Chưa ghi</span>}</div>
               {editingScenarioId && recording && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-indigo-300 bg-indigo-50 px-4 py-3 text-sm dark:border-indigo-800 dark:bg-indigo-950/30"><div><p className="font-bold text-indigo-700 dark:text-indigo-300">Đang sửa scenario {scenarioCode}</p><p className="mt-1 text-xs text-slate-600 dark:text-slate-300">Toàn bộ bước cũ đã nằm trong danh sách bên dưới. Hãy thao tác thêm trên Golden App hoặc dùng các form thêm action/checkpoint; có thể xóa từng bước cũ.</p></div><button onClick={cancelActiveRecording} disabled={Boolean(busy)} className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-bold disabled:opacity-40 dark:border-slate-700">Hủy sửa</button></div>}
               <div className="mt-4 grid gap-3 sm:grid-cols-3"><input value={scenarioCode} disabled={Boolean(editingScenarioId)} onChange={(e) => setScenarioCode(e.target.value)} placeholder="Mã luồng" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700" /><input value={scenarioName} onChange={(e) => setScenarioName(e.target.value)} placeholder="Tên luồng" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><input type="number" min={0.1} step={0.5} value={scenarioWeight} onChange={(e) => setScenarioWeight(Number(e.target.value))} aria-label="Trọng số scenario" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /></div>
-              <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-4"><label className="text-xs font-semibold text-slate-500">Rộng điện thoại<input type="number" min={240} value={viewportWidth} onChange={(e) => setViewportWidth(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label><label className="text-xs font-semibold text-slate-500">Cao điện thoại<input type="number" min={320} value={viewportHeight} onChange={(e) => setViewportHeight(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label><label className="text-xs font-semibold text-slate-500">Rộng desktop<input type="number" min={600} value={desktopWidth} disabled={!testDesktop} onChange={(e) => setDesktopWidth(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 disabled:opacity-40 dark:border-slate-700 dark:text-slate-100" /></label><label className="text-xs font-semibold text-slate-500">Cao desktop<input type="number" min={480} value={desktopHeight} disabled={!testDesktop} onChange={(e) => setDesktopHeight(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 disabled:opacity-40 dark:border-slate-700 dark:text-slate-100" /></label></div>
-              <label className="mt-2 inline-flex items-center gap-2 text-xs font-semibold text-slate-600 dark:text-slate-300"><input type="checkbox" checked={testDesktop} onChange={(e) => setTestDesktop(e.target.checked)} /> Replay checkpoint UI trên cả điện thoại và desktop</label>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2"><label className="text-xs font-semibold text-slate-500">Rộng màn (dp)<input type="number" min={240} value={viewportWidth} onChange={(e) => setViewportWidth(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label><label className="text-xs font-semibold text-slate-500">Cao màn (dp)<input type="number" min={320} value={viewportHeight} onChange={(e) => setViewportHeight(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label></div>
+              <p className="mt-2 text-xs font-semibold text-slate-600 dark:text-slate-300">Khung máy Android, tính bằng dp — cỡ mà Android Studio hiển thị cho máy ảo (Pixel: 412×915). Mọi phép chấm bố cục đều đo bằng dp nên không cần khai mật độ điểm ảnh.</p>
               {!recording ? <><button onClick={startRecording} disabled={!recordingInputsReady || Boolean(busy)} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-rose-600 px-4 py-2.5 font-bold text-white disabled:opacity-40"><Radio size={18} /> Bắt đầu record</button>{!recordingInputsReady && <p className="mt-2 text-xs text-amber-600">Cần đủ Database phát sinh viên, Database ẩn và Golden Solution.</p>}</> : <>
                 <div className="mt-5 rounded-xl border border-slate-200 p-4 dark:border-slate-700"><h3 className="font-bold">Thêm action</h3><div className="mt-3 grid gap-2 sm:grid-cols-2"><select value={action} onChange={(e) => setAction(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{ACTIONS.map((item) => <option key={item} value={item}>{item}</option>)}</select><select value={locator} onChange={(e) => setLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{item}</option>)}</select><input value={locatorValue} onChange={(e) => setLocatorValue(e.target.value)} placeholder="Giá trị nhận diện" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><input value={inputValue} onChange={(e) => setInputValue(e.target.value)} placeholder="Dữ liệu nhập (nếu có)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /></div><button onClick={() => appendAction()} className="mt-3 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-bold text-white"><Plus size={16} /> Thêm action</button></div>
                 <div className="mt-3 rounded-xl border border-slate-200 p-4 dark:border-slate-700">
@@ -856,6 +951,53 @@ function BehaviorAuthoringEditor() {
               </>}
             </div>
           </section>
+
+          {staticRules && <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-widest text-indigo-500">Luật tĩnh</p>
+                <h2 className="text-xl font-bold">Kiến trúc &amp; chất lượng mã</h2>
+                <p className="mt-1 text-sm text-slate-500">Chấm bằng soi mã nguồn (cấu trúc thư mục, import, lint) — không cần chạy app, chấm được cả bài không biên dịch. Luật phải ĐẠT trên chính Golden Solution: badge đỏ nghĩa là đáp án mẫu không thỏa nên không thể đem luật đó chấm sinh viên.</p>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="rounded-full bg-indigo-100 px-3 py-1 text-sm font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">{(staticRules.presets || []).reduce((sum, p) => sum + (staticSel[p.id]?.checked ? Number(staticSel[p.id].weight || 0) : 0), 0)} điểm</span>
+                <button onClick={saveStaticRules} disabled={Boolean(busy)} className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 font-bold text-white disabled:opacity-40">{busy === "static-rules" ? <Loader2 size={17} className="animate-spin" /> : <Check size={17} />} Lưu luật tĩnh</button>
+              </div>
+            </div>
+            {!staticRules.golden_available && <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">Chưa có Golden Solution — upload ở Bước 2 trước, hệ thống mới đối chứng được luật.</p>}
+            <div className="mt-4 grid gap-2 md:grid-cols-2">
+              {(staticRules.presets || []).map((p) => {
+                const sel = staticSel[p.id] || { checked: false, weight: p.weight };
+                const goldenFailed = p.golden?.passed === false;
+                const disabled = goldenFailed || (!staticRules.golden_available && p.kind === "source_pattern");
+                return (
+                  <label key={p.id} className={`flex items-start gap-3 rounded-xl border px-4 py-3 ${sel.checked ? "border-indigo-400 bg-indigo-50/50 dark:border-indigo-700 dark:bg-indigo-950/30" : "border-slate-200 dark:border-slate-700"} ${disabled ? "opacity-60" : "cursor-pointer"}`}>
+                    <input type="checkbox" checked={sel.checked} disabled={disabled || Boolean(busy)}
+                      onChange={(e) => setStaticSel((prev) => ({ ...prev, [p.id]: { checked: e.target.checked, weight: prev[p.id]?.weight ?? p.weight } }))}
+                      className="mt-1 h-4 w-4 accent-indigo-600" />
+                    <span className="min-w-0 flex-1">
+                      <span className="flex flex-wrap items-center gap-2">
+                        <span className="font-bold">{p.name}</span>
+                        {p.golden?.passed === true && <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-bold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300" title={p.golden.detail}>Golden ✓</span>}
+                        {goldenFailed && <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-bold text-rose-700 dark:bg-rose-950 dark:text-rose-300" title={p.golden?.detail}>Golden ✗</span>}
+                        {p.golden?.passed == null && <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-500 dark:bg-slate-800" title={p.golden?.detail}>Preflight kiểm</span>}
+                      </span>
+                      <span className="mt-1 block text-xs text-slate-500">{p.description}</span>
+                      {goldenFailed && <span className="mt-1 block text-xs text-rose-500">{p.golden?.detail}</span>}
+                    </span>
+                    <span className="flex shrink-0 items-center gap-1 text-sm">
+                      <input type="number" min={0.5} step={0.5} value={sel.weight} disabled={!sel.checked || Boolean(busy)}
+                        onChange={(e) => setStaticSel((prev) => ({ ...prev, [p.id]: { checked: prev[p.id]?.checked ?? false, weight: Number(e.target.value) } }))}
+                        onClick={(e) => e.preventDefault()}
+                        className="w-16 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-right disabled:opacity-40 dark:border-slate-700" />
+                      <span className="text-xs text-slate-500">điểm</span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+            <p className="mt-3 text-xs text-slate-500">Nhóm điểm: các luật kiến trúc gộp vào «Kiến trúc mã nguồn», luật lint vào «Chất lượng mã nguồn» — hiện đúng như vậy trong lịch sử chấm và file Excel. Lưu xong phải <b>publish lại</b> thì bộ đề mới mang luật mới.</p>
+          </section>}
 
           <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
             <div className="flex flex-wrap items-center justify-between gap-4"><div><p className="text-xs font-bold uppercase tracking-widest text-indigo-500">Bước 5</p><h2 className="text-xl font-bold">Kiểm chứng Golden và publish</h2><p className="mt-1 text-sm text-slate-500">Còn thiếu: {readiness?.missing.join(", ") || "không"}. Preflight chạy chính plan trên Golden; publish chỉ mở khi toàn bộ checkpoint pass.</p><p className={`mt-2 text-sm font-bold ${validation?.status === "PASSED" && validation.current ? "text-emerald-600" : "text-amber-600"}`}>Preflight: {validation?.status || "NOT_RUN"}{validation?.total_checkpoints !== undefined ? ` · ${validation.passed_checkpoints}/${validation.total_checkpoints}` : ""}{validation && !validation.current ? " · plan đã thay đổi" : ""}</p></div><div className="flex flex-wrap gap-2"><button onClick={() => openCodePreview()} disabled={!suite.scenarios?.length || Boolean(busy)} className="inline-flex items-center gap-2 rounded-xl border border-slate-300 px-5 py-3 font-bold text-slate-700 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:text-slate-200">{busy === "code-preview" ? <Loader2 className="animate-spin" size={18} /> : <Code2 size={18} />} Xem code bộ chấm</button><button onClick={validateGolden} disabled={!readiness?.ready || Boolean(recording) || Boolean(busy)} className="inline-flex items-center gap-2 rounded-xl border border-indigo-300 px-5 py-3 font-bold text-indigo-700 disabled:cursor-not-allowed disabled:opacity-40 dark:border-indigo-700 dark:text-indigo-300">{busy === "validate-golden" ? <Loader2 className="animate-spin" size={18} /> : <Play size={18} />} Chạy thử trên Golden</button><button onClick={publish} disabled={!readiness?.ready || !validation?.current || validation.status !== "PASSED" || Boolean(recording) || Boolean(busy)} className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40">{busy === "publish" ? <Loader2 className="animate-spin" size={18} /> : <Send size={18} />} Publish bộ chấm</button></div></div>

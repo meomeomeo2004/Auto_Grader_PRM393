@@ -19,6 +19,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
 class BehaviorSuiteMaterializerTest {
@@ -26,12 +27,24 @@ class BehaviorSuiteMaterializerTest {
     @TempDir
     Path tempDir;
 
+    /** Materializer với luật tĩnh RỖNG — các test chỉ quan tâm phần checkpoint. */
+    private BehaviorSuiteMaterializer newMaterializer(BehaviorAuthoringService authoring,
+                                                      BehaviorArtifactService artifacts,
+                                                      ExamRepository exams) {
+        StaticRuleService staticRules = mock(StaticRuleService.class);
+        when(staticRules.matrixRows(anyString(), anyString())).thenReturn(new LinkedHashMap<>());
+        // Suite test không có ảnh chuẩn — trả thư mục không tồn tại để writeBundle bỏ qua.
+        when(artifacts.goldenScreenshotDir(anyString()))
+                .thenReturn(tempDir.resolve("golden-screens-missing"));
+        return new BehaviorSuiteMaterializer(authoring, artifacts, staticRules, exams);
+    }
+
     @Test
     void materializesGenericRunnerAndSplitsScenarioWeightByCheckpoint() throws Exception {
         BehaviorAuthoringService authoring = mock(BehaviorAuthoringService.class);
         BehaviorArtifactService artifacts = mock(BehaviorArtifactService.class);
         ExamRepository exams = mock(ExamRepository.class);
-        BehaviorSuiteMaterializer materializer = new BehaviorSuiteMaterializer(authoring, artifacts, exams);
+        BehaviorSuiteMaterializer materializer = newMaterializer(authoring, artifacts, exams);
         ReflectionTestUtils.setField(materializer, "templateDir", Path.of("..", "grader-base").toString());
         ReflectionTestUtils.setField(materializer, "examsDir", tempDir.toString());
 
@@ -113,7 +126,7 @@ class BehaviorSuiteMaterializerTest {
         BehaviorAuthoringService authoring = mock(BehaviorAuthoringService.class);
         BehaviorArtifactService artifacts = mock(BehaviorArtifactService.class);
         ExamRepository exams = mock(ExamRepository.class);
-        BehaviorSuiteMaterializer materializer = new BehaviorSuiteMaterializer(authoring, artifacts, exams);
+        BehaviorSuiteMaterializer materializer = newMaterializer(authoring, artifacts, exams);
         ReflectionTestUtils.setField(materializer, "templateDir", Path.of("..", "grader-base").toString());
         ReflectionTestUtils.setField(materializer, "examsDir", tempDir.toString());
 
@@ -187,7 +200,7 @@ class BehaviorSuiteMaterializerTest {
         BehaviorAuthoringService authoring = mock(BehaviorAuthoringService.class);
         BehaviorArtifactService artifacts = mock(BehaviorArtifactService.class);
         ExamRepository exams = mock(ExamRepository.class);
-        BehaviorSuiteMaterializer materializer = new BehaviorSuiteMaterializer(authoring, artifacts, exams);
+        BehaviorSuiteMaterializer materializer = newMaterializer(authoring, artifacts, exams);
         ReflectionTestUtils.setField(materializer, "templateDir", Path.of("..", "grader-base").toString());
 
         Map<String, Object> scenario = Map.ofEntries(
@@ -245,7 +258,7 @@ class BehaviorSuiteMaterializerTest {
         BehaviorAuthoringService authoring = mock(BehaviorAuthoringService.class);
         BehaviorArtifactService artifacts = mock(BehaviorArtifactService.class);
         ExamRepository exams = mock(ExamRepository.class);
-        BehaviorSuiteMaterializer materializer = new BehaviorSuiteMaterializer(authoring, artifacts, exams);
+        BehaviorSuiteMaterializer materializer = newMaterializer(authoring, artifacts, exams);
 
         Map<String, Object> scenario = Map.ofEntries(
                 Map.entry("id", "scenario-screen"),
@@ -287,10 +300,92 @@ class BehaviorSuiteMaterializerTest {
     }
 
     @Test
+    void appendsStaticRuleRowsAndChecksGoldenComplianceOnPublish() throws Exception {
+        // Nhóm Kiến trúc: luật tĩnh của suite phải đi vào skills_matrix.json khi publish
+        // (kèm static_config cho container) và publish phải kiểm lại luật trên Golden.
+        BehaviorAuthoringService authoring = mock(BehaviorAuthoringService.class);
+        BehaviorArtifactService artifacts = mock(BehaviorArtifactService.class);
+        ExamRepository exams = mock(ExamRepository.class);
+        StaticRuleService staticRules = mock(StaticRuleService.class);
+        Map<String, Map<String, Object>> rows = new LinkedHashMap<>();
+        rows.put("RAR_USER_STATIC_ARCH_MODEL", new LinkedHashMap<>(Map.of(
+                "instance_id", "RAR_USER_STATIC_ARCH_MODEL",
+                "runner", "STATIC_ANALYSIS",
+                "static_rule", "source_pattern",
+                "weight", 5.0,
+                "group_id", "G_KIENTRUC",
+                "group_name", "Kiến trúc mã nguồn",
+                "static_config", Map.of("require", List.of(
+                        Map.of("label", "Tách Model", "paths", List.of("lib/models/**")))))));
+        when(staticRules.matrixRows("suite-1", "RAR_USER")).thenReturn(rows);
+        when(artifacts.goldenScreenshotDir(anyString()))
+                .thenReturn(tempDir.resolve("golden-screens-missing"));
+        BehaviorSuiteMaterializer materializer =
+                new BehaviorSuiteMaterializer(authoring, artifacts, staticRules, exams);
+        ReflectionTestUtils.setField(materializer, "templateDir", Path.of("..", "grader-base").toString());
+        ReflectionTestUtils.setField(materializer, "examsDir", tempDir.toString());
+
+        Map<String, Object> scenario = Map.ofEntries(
+                Map.entry("scenario_code", "ADD_USER"),
+                Map.entry("name", "Thêm người dùng"),
+                Map.entry("skill_code", "STORAGE_SQLITE_CRUD"),
+                Map.entry("weight", 8.0),
+                Map.entry("initial_state", Map.of("reset_storage", true)),
+                Map.entry("steps", List.of(Map.of(
+                        "id", "step_1", "action", "tap", "target", Map.of("text", "Add")))),
+                Map.entry("viewports", List.of(Map.of("name", "phone", "width", 390, "height", 844))),
+                Map.entry("oracle", Map.of("seed", "seed-01", "input", Map.of())),
+                Map.entry("checkpoints", List.of(Map.of(
+                        "id", "UI_VISIBLE", "kind", "checkpoint", "scope", "ui",
+                        "weight", 1.0, "expect", Map.of("visible_texts", List.of("x"))))));
+        Map<String, Object> plan = Map.of(
+                "schema_version", "1.0",
+                "suite", Map.of(
+                        "id", "suite-1", "suite_code", "RAR_USER", "exam_id", "RAR_USER_EXAM",
+                        "name", "RAR User", "description", "Golden behavior", "revision", 1),
+                "public_contract", Map.of(),
+                "database_contract", Map.of("enabled", true, "database_name", "users.db"),
+                "runtime_config", Map.of("default_timeout_ms", 5000),
+                "scenarios", List.of(scenario));
+        when(authoring.executionPlan("suite-1")).thenReturn(plan);
+        for (BehaviorArtifactType type : List.of(
+                BehaviorArtifactType.STUDENT_DATABASE,
+                BehaviorArtifactType.HIDDEN_DATABASE,
+                BehaviorArtifactType.OUTPUT_DATABASE)) {
+            Path source = tempDir.resolve(type.name().toLowerCase() + ".db");
+            Files.writeString(source, "fixture-" + type);
+            BehaviorArtifact artifact = new BehaviorArtifact();
+            artifact.setArtifactType(type);
+            artifact.setStoragePath(source.toString());
+            when(artifacts.active("suite-1", type)).thenReturn(artifact);
+        }
+        when(exams.findByExamId("RAR_USER_EXAM")).thenReturn(Optional.empty());
+        when(exams.save(any(Exam.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        Map<String, Object> result = materializer.materialize("suite-1");
+
+        verify(staticRules).requireGoldenCompliance("suite-1");
+        assertEquals(2, result.get("criterion_count"),
+                "criterion_count phải đếm cả dòng tĩnh, không chỉ checkpoint");
+        Path output = tempDir.resolve("RAR_USER_EXAM").resolve("testcase");
+        JsonNode matrix = new ObjectMapper().readTree(output.resolve("skills_matrix.json").toFile());
+        JsonNode row = matrix.get("RAR_USER_STATIC_ARCH_MODEL");
+        assertNotNull(row, "dòng luật tĩnh phải nằm trong skills_matrix.json");
+        assertEquals("STATIC_ANALYSIS", row.get("runner").asText());
+        assertEquals("source_pattern", row.get("static_rule").asText());
+        assertEquals("lib/models/**",
+                row.get("static_config").get("require").get(0).get("paths").get(0).asText());
+        // Dòng behavior giờ cũng có nhóm mặc định theo scenario để phiếu tay đối chiếu được.
+        JsonNode behaviorRow = matrix.get("RAR_USER_ADD_USER_UI_VISIBLE");
+        assertEquals("G_ADD_USER", behaviorRow.get("group_id").asText());
+        assertEquals("Thêm người dùng", behaviorRow.get("group_name").asText());
+    }
+
+    @Test
     void semanticFingerprintIgnoresDatabaseIdentityButNotBehavior() {
         BehaviorAuthoringService authoring = mock(BehaviorAuthoringService.class);
         BehaviorArtifactService artifacts = mock(BehaviorArtifactService.class);
-        BehaviorSuiteMaterializer materializer = new BehaviorSuiteMaterializer(
+        BehaviorSuiteMaterializer materializer = newMaterializer(
                 authoring, artifacts, mock(ExamRepository.class));
         Map<String, Object> scenarioA = new LinkedHashMap<>();
         scenarioA.put("id", "random-id-a");

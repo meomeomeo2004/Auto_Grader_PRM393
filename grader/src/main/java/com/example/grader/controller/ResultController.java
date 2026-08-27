@@ -50,6 +50,40 @@ public class ResultController {
 
     private final ObjectMapper mapper = new ObjectMapper();
 
+    /**
+     * Phiếu chấm tay in được — render trực tiếp từ skills_matrix.json mà máy đang dùng
+     * để chấm đề này, nên không bao giờ lệch ma trận (bài học phiếu 17 dòng bị trôi).
+     */
+    @GetMapping("/exam/{examId}/grading-sheet")
+    public ResponseEntity<?> gradingSheet(@PathVariable String examId) {
+        var exam = examRepo.findByExamId(examId).orElse(null);
+        if (exam == null) {
+            return ResponseEntity.status(404).body(Map.of("error", "Không tìm thấy đề " + examId));
+        }
+        String testcasePath = exam.getTestcasePath();
+        if (testcasePath == null || testcasePath.isBlank()) {
+            return ResponseEntity.status(404)
+                    .body(Map.of("error", "Đề chưa publish bộ chấm nên chưa có ma trận tiêu chí"));
+        }
+        java.nio.file.Path matrixPath = java.nio.file.Path.of(testcasePath).resolve("skills_matrix.json");
+        if (!java.nio.file.Files.isRegularFile(matrixPath)) {
+            return ResponseEntity.status(404)
+                    .body(Map.of("error", "Không thấy skills_matrix.json của đề " + examId));
+        }
+        try {
+            JsonNode matrix = mapper.readTree(
+                    java.nio.file.Files.readString(matrixPath, StandardCharsets.UTF_8));
+            String html = GradingSheetBuilder.render(
+                    examId, exam.getExamName(), exam.getTestcaseVersion(), matrix);
+            return ResponseEntity.ok()
+                    .contentType(MediaType.parseMediaType("text/html; charset=UTF-8"))
+                    .body(html);
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError()
+                    .body(Map.of("error", "Không dựng được phiếu chấm tay: " + e.getMessage()));
+        }
+    }
+
     /** Tìm kiếm nhanh (thanh search header) theo mã SV / tên / mã đề — trả tối đa 8 kết quả. */
     @GetMapping("/search")
     public ResponseEntity<?> search(@RequestParam("q") String q) {

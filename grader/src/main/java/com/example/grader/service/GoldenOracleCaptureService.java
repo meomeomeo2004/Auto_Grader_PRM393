@@ -146,6 +146,17 @@ public class GoldenOracleCaptureService {
                         StandardCopyOption.REPLACE_EXISTING);
             }
 
+            // Vị trí + màu chuẩn của thành phần giao diện — engine ghi cạnh captured-output.db
+            // trong CÙNG khoảnh khắc với ảnh chuẩn. Bản engine cũ không đo: vắng file thì bỏ
+            // qua, không phải lỗi. Nướng TRƯỚC applyDerivedDatabaseCheckpoints vì hàm đó cũng
+            // ghi checkpointsJson; nó đọc lại bản vừa lưu nên số chuẩn không bị mất.
+            int daNuongBoCuc = 0;
+            Path layoutFile = captured.resolveSibling("captured-layout.json");
+            if (Files.isRegularFile(layoutFile) && Files.size(layoutFile) > 0) {
+                Map<String, Object> layout = mapper.readValue(layoutFile.toFile(), new TypeReference<>() {});
+                daNuongBoCuc = authoring.applyCapturedLayout(scenarioId, map(layout.get("components")));
+            }
+
             List<Map<String, Object>> checkpoints = artifacts.databaseDiffCheckpoints(suiteId);
             Map<String, Object> completedScenario = authoring.applyDerivedDatabaseCheckpoints(
                     scenarioId, checkpoints, variables, String.valueOf(outputArtifact.get("sha256")));
@@ -154,6 +165,7 @@ public class GoldenOracleCaptureService {
             result.put("scenario", completedScenario);
             result.put("output_database", outputArtifact);
             result.put("database_checkpoint_count", checkpoints.size());
+            result.put("layout_checkpoint_count", daNuongBoCuc);
             result.put("materialized_variables", variables);
             result.put("execution_code", executionCode);
             result.put("log", limitLog(output.toString()));

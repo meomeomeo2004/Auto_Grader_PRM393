@@ -13,7 +13,7 @@ import {
   DownloadCloud, Search,
   AlertCircle, Clock, Users, FileText,
   BarChart3, X, Loader2, FileCode2, RotateCcw, AlertTriangle, FolderDown,
-  MessageSquareText,
+  MessageSquareText, Printer,
 } from "lucide-react";
 
 interface ExamOption { examId: string; examName: string; }
@@ -838,10 +838,18 @@ export default function HistoryPage() {
                 <button
                   onClick={downloadReportPackage}
                   disabled={!rows.some((r) => r.hasJson && r.outcome === "SCORED")}
-                  title="Mỗi SV một thư mục: JSON + Excel testcase + feedback.txt + logs"
+                  title="Mỗi SV một thư mục: JSON + Excel (điểm theo nhóm, ảnh đối chứng) + logs"
                   className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 shadow-sm transition-all hover:text-slate-900 hover:shadow active:scale-95 disabled:opacity-50"
                 >
                   <FolderDown size={15} /> Hồ sơ SV
+                </button>
+                <button
+                  onClick={() => selected && window.open(`${API_BASE}/results/exam/${encodeURIComponent(selected)}/grading-sheet`, "_blank")}
+                  disabled={!selected}
+                  title="Phiếu chấm tay in được, sinh từ đúng ma trận tiêu chí máy đang chấm — mở tab mới rồi Ctrl+P"
+                  className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 shadow-sm transition-all hover:text-slate-900 hover:shadow active:scale-95 disabled:opacity-50"
+                >
+                  <Printer size={15} /> Phiếu chấm tay
                 </button>
                 <button
                   onClick={exportExcel}
