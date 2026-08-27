@@ -626,6 +626,19 @@ public class BehaviorArtifactService {
         return fileName.replaceAll("[^A-Za-z0-9._-]", "_");
     }
 
+    /**
+     * Thư mục ảnh chuẩn (golden screenshot) của một suite — mỗi luồng một tệp
+     * {@code <execution_code>.png}, GHI ĐÈ khi capture lại. Cố ý không đi qua bảng
+     * artifact: writeGeneratedFile chỉ giữ MỘT bản active mỗi loại, còn ảnh chuẩn
+     * cần một bản mới nhất cho TỪNG luồng.
+     */
+    public Path goldenScreenshotDir(String suiteId) {
+        requireSuite(suiteId);
+        Path dir = artifactRoot().resolve(suiteId).resolve("golden_screenshot").normalize();
+        if (!dir.startsWith(artifactRoot())) throw new IllegalStateException("Đường dẫn artifact không an toàn");
+        return dir;
+    }
+
     private Path artifactRoot() {
         return Path.of(artifactsDir).toAbsolutePath().normalize();
     }

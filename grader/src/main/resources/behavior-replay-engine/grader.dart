@@ -52,6 +52,12 @@ Future<void> main() async {
         ? 'Scenario $scenarioCode vượt quá ${limit.inSeconds} giây ở ${stage ?? 'UNKNOWN'}.'
         : _shortProcessError(process);
     runnerErrors.add(message);
+    // Bài không biên dịch thì flutter test chết TRƯỚC marker STUDENT_* đầu tiên,
+    // stage rỗng và origin từng rơi về UNDETERMINED → merger loại khỏi mẫu số →
+    // bài thiếu một dấu ; được 10.0 nhờ 4 tiêu chí kiến trúc còn chấm được (đo
+    // thật 23/8). Lỗi biên dịch trỏ vào lib/ là lỗi BÀI LÀM: giữ nguyên mẫu số.
+    final compileOrigin =
+        timeout ? '' : _nguonLoiBienDich('${process.stdout}\n${process.stderr}');
     for (final id in missing) {
       results[id] = <String, dynamic>{
         'passed': false,
@@ -61,7 +67,9 @@ Future<void> main() async {
           'kind': timeout ? 'PROCESS_TIMEOUT' : 'SCENARIO_NOT_RUN',
           'scenario_code': scenarioCode,
           'stage': stage,
-          'origin': stage?.startsWith('STUDENT_') == true ? 'STUDENT' : 'UNDETERMINED',
+          'origin': stage?.startsWith('STUDENT_') == true
+              ? 'STUDENT'
+              : (compileOrigin.isNotEmpty ? compileOrigin : 'UNDETERMINED'),
         },
       };
     }
@@ -174,6 +182,13 @@ Map<String, dynamic> _assemble(
   var total = 0.0;
   for (final entry in matrix.entries) {
     final metadata = _asMap(entry.value);
+    // CHỦ QUYỀN THEO TẦNG. Kho tiêu chí dùng chung cho cả ba tầng chấm, nên nó chứa
+    // cả mã của tầng tĩnh và tầng đơn vị. Engine hành vi chỉ được phát kết quả cho mã
+    // của CHÍNH NÓ: ôm luôn mã tầng khác thì mọi tiêu chí đó thành not_run và bị trừ
+    // điểm dù chưa tầng nào chấm. Ghép ba tầng là việc của merge_grade_results.dart.
+    // Thiếu trường runner = kho đời cũ, toàn bộ là hành vi.
+    final runner = (metadata['runner'] ?? 'BEHAVIOR_REPLAY').toString();
+    if (runner != 'BEHAVIOR_REPLAY') continue;
     final result = results[entry.key];
     final weight = _double(metadata['weight'], 1);
     final ok = result?['passed'] == true;
@@ -192,15 +207,16 @@ Map<String, dynamic> _assemble(
       'name': metadata['name'] ?? entry.key,
       'status': ok ? 'passed' : (executed ? 'failed' : 'not_run'),
       'executed': executed,
-      'score': ok ? weight : 0,
       'max_score': weight,
       'difficulty': metadata['difficulty'] ?? 'intermediate',
       'skill_code': metadata['skill_code'] ?? 'BEHAVIOR_REPLAY',
-      'expected': metadata['expected'] ?? 'Khớp kết quả Golden App',
-      'actual': ok ? 'Đã đáp ứng yêu cầu' : result?['message'] ?? 'Scenario chưa chạy.',
-      'observation': ok ? null : observation,
-      'error_origin': ok ? null : observation['origin'] ?? (executed ? 'STUDENT' : 'UNDETERMINED'),
-      'error_stage': ok ? null : observation['stage'] ?? 'BEHAVIOR_REPLAY',
+      if (!ok) 'actual': result?['message'] ?? 'Scenario chưa chạy.',
+      // Chỉ dòng KHÔNG đạt mới có lỗi để mô tả; dòng đạt thì vắng mặt hẳn.
+      if (!ok) ...<String, dynamic>{
+        'observation': observation,
+        'error_origin': observation['origin'] ?? (executed ? 'STUDENT' : 'UNDETERMINED'),
+        'error_stage': observation['stage'] ?? 'BEHAVIOR_REPLAY',
+      },
       'requires_manual_review': !ok && !executed,
     });
   }
@@ -224,8 +240,6 @@ Map<String, dynamic> _assemble(
         .toList(),
     'grading_result': <String, dynamic>{
       'score': rounded,
-      'raw_score_before_contract_gate': rounded,
-      'total_raw_score': earned,
       'passed_tests': passed,
       'failed_tests': cases.length - passed,
       'total_tests': cases.length,
@@ -235,7 +249,6 @@ Map<String, dynamic> _assemble(
       'earned_weight': earned,
       'total_weight': total,
       'blocked': false,
-      'contract_violation': false,
       'runner_error': runnerError,
       'diagnostic_code': runnerError == null ? null : 'RAR_SCENARIO_INCOMPLETE',
       'diagnostic_origin': runnerError == null ? null : 'UNDETERMINED',
@@ -291,4 +304,19 @@ class _ProcessResult {
   final String stdout;
   final String stderr;
   final bool timedOut;
+}
+
+/// Lỗi biên dịch thuộc về ai. CFE in `đường/dẫn.dart:dòng:cột: Error:` — đường
+/// dẫn trong lib/ là mã SINH VIÊN, trong test/ là mã BỘ ĐỀ. Bài hỏng thường kéo
+/// lỗi lan sang test/ (import gãy) nên chỉ cần MỘT lỗi ở lib/ là quy cho bài.
+/// Không thấy dạng lỗi này (chết vì lý do khác) thì trả rỗng để giữ UNDETERMINED.
+String _nguonLoiBienDich(String output) {
+  final matches = RegExp(r'([^\s:]+\.dart):\d+:\d+:\s*Error:').allMatches(output);
+  var coTest = false;
+  for (final m in matches) {
+    final path = (m.group(1) ?? '').replaceAll('\\', '/');
+    if (path.startsWith('lib/') || path.contains('/lib/')) return 'STUDENT';
+    if (path.startsWith('test/') || path.contains('/test/')) coTest = true;
+  }
+  return coTest ? 'TESTCASE' : '';
 }

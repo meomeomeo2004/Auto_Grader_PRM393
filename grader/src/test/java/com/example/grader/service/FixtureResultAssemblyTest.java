@@ -285,19 +285,16 @@ class FixtureResultAssemblyTest {
         Object matrix = invoke(batch, "loadSkillsMatrix", new Class<?>[]{Exam.class}, exam);
         assertNotNull(matrix, "Không đọc được skills_matrix.json của fixture");
         invoke(batch, "enrichTestCases", new Class<?>[]{List.class, Map.class}, tcs, matrix);
-        invoke(batch, "annotateTaxonomy", new Class<?>[]{List.class, Map.class}, tcs, matrix);
         invoke(batch, "normalizeExpectedFields", new Class<?>[]{List.class}, tcs);
         invoke(batch, "sanitizeTestCaseErrors", new Class<?>[]{List.class}, tcs);
-        CompetencyService competency = new CompetencyService();
-        competency.annotateTestCases(tcs, resolver);
-        // Chạy SAU khối gắn nhãn, y như assembleResultJson — đây là chỗ bảo đảm khoá hợp đồng.
-        invoke(batch, "guaranteeContractKeys", new Class<?>[]{List.class}, tcs);
+        // 2026-08-22: tầng gắn nhãn phân loại và tầng đánh giá năng lực đã bị gỡ khỏi
+        // assembleResultJson. Chuỗi ở đây phải bám theo, nếu không artifact sinh ra mô tả
+        // một hình dạng result.json không còn tồn tại.
+        invoke(batch, "fillDerivedFields", new Class<?>[]{List.class}, tcs);
 
         Map<String, Object> gradingResult = MAPPER.convertValue(grader.get("grading_result"), Map.class);
         gradingResult.putIfAbsent("not_run_tests",
                 invoke(batch, "countStatus", new Class<?>[]{List.class, String.class}, tcs, "not_run"));
-        // Fixture chạy resolver thật và không ngã, nên luôn null — vẫn phải có mặt.
-        gradingResult.put("annotation_error", null);
 
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("schema_version", "2");
@@ -306,7 +303,6 @@ class FixtureResultAssemblyTest {
         root.put("grading_result", gradingResult);
         root.put("test_cases", tcs);
         // Backend phát hành cả khối này; thiếu nó thì bên đọc tưởng nó đã bị bỏ.
-        root.put("competency_assessment", competency.assess(tcs, resolver));
         root.put("teacher_note", "");
         return root;
     }

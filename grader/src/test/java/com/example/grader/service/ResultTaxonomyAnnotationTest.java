@@ -1,6 +1,5 @@
 package com.example.grader.service;
 
-import com.example.grader.entity.SkillCategory;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
@@ -10,24 +9,21 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Kiểm ĐIỂM GHÉP THẬT của nhãn phân loại vào result.json, không chỉ kiểm hàm tra bảng.
- * `annotateTaxonomy` là private nên gọi qua reflection — cùng lối với
- * {@code ResultControllerNormalizationTest}.
+ * Kiểm ĐIỂM GHÉP THẬT của result.json, không chỉ kiểm hàm tra bảng.
+ *
+ * <p>Trước đây tệp này còn kiểm cả tầng gắn nhãn phân loại (`rubric`, `layer`, `chapter`,
+ * `category`, `skill_name`…). Toàn bộ tầng đó đã bị gỡ ngày 2026-08-22: nó tồn tại để thoả
+ * một hợp đồng ngoài, và không nơi nào trong hệ thống đọc tới. Cái còn lại — và là cái
+ * đáng kiểm — là những field ĐƯỢC SUY RA, cùng việc dọn sạch field chết.
+ *
+ * <p>Hàm private nên gọi qua reflection, cùng lối với {@code ResultControllerNormalizationTest}.
  */
 class ResultTaxonomyAnnotationTest {
-
-    private static List<Map<String, Object>> annotate(List<Map<String, Object>> tcs,
-                                                      Map<String, Object> matrix) throws Exception {
-        Method m = BatchGradingService.class
-                .getDeclaredMethod("annotateTaxonomy", List.class, Map.class);
-        m.setAccessible(true);
-        m.invoke(new BatchGradingService(), tcs, matrix);
-        return tcs;
-    }
 
     private static Map<String, Object> map(Object... pairs) {
         Map<String, Object> m = new LinkedHashMap<>();
@@ -40,66 +36,7 @@ class ResultTaxonomyAnnotationTest {
         return new ArrayList<>(List.of(tcs));
     }
 
-    @Test
-    void annotatesCommonEngineExam() throws Exception {
-        Map<String, Object> matrix = map(
-                "TC_LIST", map("runner", "LIST_VISIBLE", "group_id", "XEM_DS"),
-                "TC_ADD", map("runner", "GROUP", "group_id", "THEM_USER",
-                        "children", List.of(map("runner", "WIDGET_VISIBLE"),
-                                            map("runner", "FORM_SUBMIT"))));
-
-        List<Map<String, Object>> tcs = annotate(
-                cases(map("test_id", "TC_LIST"), map("test_id", "TC_ADD")), matrix);
-
-        assertEquals("widget", tcs.get(0).get("layer"));
-        assertEquals("XEM_DS", tcs.get(0).get("rubric"));
-        assertEquals("integration", tcs.get(1).get("layer"));   // nhóm lấy tầng cao nhất
-        assertEquals("THEM_USER", tcs.get(1).get("rubric"));
-    }
-
-    @Test
-    void annotatesLegacyExamWithoutMatrix() throws Exception {
-        List<Map<String, Object>> tcs = annotate(
-                cases(map("test_id", "CONTRACT_MODEL_SYMBOLS"),
-                      map("test_id", "UI_RESPONSIVE_LANDSCAPE")), null);
-
-        assertEquals("contract", tcs.get(0).get("layer"));
-        assertEquals("responsive", tcs.get(1).get("layer"));
-    }
-
-    @Test
-    void readsLegacyRubricFieldFromMatrix() throws Exception {
-        Map<String, Object> matrix = map(
-                "SCREEN_VALIDATE_EACH_FIELD", map("rubric", "ADD_USER"));
-        List<Map<String, Object>> tcs = annotate(
-                cases(map("test_id", "SCREEN_VALIDATE_EACH_FIELD")), matrix);
-
-        assertEquals("ADD_USER", tcs.get(0).get("rubric"));
-        assertEquals("widget", tcs.get(0).get("layer"));   // matrix legacy không có runner
-    }
-
-    @Test
-    void alwaysEmitsBothKeysEvenWhenUnknown() throws Exception {
-        // Bên đọc file không phải đoán schema: khoá luôn có mặt, giá trị null là hợp lệ.
-        List<Map<String, Object>> tcs = annotate(cases(map("test_id", "KHONG_RO")), null);
-
-        assertTrue(tcs.get(0).containsKey("layer"));
-        assertTrue(tcs.get(0).containsKey("rubric"));
-        assertNull(tcs.get(0).get("layer"));
-        assertNull(tcs.get(0).get("rubric"));
-    }
-
-    @Test
-    void doesNotOverwriteValuesGraderAlreadySent() throws Exception {
-        Map<String, Object> matrix = map("TC_1", map("runner", "APP_BOOT", "group_id", "KHOI_DONG"));
-        List<Map<String, Object>> tcs = annotate(
-                cases(map("test_id", "TC_1", "layer", "persist", "rubric", "GIU_NGUYEN")), matrix);
-
-        assertEquals("persist", tcs.get(0).get("layer"));
-        assertEquals("GIU_NGUYEN", tcs.get(0).get("rubric"));
-    }
-
-    // ── expected của testcase GROUP tại điểm ghép result.json ─────
+    // ── enrichTestCases: chỉ còn bổ sung nhãn kỹ thuật ────────────
     private static void enrich(List<Map<String, Object>> tcs, Map<String, Object> matrix) throws Exception {
         Method m = BatchGradingService.class
                 .getDeclaredMethod("enrichTestCases", List.class, Map.class);
@@ -107,44 +44,44 @@ class ResultTaxonomyAnnotationTest {
         m.invoke(new BatchGradingService(), tcs, matrix);
     }
 
-    private static Map<String, Object> groupRow(String storedExpected) {
-        return map("runner", "GROUP", "group_id", "THEM_USER", "name", "Thêm người dùng",
-                "expected", storedExpected,
-                "children", List.of(
-                        map("runner", "WIDGET_VISIBLE", "expected", "Form phải có nút lưu."),
-                        map("runner", "FORM_SUBMIT",
-                                "expected", "Sau khi lưu, người dùng mới phải nằm trong danh sách.")));
-    }
-
     @Test
-    void rebuildsLegacyGroupExpectedWhenAssemblingResult() throws Exception {
-        // Đề publish TRƯỚC bản sửa: skills_matrix.json trên đĩa còn câu đếm số assert. Phải
-        // dựng lại lúc ghép, nếu không câu đó đi thẳng tới sinh viên qua bản nhận xét.
-        Map<String, Object> matrix = map("TC_ADD", groupRow("Tất cả 2 assert trong nhóm phải đạt."));
-        List<Map<String, Object>> tcs = cases(
-                map("test_id", "TC_ADD", "expected", "Tất cả 2 assert trong nhóm phải đạt."));
-
-        enrich(tcs, matrix);
-
-        assertEquals("Thêm người dùng: Form phải có nút lưu. "
-                + "Sau khi lưu, người dùng mới phải nằm trong danh sách.", tcs.get(0).get("expected"));
-    }
-
-    @Test
-    void keepsTeacherWrittenGroupExpectedWhenAssemblingResult() throws Exception {
-        String written = "Nhập hợp lệ rồi lưu thì người dùng mới xuất hiện trong danh sách.";
-        Map<String, Object> matrix = map("TC_ADD", groupRow(written));
+    void fillsSkillCodeAndDifficultyFromMatrix() throws Exception {
+        Map<String, Object> matrix = map("TC_ADD",
+                map("skill_code", "STORAGE_SQLITE_CRUD", "difficulty", "basic"));
         List<Map<String, Object>> tcs = cases(map("test_id", "TC_ADD"));
 
         enrich(tcs, matrix);
 
-        assertEquals(written, tcs.get(0).get("expected"));
+        assertEquals("STORAGE_SQLITE_CRUD", tcs.get(0).get("skill_code"));
+        assertEquals("basic", tcs.get(0).get("difficulty"));
     }
 
-    // ── P4: bảo đảm khoá hợp đồng ─────────────────────────────────
-    private static List<Map<String, Object>> guarantee(List<Map<String, Object>> tcs) throws Exception {
-        Method m = BatchGradingService.class
-                .getDeclaredMethod("guaranteeContractKeys", List.class);
+    @Test
+    void doesNotOverwriteWhatTheGraderAlreadySent() throws Exception {
+        // Grader chạy trong container biết rõ hơn file cấu hình trên đĩa.
+        Map<String, Object> matrix = map("TC_ADD", map("skill_code", "TU_MATRIX"));
+        List<Map<String, Object>> tcs = cases(map("test_id", "TC_ADD", "skill_code", "TU_GRADER"));
+
+        enrich(tcs, matrix);
+
+        assertEquals("TU_GRADER", tcs.get(0).get("skill_code"));
+    }
+
+    @Test
+    void noLongerRebuildsExpected() throws Exception {
+        // `expected` đã gỡ khỏi result.json: câu đặc tả giống hệt nhau ở mọi bài nộp nên
+        // không nói gì về BÀI NÀY. enrich không được dựng lại nó nữa.
+        Map<String, Object> matrix = map("TC_ADD", map("expected", "Phải hiện nút Lưu."));
+        List<Map<String, Object>> tcs = cases(map("test_id", "TC_ADD"));
+
+        enrich(tcs, matrix);
+
+        assertFalse(tcs.get(0).containsKey("expected"));
+    }
+
+    // ── Field dẫn xuất + dọn field chết ───────────────────────────
+    private static List<Map<String, Object>> derive(List<Map<String, Object>> tcs) throws Exception {
+        Method m = BatchGradingService.class.getDeclaredMethod("fillDerivedFields", List.class);
         m.setAccessible(true);
         m.invoke(new BatchGradingService(), tcs);
         return tcs;
@@ -153,82 +90,99 @@ class ResultTaxonomyAnnotationTest {
     @Test
     void derivesExecutedFromStatusForLegacyGraderOutput() throws Exception {
         // Đề legacy không gửi `executed`; phải suy tại backend, không được bỏ trống.
-        List<Map<String, Object>> tcs = guarantee(cases(
+        List<Map<String, Object>> tcs = derive(cases(
                 map("test_id", "A", "status", "passed"),
                 map("test_id", "B", "status", "failed"),
                 map("test_id", "C", "status", "not_run")));
 
-        assertEquals(true, tcs.get(0).get("executed"));
-        assertEquals(true, tcs.get(1).get("executed"));
+        assertEquals(true,  tcs.get(0).get("executed"));
+        assertEquals(true,  tcs.get(1).get("executed"));
         assertEquals(false, tcs.get(2).get("executed"));
     }
 
     @Test
     void keepsExecutedSentByEngine() throws Exception {
-        // Engine chung là nơi BIẾT CHẮC; backend không được ghi đè phán quyết của nó.
-        List<Map<String, Object>> tcs = guarantee(cases(
-                map("test_id", "A", "status", "failed", "executed", false)));
-        assertEquals(false, tcs.get(0).get("executed"));
-    }
+        // Engine biết rõ hơn backend: nó đã chạy testcase rồi mới kết luận failed.
+        List<Map<String, Object>> tcs = derive(cases(
+                map("test_id", "A", "status", "not_run", "executed", true)));
 
-    @Test
-    void forcesScoreToZeroForNotRun() throws Exception {
-        // not_run vẫn tính vào total_weight nhưng KHÔNG được mang điểm (SPEC mục 4).
-        List<Map<String, Object>> tcs = guarantee(cases(
-                map("test_id", "A", "status", "not_run", "score", 5)));
-        assertEquals(0, tcs.get(0).get("score"));
+        assertEquals(true, tcs.get(0).get("executed"));
     }
 
     @Test
     void flattensErrorCodeWithoutInventingOne() throws Exception {
-        List<Map<String, Object>> tcs = guarantee(cases(
-                map("test_id", "A", "status", "failed", "error", map("code", "WIDGET_NOT_FOUND")),
-                map("test_id", "B", "status", "passed")));
+        // Rút `error.code` của đề legacy ra field phẳng TRƯỚC khi bỏ object `error`;
+        // không có mã thì để null chứ không bịa.
+        List<Map<String, Object>> tcs = derive(cases(
+                map("test_id", "A", "status", "failed", "error", map("code", "ASSERTION_FAILED")),
+                map("test_id", "B", "status", "failed", "error", map("message", "khong co code"))));
 
-        assertEquals("WIDGET_NOT_FOUND", tcs.get(0).get("error_code"));
-        assertTrue(tcs.get(1).containsKey("error_code"));
+        assertEquals("ASSERTION_FAILED", tcs.get(0).get("error_code"));
         assertNull(tcs.get(1).get("error_code"));
+        assertFalse(tcs.get(0).containsKey("error"), "object error phải bị gỡ sau khi rút mã");
     }
 
     @Test
-    void keepsEveryContractKeyPresentWhenKnowledgeLabellingFellOver() throws Exception {
-        // Ca SUY GIẢM: `syllabusService.resolver()` ném lỗi nên CompetencyService không chạy.
-        // Khoá vắng mặt sẽ bị bên đọc hiểu là "dữ liệu cũ, được phép tự suy" — đúng thứ hai
-        // bên đã thống nhất bỏ. Nên khoá phải CÓ MẶT, giá trị null là hợp lệ.
-        List<Map<String, Object>> tcs = guarantee(cases(map("test_id", "A", "status", "failed")));
+    void dropsScoreBecauseItIsDerivable() throws Exception {
+        // Hệ thống KHÔNG chấm điểm một phần: đạt là trọn max_score, không đạt là 0.
+        // Giữ hai con số cho cùng một thông tin chỉ tạo cơ hội cho chúng lệch nhau.
+        List<Map<String, Object>> tcs = derive(cases(
+                map("test_id", "A", "status", "passed", "score", 5.0, "max_score", 5.0)));
+
+        assertFalse(tcs.get(0).containsKey("score"));
+        assertEquals(5.0, tcs.get(0).get("max_score"));
+    }
+
+    @Test
+    void dropsFieldsNobodyReads() throws Exception {
+        // Nhãn của hợp đồng cũ. Đã rà toàn bộ frontend và backend: không nơi nào đọc.
+        List<Map<String, Object>> tcs = derive(cases(map(
+                "test_id", "A", "status", "failed",
+                "blocked_by", null, "rubric", "ADD_USER", "rubric_label", "Thêm người dùng",
+                "layer", "behavior", "chapter", 3, "category", "STORAGE",
+                "category_label", "Lưu trữ", "skill_name", "SQLite CRUD",
+                "difficulty_label", "Trung bình", "expected", "Câu đặc tả cũ")));
+
         Map<String, Object> tc = tcs.get(0);
-
-        for (String key : List.of("executed", "error_code", "blocked_by",
-                "chapter", "category", "category_label", "skill_name", "difficulty_label")) {
-            assertTrue(tc.containsKey(key), "thiếu khoá " + key);
+        for (String dead : List.of("blocked_by", "rubric", "rubric_label", "layer", "chapter",
+                "category", "category_label", "skill_name", "difficulty_label", "expected")) {
+            assertFalse(tc.containsKey(dead), "field chết còn sót: " + dead);
         }
-        assertNull(tc.get("chapter"));
-        assertNull(tc.get("blocked_by"));
+        // Phần lõi phải nguyên vẹn.
+        assertEquals("A", tc.get("test_id"));
+        assertEquals("failed", tc.get("status"));
+        assertTrue(tc.containsKey("executed"));
     }
 
     @Test
-    void doesNotOverwriteKnowledgeLabelsAlreadyResolved() throws Exception {
-        List<Map<String, Object>> tcs = guarantee(cases(
-                map("test_id", "A", "status", "passed", "chapter", 6, "category", "STATE_MANAGEMENT")));
-        assertEquals(6, tcs.get(0).get("chapter"));
-        assertEquals("STATE_MANAGEMENT", tcs.get(0).get("category"));
+    void stripsErrorOnlyFieldsFromPassedRows() throws Exception {
+        // Dòng đạt không có lỗi để mô tả. Để chúng nằm đó với giá trị null nghĩa là
+        // "có chỗ cho thông tin này nhưng chưa biết" — sai, sự thật là "không có".
+        List<Map<String, Object>> tcs = derive(cases(map(
+                "test_id", "A", "status", "passed",
+                "observation", map("kind", "X"), "violations", List.of(),
+                "error_origin", "STUDENT", "error_stage", "TESTCASE_EXECUTION",
+                "error_code", "ASSERTION_FAILED")));
+
+        Map<String, Object> tc = tcs.get(0);
+        for (String k : List.of("observation", "violations", "error_origin", "error_stage", "error_code")) {
+            assertFalse(tc.containsKey(k), "dòng đạt còn sót field lỗi: " + k);
+        }
+        // Cờ cần chấm tay VẪN phải có mặt: vắng mặt thì bên đọc phải tự đoán mặc định.
+        assertEquals(false, tc.get("requires_manual_review"));
     }
 
-    // ── chapter ───────────────────────────────────────────────────
     @Test
-    void chapterPrefersExplicitColumnThenDerivesFromOrder() {
-        SkillCategory explicit = new SkillCategory();
-        explicit.setChapter(6);
-        explicit.setDisplayOrder(99);
-        assertEquals(6, explicit.resolveChapter());
+    void keepsErrorFieldsOnFailedRows() throws Exception {
+        // Đúng những field vừa gỡ khỏi dòng đạt là thứ phúc khảo cần ở dòng trượt.
+        List<Map<String, Object>> tcs = derive(cases(map(
+                "test_id", "A", "status", "failed",
+                "observation", map("kind", "BEHAVIOR_CHECKPOINT_FAILED"),
+                "error_origin", "STUDENT", "error_stage", "TESTCASE_EXECUTION")));
 
-        // Hàng cũ trong DB chưa có cột chapter → suy từ display_order + 1.
-        SkillCategory legacy = new SkillCategory();
-        legacy.setDisplayOrder(5);
-        assertEquals(6, legacy.resolveChapter());
-
-        SkillCategory unknown = new SkillCategory();
-        unknown.setDisplayOrder(null);
-        assertNull(unknown.resolveChapter());
+        Map<String, Object> tc = tcs.get(0);
+        assertTrue(tc.containsKey("observation"));
+        assertEquals("STUDENT", tc.get("error_origin"));
+        assertEquals("TESTCASE_EXECUTION", tc.get("error_stage"));
     }
 }
