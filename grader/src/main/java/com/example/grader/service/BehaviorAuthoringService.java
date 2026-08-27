@@ -11,6 +11,7 @@ import java.time.Instant;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.*;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -198,7 +199,7 @@ public class BehaviorAuthoringService {
         ensureEditable(suite);
         boolean invalidatesReplay = body.containsKey("public_contract")
                 || body.containsKey("database_contract")
-                || body.containsKey("runtime_config");
+                || runtimeConfigChangeInvalidatesReplay(suite, body);
         if (body.containsKey("name")) suite.setName(required(body, "name"));
         if (body.containsKey("description")) suite.setDescription(optional(body, "description"));
         if (body.containsKey("public_contract")) {
@@ -1204,6 +1205,21 @@ public class BehaviorAuthoringService {
                 .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy phiên record: " + id));
     }
 
+    /**
+     * allowed_packages chỉ gate dependency phía bài sinh viên trước khi compile (SubmissionPackagePolicy),
+     * không ảnh hưởng hành vi Golden Solution hay oracle đã capture. Đổi riêng field này không cần
+     * record/capture lại; chỉ các key runtime khác (driver, timeout, api_base_url...) mới invalidate.
+     */
+    private boolean runtimeConfigChangeInvalidatesReplay(BehaviorSuite suite, Map<String, Object> body) {
+        if (!body.containsKey("runtime_config")) return false;
+        Object raw = body.get("runtime_config");
+        Map<String, Object> incoming = raw instanceof String s ? readObject(s) : map(raw);
+        Map<String, Object> current = readObject(suite.getRuntimeConfigJson());
+        current.remove("allowed_packages");
+        incoming.remove("allowed_packages");
+        return !current.equals(incoming);
+    }
+
     private void ensureEditable(BehaviorSuite suite) {
         if (suite.getStatus() == BehaviorSuiteStatus.DISABLED) {
             throw new IllegalStateException("Bộ chấm đã bị vô hiệu hoá");
@@ -1321,12 +1337,44 @@ public class BehaviorAuthoringService {
             return source.stream().map(item -> parameterize(item, examples)).toList();
         }
         if (!(value instanceof String text)) return value;
-        String result = text;
-        for (Map.Entry<String, String> entry : examples.entrySet()) {
-            if (entry.getValue().isEmpty()) continue;
-            result = result.replace(entry.getValue(), "${" + entry.getKey() + "}");
+        return substituteExamples(text, examples);
+    }
+
+    /**
+     * Thay giá trị đã ghi lúc record bằng ${tên_biến} trong MỘT lượt quét theo ranh giới từ.
+     *
+     * <p>KHÔNG được gọi String.replace() tuần tự cho từng biến trên cùng một "result": nếu giá trị
+     * ghi lại rất ngắn (vd người soạn chỉ gõ "a" vào ô Họ và tên) thì "a" khớp vào bất cứ đâu có chữ
+     * "a", kể cả bên trong từ khác ("email" -> "em[a]il") hoặc bên trong ${...} vừa chèn của biến
+     * trước đó trong cùng vòng lặp — sinh ra chuỗi hỏng kiểu {@code ${em${h_v_t_n}il}}. Quét một lần
+     * bằng regex gộp (giá trị dài xét trước) trên văn bản GỐC thì tránh được cả hai lỗi trên.
+     */
+    private String substituteExamples(String text, Map<String, String> examples) {
+        List<Map.Entry<String, String>> candidates = examples.entrySet().stream()
+                .filter(entry -> !entry.getValue().isEmpty())
+                .sorted((a, b) -> b.getValue().length() - a.getValue().length())
+                .toList();
+        if (candidates.isEmpty()) return text;
+
+        StringBuilder pattern = new StringBuilder();
+        for (Map.Entry<String, String> entry : candidates) {
+            if (pattern.length() > 0) pattern.append('|');
+            pattern.append("\\b").append(Pattern.quote(entry.getValue())).append("\\b");
         }
-        return result;
+        Matcher matcher = Pattern.compile(pattern.toString(), Pattern.UNICODE_CHARACTER_CLASS).matcher(text);
+        StringBuilder out = new StringBuilder();
+        while (matcher.find()) {
+            String matched = matcher.group();
+            String variable = candidates.stream()
+                    .filter(entry -> entry.getValue().equals(matched))
+                    .map(Map.Entry::getKey)
+                    .findFirst()
+                    .orElse(null);
+            if (variable == null) continue;
+            matcher.appendReplacement(out, Matcher.quoteReplacement("${" + variable + "}"));
+        }
+        matcher.appendTail(out);
+        return out.toString();
     }
 
     private Object parameterizeCaptured(Object value, Map<String, String> variables) {
