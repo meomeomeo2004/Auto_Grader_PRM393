@@ -20,7 +20,12 @@ spring:
     encoding:
       charset: UTF-8
       enabled: true
-      force: true
+      # CHỈ ép chiều request. force:true (cả hai chiều) dán ;charset=UTF-8 vào MỌI
+      # response — WebAssembly.compileStreaming từ chối 'application/wasm;charset=UTF-8'
+      # nên SQLite web của Golden runtime chết ngay lúc nạp. JSON/HTML không cần ép:
+      # JSON là UTF-8 theo chuẩn, index của Flutter tự khai <meta charset>.
+      force-request: true
+      force-response: false
     multipart:
       max-file-size: ${GRADER_MAX_UPLOAD_SIZE:500MB}
       max-request-size: ${GRADER_MAX_UPLOAD:2GB}   # cho batch lớn

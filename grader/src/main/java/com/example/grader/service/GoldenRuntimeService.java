@@ -16,6 +16,7 @@ import org.springframework.stereotype.Service;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.*;
 import java.time.Instant;
 import java.util.*;
@@ -29,7 +30,7 @@ import java.util.zip.ZipFile;
 public class GoldenRuntimeService {
     private static final long MAX_EXPANDED_BYTES = 1_000L * 1024 * 1024;
     private static final int MAX_ZIP_ENTRIES = 20_000;
-    private static final String RECORDER_BRIDGE_VERSION = "semantic-v4";   // v4: quét thành phần CHỈ trong flutter-view (v3 vớ nhầm DOM của extension)
+    private static final String RECORDER_BRIDGE_VERSION = "semantic-v10";   // v4: quét thành phần CHỈ trong flutter-view (v3 vớ nhầm DOM của extension)
 
     @Value("${grader.base-image:grading-base:latest}")
     private String baseImage;
@@ -90,7 +91,7 @@ public class GoldenRuntimeService {
             unzipSecure(Path.of(golden.getStoragePath()), extracted);
             Path sourceProject = locateFlutterProject(extracted);
             Path project = workspace.resolve("project");
-            prepareProject(sourceProject, project);
+            prepareProject(suiteId, sourceProject, project);
 
             List<String> command = List.of(
                     "docker", "run", "--name", containerName, "--rm",
@@ -182,12 +183,39 @@ public class GoldenRuntimeService {
         return new RuntimeFile(new FileSystemResource(target), contentType(target), target.getFileName().toString().equals("index.html"));
     }
 
-    private void prepareProject(Path source, Path target) throws Exception {
+    private void prepareProject(String suiteId, Path source, Path target) throws Exception {
         Files.createDirectories(target);
         copyTree(source.resolve("lib"), target.resolve("lib"));
         normalizeInternalPackageImports(source, target.resolve("lib"));
         writeRecorderEntry(target.resolve("lib"));
         if (Files.isDirectory(source.resolve("assets"))) copyTree(source.resolve("assets"), target.resolve("assets"));
+        // hidden.db vào assets của bản web: recorder entry nạp nó vào SQLite web TRƯỚC khi
+        // app chạy — đúng cách engine chấm reset database rồi mới boot. Nhờ vậy người soạn
+        // đề nhìn thấy CHÍNH dữ liệu chấm, không cần bản mô phỏng chép tay có thể lệch.
+        artifacts.activeOptional(suiteId, BehaviorArtifactType.HIDDEN_DATABASE).ifPresent(hidden -> {
+            try {
+                Files.createDirectories(target.resolve("assets"));
+                Files.copy(Path.of(hidden.getStoragePath()),
+                        target.resolve("assets").resolve("grader_hidden.db"),
+                        StandardCopyOption.REPLACE_EXISTING);
+            } catch (Exception e) {
+                throw new IllegalStateException("Không chép được hidden.db vào runtime: " + e.getMessage(), e);
+            }
+        });
+        // SQLite thật cho web: gói sqflite_common_ffi_web KHÔNG kèm sqlite3.wasm (bình thường
+        // phải tải qua mạng bằng lệnh setup) mà container build web thì offline. Hai file này
+        // được vendor sẵn trong grader-base/web-recorder, dựng đúng bản ffi_web 1.1.1 của ảnh
+        // chấm. flutter create giữ nguyên file có sẵn trong web/ nên đặt trước là đủ.
+        Path webRecorder = resolveTemplateDir().resolve("web-recorder");
+        if (Files.isDirectory(webRecorder)) {
+            Files.createDirectories(target.resolve("web"));
+            try (Stream<Path> files = Files.list(webRecorder)) {
+                for (Path file : files.filter(Files::isRegularFile).toList()) {
+                    Files.copy(file, target.resolve("web").resolve(file.getFileName().toString()),
+                            StandardCopyOption.REPLACE_EXISTING);
+                }
+            }
+        }
         Path basePubspec = resolveTemplateDir().resolve("pubspec.base.yaml");
         if (!Files.isRegularFile(basePubspec)) throw new IllegalStateException("Khong tim thay pubspec.base.yaml");
         String pubspec = Files.readString(basePubspec, StandardCharsets.UTF_8);
@@ -259,15 +287,40 @@ public class GoldenRuntimeService {
         Files.createDirectories(lib);
         Files.writeString(lib.resolve("_recorder_entry.dart"), """
                 // Tệp do hệ thống sinh cho phiên ghi thao tác — không có trong bài nộp sinh viên.
+                import 'package:flutter/foundation.dart' show debugPrint;
                 import 'package:flutter/semantics.dart';
+                import 'package:flutter/services.dart' show ByteData, rootBundle;
                 import 'package:flutter/widgets.dart';
+                import 'package:sqflite_common/sqflite.dart' as sqflite_common;
+                import 'package:sqflite_common_ffi_web/sqflite_ffi_web.dart' as sqflite_web;
 
                 import 'main.dart' as golden_app;
 
-                void main() {
+                Future<void> main() async {
                   WidgetsFlutterBinding.ensureInitialized();
+                  // Dấu phiên bản để phân định bản build đang CHẠY với bản bị cache.
+                  debugPrint('recorder-entry semantic-v10');
                   // Giữ handle sống suốt phiên để cây ngữ nghĩa luôn được dựng.
                   SemanticsBinding.instance.ensureSemantics();
+                  // SQLite THẬT trên web + nạp hidden.db TRƯỚC khi app khởi động — đúng cách
+                  // engine chấm reset database rồi mới boot. Nhờ vậy Golden dùng sqflite thuần
+                  // (cả ba gói sqflite dùng chung một biến toàn cục databaseFactory), không cần
+                  // file web riêng, và màn hình soạn đề là chính dữ liệu chấm.
+                  try {
+                    // Bản KHÔNG worker: SQLite wasm chạy ngay luồng chính. Bản shared
+                    // worker trả null cho getDatabasesPath (mọi lời gọi database chết theo
+                    // vì fixPath cần nó); phiên soạn đề một tab nên không cần worker.
+                    sqflite_common.databaseFactory = sqflite_web.databaseFactoryFfiWebNoWebWorker;
+                    final ByteData bytes = await rootBundle.load('assets/grader_hidden.db');
+                    await sqflite_common.databaseFactory.writeDatabaseBytes(
+                      'app.db',
+                      bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
+                    );
+                  } catch (e) {
+                    // Thiếu hidden.db (chưa upload) hoặc Golden kiểu cũ tự quản dữ liệu —
+                    // app vẫn phải lên để ghi thao tác, recorder không được chết theo.
+                    debugPrint('Recorder: khong nap duoc hidden.db: $e');
+                  }
                   golden_app.main();
                 }
                 """, StandardCharsets.UTF_8);
@@ -297,59 +350,19 @@ public class GoldenRuntimeService {
                   };
                   const MAX_TEXT_LOCATOR = 80;
                   let lastReject = '';
-                  const boolAttr = (el, name, fallback) => {
-                    const value = el.getAttribute(name);
-                    return value == null ? fallback : value !== 'false';
-                  };
                   // Flutter Web gop labelText + hintText cua TextFormField vao chung 1
-                  // aria-label, ngan cach boi \n. Tach ra de khop dung decoration.labelText/
-                  // hintText ma _finder() ben phia replay (exam_test.dart) so rieng biet.
+                  // aria-label, ngan cach boi mot ky tu xuong dong. Tach ra de khop
+                  // dung decoration.labelText / hintText ma _finder() ben phia replay
+                  // (exam_test.dart) so rieng biet.
                   function splitLabelHint(raw) {
                     const parts = raw.split('\\n');
                     return parts.length > 1 ? {label: parts[0], hint: parts.slice(1).join('\\n')} : {label: raw};
                   }
-                  function roleOf(el) {
-                    const declared = (el.getAttribute('role') || '').toLowerCase();
-                    const type = (el.getAttribute('type') || '').toLowerCase();
-                    if (type === 'checkbox' || declared === 'checkbox') return 'checkbox';
-                    if (type === 'radio' || declared === 'radio') return 'radio';
-                    if (declared === 'switch') return 'switch';
-                    if (declared === 'textbox' || el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return 'text_field';
-                    if (declared === 'button' || el instanceof HTMLButtonElement) return 'button';
-                    if (declared === 'img') return 'image';
-                    if (declared === 'link') return 'link';
-                    return 'text';
-                  }
-                  function targetOf(el) {
-                    const semanticId = el.getAttribute('data-semantic-id') || el.getAttribute('data-semantics-id');
-                    if (semanticId) return {semanticId};
-                    const rawLabel = el.getAttribute('aria-label') || el.getAttribute('data-semantics-label');
-                    if (rawLabel && rawLabel !== 'Enable accessibility') return splitLabelHint(rawLabel);
-                    const hint = el.getAttribute('placeholder');
-                    if (hint) return {hint};
-                    const text = textOf(el);
-                    return text && text.length <= 120 ? {text} : {};
-                  }
-                  // Dung cho nut "Chup semantic UI" (checkpoint UI dang component/snapshot) —
-                  // khac muc dich voi semanticNode() ben duoi (dung khi ghi action tap/enter_text).
-                  function semanticState(el) {
-                    const target = targetOf(el);
-                    if (!Object.keys(target).length) return null;
-                    const role = roleOf(el);
-                    const rect = el.getBoundingClientRect();
-                    const style = getComputedStyle(el);
-                    const state = {target, role, visible: rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden'};
-                    const value = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
-                      ? el.value : (el.getAttribute('aria-valuetext') || el.getAttribute('aria-value-now'));
-                    if (value !== '' && value != null) state.value = value;
-                    if (['text_field', 'button', 'checkbox', 'switch', 'radio'].includes(role)) {
-                      state.enabled = !('disabled' in el && el.disabled) && !boolAttr(el, 'aria-disabled', false);
-                    }
-                    if (['checkbox', 'switch', 'radio'].includes(role)) {
-                      state.checked = el instanceof HTMLInputElement ? el.checked : boolAttr(el, 'aria-checked', false);
-                    }
-                    return state;
-                  }
+                  // ĐÃ GỠ khối roleOf/targetOf/boolAttr + bản semanticState(el) đi kèm: merge
+                  // 67fb085 kéo về hai bản semanticState trong cùng một scope (hai nhánh làm
+                  // song song cùng một việc). JS lấy bản khai sau, tức bản semanticState(node)
+                  // bên dưới — nên khối trên là code chết, và ai đảo thứ tự là inventory() vỡ
+                  // câm bằng ReferenceError. Giữ lại splitLabelHint vì semanticNode() đang dùng.
                   function semanticNode(event) {
                     lastReject = '';
                     const path = event.composedPath ? event.composedPath() : [];
@@ -463,7 +476,10 @@ public class GoldenRuntimeService {
                     // extension trinh duyet (tu dien, dich thuat...) — nhung thanh phan do
                     // khong ton tai trong app, tick vao la capture oracle chet vi tim khong thay.
                     const root = document.querySelector('flutter-view') || document.body;
-                    root.querySelectorAll('[aria-label], [data-semantics-label], input, textarea, [role]').forEach(node => {
+                    // 'flt-semantics' bat buoc phai co: node CHU TRAN (tieu de man hinh,
+                    // dong "Tong thang: ...") khong mang aria-label/role nao — thieu selector
+                    // nay thi quet UI bo sot toan bo text tren man hinh.
+                    root.querySelectorAll('flt-semantics, [aria-label], [data-semantics-label], input, textarea, [role]').forEach(node => {
                       if (!(node instanceof Element)) return;
                       const state = semanticState(node);
                       if (!state) return;

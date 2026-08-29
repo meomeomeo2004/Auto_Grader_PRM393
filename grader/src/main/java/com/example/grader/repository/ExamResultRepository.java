@@ -80,6 +80,11 @@ public interface ExamResultRepository extends JpaRepository<ExamResult, Long> {
     // Lấy toàn bộ bài của 1 đề thi — dùng cho thống kê
     List<ExamResult> findByExamId(String examId);
 
+    /** Dọn lịch sử chấm khi xoá đề — không xoá thì trang Lịch sử vẫn còn nguyên bảng điểm cũ. */
+    @org.springframework.transaction.annotation.Transactional
+    @org.springframework.data.jpa.repository.Modifying
+    long deleteByExamId(String examId);
+
     // Lịch sử chấm theo đề (chỉ bài nộp chính thức), mới nhất lên đầu
     List<ExamResult> findByExamIdAndModeOrderByUpdatedAtDesc(String examId, String mode);
 

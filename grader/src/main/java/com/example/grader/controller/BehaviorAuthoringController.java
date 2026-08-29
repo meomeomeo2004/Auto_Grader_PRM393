@@ -4,6 +4,7 @@ import com.example.grader.entity.BehaviorArtifactType;
 import com.example.grader.service.BehaviorArtifactService;
 import com.example.grader.service.BehaviorAuthoringService;
 import com.example.grader.service.BehaviorSuiteMaterializer;
+import com.example.grader.service.ExamService;
 import com.example.grader.service.GoldenValidationService;
 import com.example.grader.service.GoldenRuntimeService;
 import com.example.grader.service.GoldenOracleCaptureService;
@@ -35,6 +36,7 @@ public class BehaviorAuthoringController {
     private final GoldenRuntimeService runtimeService;
     private final GoldenOracleCaptureService captureService;
     private final StaticRuleService staticRuleService;
+    private final ExamService examService;
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
 
     public BehaviorAuthoringController(BehaviorAuthoringService service,
@@ -43,7 +45,9 @@ public class BehaviorAuthoringController {
                                        GoldenValidationService validationService,
                                        GoldenRuntimeService runtimeService,
                                        GoldenOracleCaptureService captureService,
-                                       StaticRuleService staticRuleService) {
+                                       StaticRuleService staticRuleService,
+                                       ExamService examService) {
+        this.examService = examService;
         this.service = service;
         this.materializer = materializer;
         this.artifactService = artifactService;
@@ -125,10 +129,16 @@ public class BehaviorAuthoringController {
     public ResponseEntity<?> deleteSuite(@PathVariable String id) {
         return call(() -> {
             // Chỉ gỡ testcase publish khi manifest xác nhận đúng chủ sở hữu.
-            materializer.deletePublishedBundleIfOwned(id);
+            String examId = materializer.deletePublishedBundleIfOwned(id);
+            // Đề sinh ra từ bộ chấm này thì phải đi cùng nó: xoá cả bản ghi đề, lịch sử
+            // chấm, mẻ chấm và thư mục bài nộp. Trước đây chỉ gỡ thư mục testcase nên
+            // trang chấm bài vẫn còn nguyên đề và bảng điểm của bộ chấm đã xoá.
+            Map<String, Object> examCleanup = examId == null ? Map.of() : examService.deleteExam(examId);
             runtimeService.deleteSuiteRuntime(id);
             artifactService.deleteSuiteArtifacts(id);
-            return service.deleteSuite(id);
+            Map<String, Object> out = new LinkedHashMap<>(service.deleteSuite(id));
+            out.put("exam_cleanup", examCleanup);
+            return out;
         });
     }
 
@@ -174,11 +184,32 @@ public class BehaviorAuthoringController {
             Map<String, Object> recordFile = new LinkedHashMap<>();
             recordFile.put("schema_version", "1.0");
             recordFile.put("sessions", sessions);
-            recordFile.put("steps", sessions.stream()
+            List<Map<String, Object>> automationSteps = sessions.stream()
                     .flatMap(session -> list(session.get("raw_trace")).stream())
                     .map(BehaviorAuthoringController::map)
                     .filter(item -> "action".equals(String.valueOf(item.get("kind"))))
-                    .map(this::automationRow).toList());
+                    .map(this::automationRow)
+                    .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+            // Phiên CHỈ có checkpoint (hợp đồng màn hình: quét UI rồi tick, không bấm gì)
+            // là hợp lệ — abstractRecording cũng tự chèn bước boot cho đúng ca này. Nhưng
+            // validator của AUTOMATION_RECORD đòi steps không rỗng, nên thiếu bước boot
+            // ở đây là /stop chết ngay trước khi kịp sinh testcase (ca thật 29/8: lưu 28
+            // tiêu chí màn chính rồi bấm Dừng là đổ).
+            if (automationSteps.isEmpty()) {
+                Map<String, Object> boot = new LinkedHashMap<>();
+                boot.put("stage", "ACTION");
+                boot.put("attribute", "none");
+                boot.put("attributeValue", "");
+                boot.put("valueType", "string");
+                boot.put("value", "");
+                boot.put("action", "boot");
+                boot.put("browser", "flutter_tester");
+                boot.put("target", Map.of());
+                boot.put("id", "step_1");
+                boot.put("timeout_ms", 5_000);
+                automationSteps.add(boot);
+            }
+            recordFile.put("steps", automationSteps);
             recordFile.put("observations", sessions.stream()
                     .flatMap(session -> list(session.get("raw_trace")).stream())
                     .map(BehaviorAuthoringController::map)
@@ -294,7 +325,11 @@ public class BehaviorAuthoringController {
         GoldenRuntimeService.RuntimeFile file = runtimeService.resource(suiteId, assetPath);
         return ResponseEntity.ok()
                 .contentType(MediaType.parseMediaType(file.contentType()))
-                .header(HttpHeaders.CACHE_CONTROL, file.index() ? "no-store" : "public, max-age=31536000, immutable")
+                // KHÔNG cache: URL runtime giữ nguyên giữa các lần deploy, mà main.dart.js
+                // đổi nội dung theo từng bản build. Để immutable thì rebuild xong trình duyệt
+                // vẫn chạy mã CŨ (service worker của Flutter càng giữ chặt) — người soạn đề
+                // tưởng sửa không ăn. Localhost nên tải lại mỗi lần là rẻ.
+                .header(HttpHeaders.CACHE_CONTROL, "no-store")
                 .header("X-Content-Type-Options", "nosniff")
                 .body(file.resource());
     }

@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'dart:ui' show Size;
@@ -55,7 +54,6 @@ Future<void> _runBehaviorScenario(
   final timeout = Duration(
     milliseconds: _int(runtime['default_timeout_ms'], 5000),
   );
-  final variables = _materializeVariables(testCase);
   // Mỗi luồng chụp lại màn hình cuối đúng một lần; xoá đệm của luồng trước.
   _anhCuoi = null;
   _daChupAnhCuoi = false;
@@ -74,7 +72,7 @@ Future<void> _runBehaviorScenario(
       tester.view.resetDevicePixelRatio();
     });
     if (_bool(_asMap(testCase['initial_state'])['reset_storage'], true)) {
-      await tester.runAsync(() => _resetDatabase(databaseContract, variables));
+      await tester.runAsync(() => _resetDatabase(databaseContract));
     }
     await tester.runAsync(_loadRealFonts);
     stdout.writeln('${_stageMarker}STUDENT_APP_BOOT');
@@ -83,7 +81,7 @@ Future<void> _runBehaviorScenario(
     for (final raw in _asList(testCase['steps'])) {
       final step = _asMap(raw);
       stdout.writeln('${_stageMarker}STUDENT_UI_ACTION');
-      await _runStep(tester, step, variables, timeout);
+      await _runStep(tester, step, timeout);
       await _allowExternalAsync(tester);
       await _boundedPump(tester, timeout);
       _throwPendingException(tester, _text(step, 'id', 'action'));
@@ -92,9 +90,7 @@ Future<void> _runBehaviorScenario(
     // Khi abstract một record, backend chạy đúng runner này trên Golden Solution
     // với Hidden DB rồi yêu cầu capture. Chấm bài sinh viên không đặt hai biến môi
     // trường bên dưới nên hoàn toàn không phát sinh file hoặc thay đổi cách assert.
-    await tester.runAsync(
-      () => _captureOutputDatabase(databaseContract, variables),
-    );
+    await tester.runAsync(() => _captureOutputDatabase(databaseContract));
     // CAPTURE MODE: chup man hinh cuoi luong lam ANH CHUAN cho tieu chi screen_match.
     // Cham bai sinh vien khong dat bien moi truong nay nen khong phat sinh file nao.
     if ((Platform.environment['GRADER_CAPTURE_OUTPUT_PATH'] ?? '').isNotEmpty) {
@@ -108,7 +104,11 @@ Future<void> _runBehaviorScenario(
       // khong duoc lam hong luot cham.
       await _saveEvidenceScreenshot(
         tester,
-        _text(cases.first, 'execution_code', _text(cases.first, 'scenario_code')),
+        _text(
+          cases.first,
+          'execution_code',
+          _text(cases.first, 'scenario_code'),
+        ),
       );
     }
 
@@ -120,7 +120,6 @@ Future<void> _runBehaviorScenario(
           tester,
           checkpoint,
           databaseContract,
-          variables,
           timeout,
           executionCode: _text(
             checkpointCase,
@@ -193,7 +192,6 @@ Future<void> _bootStudentApp(WidgetTester tester, Duration timeout) async {
 Future<void> _runStep(
   WidgetTester tester,
   Map<String, dynamic> step,
-  Map<String, String> variables,
   Duration defaultTimeout,
 ) async {
   final action = _text(step, 'action');
@@ -219,7 +217,7 @@ Future<void> _runStep(
         timeout,
       );
       await tester.ensureVisible(finder);
-      await tester.enterText(finder, _expand(step['value'], variables));
+      await tester.enterText(finder, (step['value']?.toString() ?? ''));
       return;
     case 'clear_text':
       final finder = await _waitForTarget(
@@ -265,7 +263,6 @@ Future<void> _assertCheckpoint(
   WidgetTester tester,
   Map<String, dynamic> checkpoint,
   Map<String, dynamic> databaseContract,
-  Map<String, String> variables,
   Duration timeout, {
   String executionCode = '',
 }) async {
@@ -282,11 +279,9 @@ Future<void> _assertCheckpoint(
   }
   if (kind == 'entity_consistency' ||
       _text(checkpoint, 'scope') == 'cross_layer') {
-    await tester.runAsync(
-      () => _assertDatabase(checkpoint, databaseContract, variables),
-    );
+    await tester.runAsync(() => _assertDatabase(checkpoint, databaseContract));
     for (final raw in _asList(checkpoint['ui_values'])) {
-      final value = _expand(raw, variables);
+      final value = (raw?.toString() ?? '');
       await _waitUntil(
         tester,
         () => find.text(value).evaluate().isNotEmpty,
@@ -298,9 +293,7 @@ Future<void> _assertCheckpoint(
   }
   if (kind == 'database_observation' ||
       _text(checkpoint, 'scope') == 'database') {
-    await tester.runAsync(
-      () => _assertDatabase(checkpoint, databaseContract, variables),
-    );
+    await tester.runAsync(() => _assertDatabase(checkpoint, databaseContract));
     return;
   }
 
@@ -378,7 +371,7 @@ Future<void> _assertCheckpoint(
   // Đếm số phép kiểm THẬT SỰ chạy. Xem chốt chặn cuối hàm.
   var soPhepKiem = 0;
   for (final raw in _asList(expectValue['semantic_nodes'])) {
-    await _assertSemanticNode(tester, _asMap(raw), variables, timeout);
+    await _assertSemanticNode(tester, _asMap(raw), timeout);
     soPhepKiem++;
   }
   final target = _asMap(checkpoint['target']);
@@ -397,7 +390,7 @@ Future<void> _assertCheckpoint(
   }
 
   for (final raw in _asList(expectValue['visible_texts'])) {
-    final value = _expand(raw, variables);
+    final value = (raw?.toString() ?? '');
     await _waitUntil(
       tester,
       () => find.text(value).evaluate().isNotEmpty,
@@ -407,7 +400,7 @@ Future<void> _assertCheckpoint(
     soPhepKiem++;
   }
   for (final raw in _asList(expectValue['hidden_texts'])) {
-    final value = _expand(raw, variables);
+    final value = (raw?.toString() ?? '');
     expect(
       find.text(value),
       findsNothing,
@@ -418,7 +411,7 @@ Future<void> _assertCheckpoint(
 
   final expectedText = checkpoint['text'] ?? expectValue['text'];
   if (expectedText != null) {
-    final value = _expand(expectedText, variables);
+    final value = (expectedText?.toString() ?? '');
     expect(find.text(value), findsAtLeastNWidgets(1));
     soPhepKiem++;
   }
@@ -451,7 +444,6 @@ String _moTaTarget(Map<String, dynamic> target) {
 Future<void> _assertSemanticNode(
   WidgetTester tester,
   Map<String, dynamic> node,
-  Map<String, String> variables,
   Duration timeout,
 ) async {
   final target = _asMap(node['target']);
@@ -478,7 +470,7 @@ Future<void> _assertSemanticNode(
   }
 
   if (node.containsKey('value')) {
-    final expected = _expand(node['value'], variables);
+    final expected = (node['value']?.toString() ?? '');
     final actual = _semanticValue(_widgetsNear(finder));
     expect(actual, expected, reason: 'Giá trị của $target không đúng.');
   }
@@ -580,26 +572,25 @@ bool? _semanticChecked(List<Widget> widgets) {
 Future<void> _assertDatabase(
   Map<String, dynamic> checkpoint,
   Map<String, dynamic> contract,
-  Map<String, String> variables,
 ) async {
   if (!_bool(contract['enabled'], false)) {
     throw StateError(
       'Checkpoint DB tồn tại nhưng database_contract.enabled=false.',
     );
   }
-  final path = await _databasePath(contract, variables);
+  final path = await _databasePath(contract);
   if (!File(path).existsSync()) {
     throw StateError('Không tìm thấy SQLite database theo contract: $path');
   }
   final database = await databaseFactoryFfiNoIsolate.openDatabase(path);
   try {
-    final table = _expand(checkpoint['table'], variables);
+    final table = (checkpoint['table']?.toString() ?? '');
     if (table.isEmpty || !RegExp(r'^[A-Za-z_][A-Za-z0-9_]*$').hasMatch(table)) {
       throw ArgumentError('Tên bảng SQLite không hợp lệ: $table');
     }
     final expected = <String, dynamic>{
       for (final entry in _asMap(checkpoint['row']).entries)
-        entry.key: _expandValue(entry.value, variables),
+        entry.key: entry.value,
     };
     final rows = await database.query(table);
     final matches = rows.where((row) => _rowContains(row, expected)).toList();
@@ -633,36 +624,28 @@ bool _rowContains(Map<String, Object?> actual, Map<String, dynamic> expected) {
   return true;
 }
 
-Future<String> _databasePath(
-  Map<String, dynamic> contract,
-  Map<String, String> variables,
-) async {
-  final configured = _expand(contract['path'], variables);
+Future<String> _databasePath(Map<String, dynamic> contract) async {
+  final configured = (contract['path']?.toString() ?? '');
   if (configured.isNotEmpty) {
     return p.isAbsolute(configured)
         ? configured
         : p.normalize(p.join('/app', configured));
   }
-  final name = _expand(
-    contract['database_name'] ?? contract['name'],
-    variables,
-  );
+  final name =
+      (contract['database_name'] ?? contract['name']?.toString() ?? '');
   if (name.isEmpty)
     throw StateError('database_contract thiếu path hoặc database_name.');
   final root = await databaseFactoryFfiNoIsolate.getDatabasesPath();
   return p.join(root, name);
 }
 
-Future<void> _resetDatabase(
-  Map<String, dynamic> contract,
-  Map<String, String> variables,
-) async {
+Future<void> _resetDatabase(Map<String, dynamic> contract) async {
   if (!_bool(contract['enabled'], false)) return;
-  final path = await _databasePath(contract, variables);
+  final path = await _databasePath(contract);
   final target = File(path);
   if (target.existsSync())
     await databaseFactoryFfiNoIsolate.deleteDatabase(path);
-  final fixturePath = _expand(contract['hidden_fixture_path'], variables);
+  final fixturePath = (contract['hidden_fixture_path']?.toString() ?? '');
   if (fixturePath.isEmpty) return;
   final fixture = File(fixturePath);
   if (!fixture.existsSync()) {
@@ -696,14 +679,18 @@ Future<void> _loadRealFonts() async {
   _fontsLoaded = true;
   final root = Platform.environment['FLUTTER_ROOT'] ?? '';
   if (root.isEmpty) return;
-  final dir = Directory(p.join(root, 'bin', 'cache', 'artifacts', 'material_fonts'));
+  final dir = Directory(
+    p.join(root, 'bin', 'cache', 'artifacts', 'material_fonts'),
+  );
   if (!dir.existsSync()) return;
   try {
     final loader = FontLoader('Roboto');
     for (final file in dir.listSync().whereType<File>()) {
       final name = p.basename(file.path);
       if (name.startsWith('Roboto-') && name.endsWith('.ttf')) {
-        loader.addFont(Future.value(ByteData.view(file.readAsBytesSync().buffer)));
+        loader.addFont(
+          Future.value(ByteData.view(file.readAsBytesSync().buffer)),
+        );
       }
     }
     await loader.load();
@@ -722,7 +709,9 @@ Future<void> _saveGoldenScreenshot(WidgetTester tester) async {
     if (image == null) return;
     final png = await image.toByteData(format: ui.ImageByteFormat.png);
     if (png == null) return;
-    final target = File(p.join(File(outputPath).parent.path, 'captured-screen.png'));
+    final target = File(
+      p.join(File(outputPath).parent.path, 'captured-screen.png'),
+    );
     target.parent.createSync(recursive: true);
     target.writeAsBytesSync(png.buffer.asUint8List());
     stdout.writeln('Đã chụp ảnh chuẩn: ${target.path}');
@@ -731,7 +720,10 @@ Future<void> _saveGoldenScreenshot(WidgetTester tester) async {
 
 /// Ảnh bằng chứng lúc CHẤM: mỗi luồng một tệp <execution_code>.png trong thư mục
 /// GRADER_EVIDENCE_DIR do backend mount riêng cho từng bài. Không đặt biến = không ghi gì.
-Future<void> _saveEvidenceScreenshot(WidgetTester tester, String executionCode) async {
+Future<void> _saveEvidenceScreenshot(
+  WidgetTester tester,
+  String executionCode,
+) async {
   final dir = Platform.environment['GRADER_EVIDENCE_DIR'] ?? '';
   if (dir.isEmpty || executionCode.isEmpty) return;
   try {
@@ -854,10 +846,7 @@ String? _mauChinhTrongVung(Rect rect, double tiLe) {
 /// MaterialApp: Theme.of tra ngược LÊN trên, đứng ngay tại MaterialApp thì trượt qua
 /// chính theme mà app khai và trả về theme mặc định.
 String? _mauChuDao(WidgetTester tester) {
-  for (final finder in <Finder>[
-    find.byType(Scaffold),
-    find.byType(Material),
-  ]) {
+  for (final finder in <Finder>[find.byType(Scaffold), find.byType(Material)]) {
     if (finder.evaluate().isEmpty) continue;
     try {
       final scheme = Theme.of(tester.element(finder.first)).colorScheme;
@@ -874,7 +863,8 @@ String? _mauChuDao(WidgetTester tester) {
 }
 
 String _hex(Color c) =>
-    '#' + (c.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase();
+    '#' +
+    (c.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase();
 
 /// So hai màu theo SAI SỐ % CỦA 255 trên từng kênh R/G/B. Ném lỗi khi vượt ngưỡng.
 /// Dùng chung cho cả màu thành phần lẫn màu chủ đạo để hai bên không lệch cách tính.
@@ -1007,7 +997,9 @@ Future<void> _assertComponentColor(
   final tiLe = man.width > 0 ? _anhCuoiW / man.width : 1.0;
   final mauBai = _mauChinhTrongVung(khung, tiLe);
   if (mauBai == null) {
-    throw StateError('Vùng của $moTa không có pixel nào khác màu nền để lấy màu.');
+    throw StateError(
+      'Vùng của $moTa không có pixel nào khác màu nền để lấy màu.',
+    );
   }
   _soMau(
     mauChuan,
@@ -1064,7 +1056,7 @@ Future<void> _luuBoCucChuan(
       if (_anhCuoi != null) 'color': _mauChinhTrongVung(khung, tiLe),
     };
   }
-  if (thanhPhan.isEmpty) return;
+  if (thanhPhan.isEmpty && _moTaNhanDaThu.isEmpty) return;
   final tep = File(
     p.join(File(outputPath).parent.path, 'captured-layout.json'),
   );
@@ -1083,9 +1075,13 @@ Future<void> _luuBoCucChuan(
         'device_pixel_ratio': tester.view.devicePixelRatio,
       },
       'components': thanhPhan,
+      'targets': _moTaNhanDaThu,
     }),
   );
-  stdout.writeln('Đã đo bố cục chuẩn: ${thanhPhan.length} thành phần.');
+  stdout.writeln(
+    'Đã đo bố cục chuẩn: ${thanhPhan.length} thành phần, '
+    '${_moTaNhanDaThu.length} nhãn có đường dự phòng.',
+  );
 }
 
 /// So màn hình hiện tại với ảnh chuẩn của luồng. Mỗi pixel lệch quá 16/255 ở bất kỳ
@@ -1095,7 +1091,9 @@ Future<void> _assertScreenMatch(
   Map<String, dynamic> checkpoint,
   String executionCode,
 ) async {
-  final goldenFile = File(p.join('test', 'fixtures', 'screens', '$executionCode.png'));
+  final goldenFile = File(
+    p.join('test', 'fixtures', 'screens', '$executionCode.png'),
+  );
   if (!goldenFile.existsSync()) {
     throw StateError(
       'Bộ đề thiếu ảnh chuẩn ${goldenFile.path} — hãy capture lại oracle rồi publish lại.',
@@ -1110,7 +1108,8 @@ Future<void> _assertScreenMatch(
       throw StateError('Không chụp được màn hình bài làm để so với ảnh mẫu.');
     }
     final actual = await current.toByteData(format: ui.ImageByteFormat.rawRgba);
-    if (actual == null) throw StateError('Không đọc được ảnh màn hình bài làm.');
+    if (actual == null)
+      throw StateError('Không đọc được ảnh màn hình bài làm.');
     if (golden.$2 != current.width || golden.$3 != current.height) {
       throw StateError(
         'Kích thước màn hình ${current.width}x${current.height} khác ảnh mẫu '
@@ -1153,10 +1152,7 @@ double _matchRatio(Uint8List a, Uint8List b) {
   return same / pixels;
 }
 
-Future<void> _captureOutputDatabase(
-  Map<String, dynamic> contract,
-  Map<String, String> variables,
-) async {
+Future<void> _captureOutputDatabase(Map<String, dynamic> contract) async {
   final outputPath = Platform.environment['GRADER_CAPTURE_OUTPUT_PATH'] ?? '';
   if (outputPath.isEmpty) return;
   if (!_bool(contract['enabled'], false)) {
@@ -1165,7 +1161,7 @@ Future<void> _captureOutputDatabase(
     );
   }
 
-  final sourcePath = await _databasePath(contract, variables);
+  final sourcePath = await _databasePath(contract);
   if (!File(sourcePath).existsSync()) {
     throw StateError(
       'Không tìm thấy SQLite sau khi replay Golden: $sourcePath',
@@ -1198,12 +1194,11 @@ Future<void> _captureOutputDatabase(
         'schema_version': '1.0',
         'source_database': sourcePath,
         'output_database': output.absolute.path,
-        'variables': variables,
       }),
     );
   }
   stdout.writeln(
-    '$_captureMarker${jsonEncode(<String, dynamic>{'captured': true, 'output_database': output.absolute.path, 'variables': variables})}',
+    '$_captureMarker${jsonEncode(<String, dynamic>{'captured': true, 'output_database': output.absolute.path})}',
   );
 }
 
@@ -1215,16 +1210,108 @@ Future<Finder> _waitForTarget(
   if (target.isEmpty) throw ArgumentError('Action thiếu semantic target.');
   await _waitUntil(
     tester,
-    () => _finder(target).evaluate().isNotEmpty,
+    () => _finder(target, duPhong: true).evaluate().isNotEmpty,
     timeout,
     'Không tìm thấy semantic target: $target',
   );
-  final finder = _finder(target);
+  final finder = _finder(target, duPhong: true);
+  if (_dangThuOracle) {
+    final nhan = _text(target, 'label');
+    if (nhan.isNotEmpty && !_moTaNhanDaThu.containsKey(nhan)) {
+      final moTa = _moTaDuPhong(nhan);
+      if (moTa != null) _moTaNhanDaThu[nhan] = moTa;
+    }
+  }
   final index = _int(target['index'], 0);
   return index <= 0 ? finder.first : finder.at(index);
 }
 
-Finder _finder(Map<String, dynamic> target) {
+/// Mô tả dự phòng thu được trong lúc chạy Golden, gom theo nhãn.
+///
+/// Phải thu ĐÚNG LÚC bấm, không thu ở cuối kịch bản: cuối kịch bản màn hình đã chuyển
+/// đi, nhãn của màn trước không còn trên cây nên đo ra rỗng.
+final Map<String, dynamic> _moTaNhanDaThu = <String, dynamic>{};
+final bool _dangThuOracle =
+    (Platform.environment['GRADER_CAPTURE_OUTPUT_PATH'] ?? '').isNotEmpty;
+
+/// Tìm theo mô tả DỰ PHÒNG khi nhãn của đề không khớp widget nào.
+///
+/// TỪ CHỐI khi khớp nhiều hơn một. Nhãn chính được phép lấy `.first` vì nhãn đã khoanh
+/// đúng nhóm rồi, thứ tự trong nhóm còn nghĩa; còn ở đây thứ tự phụ thuộc cây widget
+/// của từng bài nộp nên lấy bừa là chấm SAI ÂM THẦM — tệ hơn hẳn báo không thấy.
+Finder? _timDuPhong(List<dynamic> danhSach) {
+  for (final raw in danhSach) {
+    final m = _asMap(raw);
+    if (m.isEmpty) continue;
+    // So bằng TÊN kiểu chứ không tra bảng Type: đề sau dùng widget nào cũng chạy,
+    // khỏi phải sửa engine rồi dựng lại ảnh nền.
+    final kieu = _text(m, 'type');
+    final ma = _int(m['icon'], -1);
+    final chuCon = _text(m, 'child_text');
+    Finder? f;
+    if (kieu.isNotEmpty) {
+      f = find.byWidgetPredicate((w) => w.runtimeType.toString() == kieu);
+    }
+    if (ma >= 0) {
+      final icon = find.byWidgetPredicate(
+        (w) => w is Icon && w.icon?.codePoint == ma,
+      );
+      f = f == null ? icon : find.ancestor(of: icon, matching: f);
+    }
+    if (chuCon.isNotEmpty) {
+      final chu = find.text(chuCon);
+      f = f == null ? chu : find.ancestor(of: chu, matching: f);
+    }
+    if (f == null) continue;
+    if (f.evaluate().length == 1) return f;
+  }
+  return null;
+}
+
+/// Mô tả dự phòng của một nhãn, đo trên Golden lúc thu oracle.
+///
+/// Chỉ trả về khi mô tả khớp ĐÚNG MỘT widget. Nhập nhằng ngay ở bài chuẩn thì đừng đẻ
+/// ra đường lui — nút xóa lặp theo từng dòng danh sách rơi vào đúng ca này và tự bị loại.
+Map<String, dynamic>? _moTaDuPhong(String nhan) {
+  final goc = find.bySemanticsLabel(nhan);
+  if (goc.evaluate().length != 1) return null;
+  final ungVien = <String>[];
+  int? maIcon;
+  void thu(Element e) {
+    final w = e.widget;
+    final ten = w.runtimeType.toString();
+    if (w is Icon) maIcon ??= w.icon?.codePoint;
+    // Bỏ kiểu riêng tư (_Abc) và generic (Foo<Bar>): tên bị méo nên so chuỗi không chắc.
+    if (!ten.startsWith('_') && !ten.contains('<')) ungVien.add(ten);
+    e.visitChildren(thu);
+  }
+
+  goc.evaluate().single.visitChildren(thu);
+  Finder theoKieu(String ten) =>
+      find.byWidgetPredicate((w) => w.runtimeType.toString() == ten);
+  // Nấc 1: một mình kiểu đã duy nhất.
+  for (final ten in ungVien) {
+    if (theoKieu(ten).evaluate().length == 1) {
+      return <String, dynamic>{'type': ten};
+    }
+  }
+  // Nấc 2: kiểu chưa đủ hẹp thì kèm mã icon con (hai FAB khác icon vẫn tách được).
+  final ma = maIcon;
+  if (ma != null) {
+    final icon = find.byWidgetPredicate(
+      (w) => w is Icon && w.icon?.codePoint == ma,
+    );
+    for (final ten in ungVien) {
+      if (find.ancestor(of: icon, matching: theoKieu(ten)).evaluate().length ==
+          1) {
+        return <String, dynamic>{'type': ten, 'icon': ma};
+      }
+    }
+  }
+  return null;
+}
+
+Finder _finder(Map<String, dynamic> target, {bool duPhong = false}) {
   for (final keyName in const [
     'semanticId',
     'semantic_id',
@@ -1274,9 +1361,22 @@ Finder _finder(Map<String, dynamic> target) {
   // poll tiếp và hết giờ báo đúng bản chất. Trước đây nhánh này rơi xuống throw
   // bên dưới: câu lỗi đổ oan cho đề ("Target không có ...") và vòng chờ chết ngay
   // nhịp đầu — đúng ca UI_ADD_CHECKPOINT_2/3/9 của PE_PRM393_SP27.
+  // ĐƯỜNG DỰ PHÒNG. Chỉ mở cho action (bấm/gõ để ĐI TỚI màn kế), KHÔNG mở cho
+  // checkpoint: thiếu nhãn thì tiêu chí nhãn phải trượt, nhưng phần chức năng phía sau
+  // vẫn phải chấm được. Thiếu nhánh này thì một cái nút quên nhãn kéo sập cả màn phía
+  // sau — 14/34 trọng số của PE_PRM393_SP27 nằm sau đúng một nút.
+  if (duPhong) {
+    final f = _timDuPhong(_asList(target['fallback']));
+    if (f != null) return f;
+  }
   const khoaNhanDien = <String>[
-    'semanticId', 'semantic_id', 'valueKey', 'value_key', 'key',
-    'label', 'hint',
+    'semanticId',
+    'semantic_id',
+    'valueKey',
+    'value_key',
+    'key',
+    'label',
+    'hint',
   ];
   if (khoaNhanDien.any((k) => _text(target, k).isNotEmpty)) {
     return find.byWidgetPredicate((_) => false);
@@ -1328,61 +1428,6 @@ Future<void> _allowExternalAsync(WidgetTester tester) async {
 void _throwPendingException(WidgetTester tester, String stage) {
   final error = tester.takeException();
   if (error != null) throw StateError('$stage: $error');
-}
-
-Map<String, String> _materializeVariables(Map<String, dynamic> testCase) {
-  final definitions = _asMap(testCase['variables']);
-  final oracleInput = _asMap(_asMap(testCase['oracle'])['input']);
-  final seed = _text(
-    _asMap(testCase['oracle']),
-    'seed',
-    _text(testCase, 'scenario_code'),
-  );
-  final random = Random(_stableHash(seed));
-  final values = <String, String>{};
-  for (final entry in definitions.entries) {
-    final definition = _asMap(entry.value);
-    final generator = _text(definition, 'generator', 'text');
-    values[entry.key] = switch (generator) {
-      'email' => 'sv${100000 + random.nextInt(899999)}@grader.test',
-      'stable_id' => 'SV${100000 + random.nextInt(899999)}',
-      'first_name' => 'First${100 + random.nextInt(899)}',
-      'last_name' => 'Last${100 + random.nextInt(899)}',
-      'phone' => '09${10000000 + random.nextInt(89999999)}',
-      // Ô nhập có ĐỊNH DẠNG bắt buộc (số tiền, ngày). Bộ sinh phải giữ đúng định dạng,
-      // nếu không validate của chính đề chặn và luồng ghi dữ liệu không lưu được gì.
-      'integer' => '${1000 + random.nextInt(898999)}',
-      'date' =>
-        '2026-${(1 + random.nextInt(12)).toString().padLeft(2, '0')}'
-            '-${(1 + random.nextInt(28)).toString().padLeft(2, '0')}',
-      _ => 'value_${100000 + random.nextInt(899999)}',
-    };
-  }
-  oracleInput.forEach((key, value) {
-    values.putIfAbsent(key, () => '$value');
-  });
-  return values;
-}
-
-int _stableHash(String value) {
-  var hash = 0x811c9dc5;
-  for (final unit in value.codeUnits) {
-    hash ^= unit;
-    hash = (hash * 0x01000193) & 0x7fffffff;
-  }
-  return hash;
-}
-
-String _expand(Object? value, Map<String, String> variables) {
-  var result = value?.toString() ?? '';
-  variables.forEach(
-    (key, item) => result = result.replaceAll('\${$key}', item),
-  );
-  return result;
-}
-
-dynamic _expandValue(Object? value, Map<String, String> variables) {
-  return value is String ? _expand(value, variables) : value;
 }
 
 Map<String, dynamic> _readObject(String primary, String fallback) {
