@@ -1,6 +1,7 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useSearchParams } from "next/navigation";
 import SidebarLayout from "@/components/layout/SidebarLayout";
 import { API_BASE } from "@/lib/config";
@@ -83,34 +84,53 @@ function bytes(value: number) {
   return `${(value / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`;
 }
 
-interface CheckpointResult { test_id: string; scenario_code: string; passed: boolean; message: string }
+interface CheckpointResult {
+  test_id: string;
+  scenario_code: string;
+  name: string;
+  status: string;
+  message: string;
+}
 
 /**
- * Log preflight là output thô của `flutter test` — mỗi checkpoint nằm trên một dòng
- * đánh dấu bằng marker này (xem exam_test.dart). Preflight backend chỉ giữ lại boolean
- * pass/fail tổng, bỏ mất scenario_code/test_id/message — nên phải tự bóc lại từ log thô
- * ở đây để giáo viên biết đúng checkpoint nào fail, thay vì chỉ thấy "5/6".
+ * Bóc các tiêu chí TRƯỢT của preflight từ khối `GRADE_RESULT` trong log.
+ *
+ * KHÔNG bóc theo marker `###RAR_CHECKPOINT###`: từ ảnh chấm 4 tầng (2026-08-22),
+ * `run_grader.sh` đẩy stdout của behavior runner vào `behavior.stdout.log` NẰM TRONG
+ * container và thoát ngay sau `merge_grade_results.dart`; chỉ khối GRADE_RESULT mới ra tới
+ * đây. Bóc theo marker thì bảng này luôn rỗng — xem chú thích cùng nội dung ở
+ * `GoldenValidationService.parseCheckpointResults`.
+ *
+ * Khối GRADE_RESULT còn giàu hơn marker: câu `actual` do chính tầng chấm viết sẵn bằng
+ * tiếng Việt, và `status` phân biệt `failed` (làm sai) với `not_run` (chưa chạy tới —
+ * dấu hiệu lỗi dây chuyền do một bước trước đó đã hỏng).
  */
 function parseCheckpointLog(log?: string): CheckpointResult[] {
   if (!log) return [];
-  const marker = "###RAR_CHECKPOINT###";
-  const results: CheckpointResult[] = [];
-  for (const line of log.split(/\r?\n/)) {
-    const at = line.indexOf(marker);
-    if (at < 0) continue;
-    try {
-      const parsed = JSON.parse(line.slice(at + marker.length).trim());
-      results.push({
-        test_id: String(parsed.test_id || ""),
-        scenario_code: String(parsed.scenario_code || ""),
-        passed: Boolean(parsed.passed),
-        message: String(parsed.message || ""),
-      });
-    } catch {
-      // Dòng log không phải JSON hợp lệ (hiếm, ví dụ log bị cắt) — bỏ qua, không chặn cả danh sách.
-    }
+  // Lấy khối CUỐI: log bị cắt chỉ giữ 200 KB đuôi và một lần preflight có thể in nhiều khối.
+  const start = log.lastIndexOf("--- GRADE_RESULT_START ---");
+  if (start < 0) return [];
+  const end = log.indexOf("--- GRADE_RESULT_END ---", start);
+  if (end < 0) return [];
+  try {
+    const parsed = JSON.parse(log.slice(start + "--- GRADE_RESULT_START ---".length, end).trim());
+    const cases = Array.isArray(parsed?.test_cases) ? parsed.test_cases : [];
+    return cases
+      // Preflight tắt tầng tĩnh và không có tầng đơn vị, nên chỉ dòng hành vi mới khớp với
+      // con số "n/m" hiện ở trên — lọc y hệt GoldenValidationService.parseMergedBehaviorResults.
+      .filter((item: Record<string, unknown>) => String(item?.runner ?? "BEHAVIOR_REPLAY") === "BEHAVIOR_REPLAY")
+      .filter((item: Record<string, unknown>) => String(item?.status ?? "") !== "passed")
+      .map((item: Record<string, unknown>) => ({
+        test_id: String(item?.test_id ?? ""),
+        scenario_code: String(item?.scenario_code ?? ""),
+        name: String(item?.name ?? ""),
+        status: String(item?.status ?? ""),
+        message: String(item?.actual ?? ""),
+      }));
+  } catch {
+    // Khối JSON hỏng hoặc bị cắt mất đuôi — bỏ qua, để dòng "Preflight: n/m" ở trên tự báo.
+    return [];
   }
-  return results;
 }
 
 function absoluteRuntimeUrl(value?: string | null) {
@@ -125,6 +145,11 @@ function absoluteRuntimeUrl(value?: string | null) {
 
 function BehaviorAuthoringEditor() {
   const search = useSearchParams();
+  // Toast phải PORTAL ra document.body: layout có ancestor mang transform nên
+  // position:fixed bị neo theo ancestor đó thay vì viewport — toast rơi ra ngoài
+  // màn hình, người soạn không thấy lỗi và tưởng nút hỏng (ca có thật 29/8).
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
   const [examId, setExamId] = useState(() => search.get("exam") || "");
   const [name, setName] = useState("");
   const [runtimeUrl, setRuntimeUrl] = useState("");
@@ -137,7 +162,8 @@ function BehaviorAuthoringEditor() {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [readiness, setReadiness] = useState<Readiness | null>(null);
   const [validation, setValidation] = useState<GoldenValidation | null>(null);
-  const checkpointResults = useMemo(() => parseCheckpointLog(validation?.log), [validation?.log]);
+  // parseCheckpointLog đã lọc sẵn dòng trượt, nên đây là danh sách CHƯA ĐẠT chứ không phải toàn bộ.
+  const checkpointFails = useMemo(() => parseCheckpointLog(validation?.log), [validation?.log]);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [recorderReady, setRecorderReady] = useState(false);
   const [busy, setBusy] = useState("");
@@ -162,8 +188,10 @@ function BehaviorAuthoringEditor() {
   const [databaseOperation, setDatabaseOperation] = useState("READ");
   const [databaseRow, setDatabaseRow] = useState("{}");
   const [databaseCount, setDatabaseCount] = useState("");
-  const [scenarioCode, setScenarioCode] = useState("MAIN_FLOW");
-  const [scenarioName, setScenarioName] = useState("Luồng chính");
+  // KHÔNG điền sẵn: mã/tên luồng là danh tính của tiêu chí trong bảng điểm,
+  // để mặc định thì mọi bộ chấm đều đầy "MAIN_FLOW/Luồng chính" vô nghĩa.
+  const [scenarioCode, setScenarioCode] = useState("");
+  const [scenarioName, setScenarioName] = useState("");
   const [scenarioWeight, setScenarioWeight] = useState(10);
   // Bảng tick thành phần giao diện — đổ về từ lệnh quét màn hình của bridge.
   // null = chưa quét; mảng = đang mở bảng tick.
@@ -466,7 +494,10 @@ function BehaviorAuthoringEditor() {
 
   const appendAction = (payload?: JsonMap) => {
     const recordingId = activeRecordingId.current;
-    if (!recordingId || !acceptsRecorderEvents.current || recording?.status !== "ACTIVE" || !suite) return;
+    if (!recordingId || !acceptsRecorderEvents.current || recording?.status !== "ACTIVE" || !suite) {
+      setError("Phiên record không còn nhận thao tác — hãy tải lại trang để nối lại phiên.");
+      return;
+    }
     run("record-event", async () => {
       const targetNeeded = ["tap", "enter_text", "clear_text", "scroll"].includes(action);
       const event = payload || {
@@ -515,7 +546,14 @@ function BehaviorAuthoringEditor() {
   const saveUiCriteria = () => {
     const recordingId = activeRecordingId.current;
     const chosen = (uiInventory || []).filter((it) => it.checked);
-    if (!recordingId || !acceptsRecorderEvents.current || recording?.status !== "ACTIVE" || !suite || chosen.length === 0) return;
+    // Guard KHÔNG được im lặng: nút bấm mà không có gì xảy ra thì người soạn tưởng
+    // trang hỏng và tải lại từ đầu — đúng ca đã xảy ra thật ngày 29/8.
+    if (chosen.length === 0) { setError("Chưa tick thành phần nào để lưu."); return; }
+    if (!recordingId || !suite) { setError("Không còn phiên record nào gắn với trang — hãy tải lại trang."); return; }
+    if (recording?.status !== "ACTIVE" || !acceptsRecorderEvents.current) {
+      setError(`Phiên record đang ở trạng thái ${recording?.status || "không rõ"}, không nhận thêm tiêu chí. Hãy tải lại trang để nối lại phiên.`);
+      return;
+    }
     run("record-ui-criteria", async () => {
       const screen = uiScreenName.trim() || "Màn hình";
       const slug = screen.normalize("NFD").replace(/[̀-ͯ]/g, "")
@@ -575,13 +613,19 @@ function BehaviorAuthoringEditor() {
     });
   };
 
+
+
+
   const appendUiCheckpoint = () => {
     const recordingId = activeRecordingId.current;
     const textReady = Boolean(checkpointText.trim() || hiddenCheckpointText.trim());
     const componentReady = Boolean(checkpointLocatorValue.trim());
-    if (!recordingId || !acceptsRecorderEvents.current || recording?.status !== "ACTIVE" || !suite
-        || (uiCheckpointType === "text" && !textReady)
-        || (uiCheckpointType === "component" && !componentReady)) return;
+    if (uiCheckpointType === "text" && !textReady) { setError("Cần nhập text mong đợi cho checkpoint."); return; }
+    if (uiCheckpointType === "component" && !componentReady) { setError("Cần nhập giá trị nhận diện thành phần cho checkpoint."); return; }
+    if (!recordingId || !acceptsRecorderEvents.current || recording?.status !== "ACTIVE" || !suite) {
+      setError("Phiên record không còn nhận checkpoint — hãy tải lại trang để nối lại phiên.");
+      return;
+    }
     run("record-checkpoint", async () => {
       const event: JsonMap = {
         kind: "checkpoint", stage: "ASSERT", action: "observe_ui", browser: "flutter_tester",
@@ -626,7 +670,10 @@ function BehaviorAuthoringEditor() {
 
   const deleteRecordedEvent = (sequence: number) => {
     const recordingId = activeRecordingId.current;
-    if (!recordingId || !acceptsRecorderEvents.current || recording?.status !== "ACTIVE" || !suite) return;
+    if (!recordingId || !acceptsRecorderEvents.current || recording?.status !== "ACTIVE" || !suite) {
+      setError("Phiên record không còn sửa được — hãy tải lại trang để nối lại phiên.");
+      return;
+    }
     run(`delete-event-${sequence}`, async () => {
       await api(`/behavior-authoring/recordings/${recordingId}/events/${sequence}`, { method: "DELETE" });
       await refresh(suite.id);
@@ -636,7 +683,11 @@ function BehaviorAuthoringEditor() {
 
   const appendDatabaseCheckpoint = () => {
     const recordingId = activeRecordingId.current;
-    if (!recordingId || !acceptsRecorderEvents.current || recording?.status !== "ACTIVE" || !suite || !databaseTable.trim()) return;
+    if (!databaseTable.trim()) { setError("Cần nhập tên bảng cho checkpoint database."); return; }
+    if (!recordingId || !acceptsRecorderEvents.current || recording?.status !== "ACTIVE" || !suite) {
+      setError("Phiên record không còn nhận checkpoint — hãy tải lại trang để nối lại phiên.");
+      return;
+    }
     run("record-db-checkpoint", async () => {
       let row: JsonMap = {};
       try {
@@ -664,7 +715,15 @@ function BehaviorAuthoringEditor() {
 
   const stopAndAbstract = () => {
     const recordingId = activeRecordingId.current;
-    if (!recordingId || !recording || !["ACTIVE", "STOPPED"].includes(recording.status) || !suite) return;
+    if (!recordingId || !recording || !suite) { setError("Không còn phiên record nào gắn với trang — hãy tải lại trang."); return; }
+    if (!["ACTIVE", "STOPPED"].includes(recording.status)) {
+      setError(`Phiên record đang ở trạng thái ${recording.status}, không sinh testcase được. Hãy tải lại trang.`);
+      return;
+    }
+    if (!scenarioCode.trim() || !scenarioName.trim()) {
+      setError("Cần nhập Mã luồng và Tên luồng (ô ngay trên nút này) trước khi sinh testcase.");
+      return;
+    }
     // Close the client-side gate before the first network request. This is
     // intentionally earlier than the backend transition to prevent iframe
     // messages racing with /stop and /abstract.
@@ -830,10 +889,13 @@ function BehaviorAuthoringEditor() {
   return (
     <SidebarLayout activePath="/teacher/archive" title="Quản lý bộ chấm Golden" subtitle="Record thao tác thật, trừu tượng hóa hành vi và replay tự động trên bài sinh viên" contentClassName="!max-w-none">
       <div className="mx-auto max-w-[1500px] space-y-5 p-6 text-slate-800 dark:text-slate-100">
-        {(error || notice) && (
-          <div className={`flex items-center gap-3 rounded-xl border px-4 py-3 ${error ? "border-rose-300 bg-rose-50 text-rose-700 dark:border-rose-700 dark:bg-rose-950/40 dark:text-rose-200" : "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-200"}`}>
-            {error ? <XCircle size={20} /> : <CheckCircle2 size={20} />}<span className="font-medium">{error || notice}</span>
-          </div>
+        {mounted && (error || notice) && createPortal(
+          <div className={`fixed bottom-6 left-1/2 z-50 flex max-w-[min(92vw,44rem)] -translate-x-1/2 items-start gap-3 rounded-xl border px-4 py-3 shadow-xl ${error ? "border-rose-300 bg-rose-50 text-rose-700 dark:border-rose-700 dark:bg-rose-950 dark:text-rose-200" : "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-700 dark:bg-emerald-950 dark:text-emerald-200"}`} role="alert">
+            {error ? <XCircle size={20} className="mt-0.5 shrink-0" /> : <CheckCircle2 size={20} className="mt-0.5 shrink-0" />}
+            <span className="font-medium">{error || notice}</span>
+            <button onClick={() => { setError(""); setNotice(""); }} aria-label="Đóng thông báo" className="ml-1 shrink-0 rounded-md p-1 hover:bg-black/5 dark:hover:bg-white/10"><XCircle size={15} /></button>
+          </div>,
+          document.body,
         )}
 
         <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
@@ -1009,7 +1071,7 @@ function BehaviorAuthoringEditor() {
             <div ref={authoringPanel} className="min-w-0 scroll-mt-24 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
               <div className="flex items-center justify-between"><div><p className="text-xs font-bold uppercase tracking-widest text-indigo-500">Bước 4</p><h2 className="text-xl font-bold">Record → Abstract</h2></div>{recording ? <span className={`flex items-center gap-2 text-sm font-bold ${recording.status === "ACTIVE" ? "text-rose-500" : "text-amber-500"}`}><span className={`h-2 w-2 rounded-full ${recording.status === "ACTIVE" ? "animate-pulse bg-rose-500" : "bg-amber-500"}`} /> {recording.status === "ACTIVE" ? "Đang ghi" : "Chờ sinh testcase"}</span> : <span className="text-sm text-slate-500">Chưa ghi</span>}</div>
               {editingScenarioId && recording && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-indigo-300 bg-indigo-50 px-4 py-3 text-sm dark:border-indigo-800 dark:bg-indigo-950/30"><div><p className="font-bold text-indigo-700 dark:text-indigo-300">Đang sửa scenario {scenarioCode}</p><p className="mt-1 text-xs text-slate-600 dark:text-slate-300">Toàn bộ bước cũ đã nằm trong danh sách bên dưới. Hãy thao tác thêm trên Golden App hoặc dùng các form thêm action/checkpoint; có thể xóa từng bước cũ.</p></div><button onClick={cancelActiveRecording} disabled={Boolean(busy)} className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-bold disabled:opacity-40 dark:border-slate-700">Hủy sửa</button></div>}
-              <div className="mt-4 grid gap-3 sm:grid-cols-3"><input value={scenarioCode} disabled={Boolean(editingScenarioId)} onChange={(e) => setScenarioCode(e.target.value)} placeholder="Mã luồng" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700" /><input value={scenarioName} onChange={(e) => setScenarioName(e.target.value)} placeholder="Tên luồng" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><input type="number" min={0.1} step={0.5} value={scenarioWeight} onChange={(e) => setScenarioWeight(Number(e.target.value))} aria-label="Trọng số scenario" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /></div>
+              <div className="mt-4 grid gap-3 sm:grid-cols-3"><input value={scenarioCode} disabled={Boolean(editingScenarioId)} onChange={(e) => setScenarioCode(e.target.value)} placeholder="Mã luồng (vd: ADD, EDIT, FILTER_ALL)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700" /><input value={scenarioName} onChange={(e) => setScenarioName(e.target.value)} placeholder="Tên luồng (vd: Thêm khoản chi)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><input type="number" min={0.1} step={0.5} value={scenarioWeight} onChange={(e) => setScenarioWeight(Number(e.target.value))} aria-label="Trọng số scenario" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /></div>
               <div className="mt-2 grid gap-2 sm:grid-cols-2"><label className="text-xs font-semibold text-slate-500">Rộng màn (dp)<input type="number" min={240} value={viewportWidth} onChange={(e) => setViewportWidth(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label><label className="text-xs font-semibold text-slate-500">Cao màn (dp)<input type="number" min={320} value={viewportHeight} onChange={(e) => setViewportHeight(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label></div>
               <p className="mt-2 text-xs font-semibold text-slate-600 dark:text-slate-300">Khung máy Android, tính bằng dp — cỡ mà Android Studio hiển thị cho máy ảo (Pixel: 412×915). Mọi phép chấm bố cục đều đo bằng dp nên không cần khai mật độ điểm ảnh.</p>
               {!recording ? <><button onClick={startRecording} disabled={!recordingInputsReady || Boolean(busy)} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-rose-600 px-4 py-2.5 font-bold text-white disabled:opacity-40"><Radio size={18} /> Bắt đầu record</button>{!recordingInputsReady && <p className="mt-2 text-xs text-amber-600">Cần đủ Database phát sinh viên, Database ẩn và Golden Solution.</p>}</> : <>
@@ -1134,31 +1196,30 @@ function BehaviorAuthoringEditor() {
 
           <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
             <div className="flex flex-wrap items-center justify-between gap-4"><div><p className="text-xs font-bold uppercase tracking-widest text-indigo-500">Bước 5</p><h2 className="text-xl font-bold">Kiểm chứng Golden và publish</h2><p className="mt-1 text-sm text-slate-500">Còn thiếu: {readiness?.missing.join(", ") || "không"}. Preflight chạy chính plan trên Golden; publish chỉ mở khi toàn bộ checkpoint pass.</p><p className={`mt-2 text-sm font-bold ${validation?.status === "PASSED" && validation.current ? "text-emerald-600" : "text-amber-600"}`}>Preflight: {validation?.status || "NOT_RUN"}{validation?.total_checkpoints !== undefined ? ` · ${validation.passed_checkpoints}/${validation.total_checkpoints}` : ""}{validation && !validation.current ? " · plan đã thay đổi" : ""}</p></div><div className="flex flex-wrap gap-2"><button onClick={() => openCodePreview()} disabled={!suite.scenarios?.length || Boolean(busy)} className="inline-flex items-center gap-2 rounded-xl border border-slate-300 px-5 py-3 font-bold text-slate-700 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:text-slate-200">{busy === "code-preview" ? <Loader2 className="animate-spin" size={18} /> : <Code2 size={18} />} Xem code bộ chấm</button><button onClick={validateGolden} disabled={!readiness?.ready || Boolean(recording) || Boolean(busy)} className="inline-flex items-center gap-2 rounded-xl border border-indigo-300 px-5 py-3 font-bold text-indigo-700 disabled:cursor-not-allowed disabled:opacity-40 dark:border-indigo-700 dark:text-indigo-300">{busy === "validate-golden" ? <Loader2 className="animate-spin" size={18} /> : <Play size={18} />} Chạy thử trên Golden</button><button onClick={publish} disabled={!readiness?.ready || !validation?.current || validation.status !== "PASSED" || Boolean(recording) || Boolean(busy)} className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40">{busy === "publish" ? <Loader2 className="animate-spin" size={18} /> : <Send size={18} />} Publish bộ chấm</button></div></div>
-            {(() => {
-              const failed = checkpointResults.filter((c) => !c.passed);
-              if (!failed.length) return null;
-              return (
-                <div className="mt-3 rounded-xl border border-rose-200 dark:border-rose-900">
-                  <div className="flex items-center justify-between gap-2 border-b border-rose-200 px-4 py-2 dark:border-rose-900">
-                    <p className="text-xs font-bold text-rose-600">Checkpoint fail ({failed.length})</p>
-                  </div>
-                  <div className="max-h-64 space-y-1.5 overflow-auto p-3">
-                    {failed.map((c, index) => (
-                      <div key={`${c.test_id}-${index}`} className="flex items-start gap-2 rounded-lg bg-rose-50 px-2.5 py-1.5 text-xs dark:bg-rose-950/30">
-                        <XCircle size={15} className="mt-0.5 shrink-0 text-rose-500" />
-                        <div className="min-w-0 flex-1">
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="rounded bg-indigo-100 px-1.5 py-0.5 font-mono font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">{c.scenario_code}</span>
-                            <span className="font-mono text-slate-500">{c.test_id}</span>
-                          </div>
-                          {c.message && <p className="mt-1 break-words text-rose-700 dark:text-rose-300">{c.message}</p>}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+            {checkpointFails.length > 0 && (
+              <div className="mt-3 rounded-xl border border-rose-200 dark:border-rose-900">
+                <div className="flex items-center justify-between gap-2 border-b border-rose-200 px-4 py-2 dark:border-rose-900">
+                  <p className="text-xs font-bold text-rose-600">Tiêu chí chưa đạt ({checkpointFails.length})</p>
+                  <p className="text-[11px] text-slate-500">chưa chạy = bước trước đó đã hỏng</p>
                 </div>
-              );
-            })()}
+                <div className="max-h-64 space-y-1.5 overflow-auto p-3">
+                  {checkpointFails.map((c, index) => (
+                    <div key={`${c.test_id}-${index}`} className="flex items-start gap-2 rounded-lg bg-rose-50 px-2.5 py-1.5 text-xs dark:bg-rose-950/30">
+                      <XCircle size={15} className="mt-0.5 shrink-0 text-rose-500" />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="rounded bg-indigo-100 px-1.5 py-0.5 font-mono font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">{c.scenario_code}</span>
+                          <span className="font-mono text-slate-500">{c.test_id}</span>
+                          {c.status === "not_run" && <span className="rounded bg-amber-100 px-1.5 py-0.5 font-bold text-amber-700 dark:bg-amber-950 dark:text-amber-300">chưa chạy</span>}
+                        </div>
+                        {c.name && c.name !== c.test_id && <p className="mt-1 break-words font-medium text-slate-600 dark:text-slate-300">{c.name}</p>}
+                        {c.message && <p className="mt-1 break-words text-rose-700 dark:text-rose-300">{c.message}</p>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
               {(suite.scenarios || []).map((item, index) => <div key={String(item.id || index)} className="rounded-xl border border-slate-200 px-4 py-3 dark:border-slate-700"><div className="flex items-center justify-between gap-2"><span className="font-bold">{String(item.name || item.scenario_code)}</span><span className="rounded-full bg-indigo-100 px-2 py-1 text-xs font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">{String(item.weight)} điểm</span></div><p className="mt-1 font-mono text-[11px] text-indigo-500">{String(item.scenario_code || "")}</p><p className="mt-2 text-xs text-slate-500">{Array.isArray(item.steps) ? item.steps.length : 0} action · {Array.isArray(item.checkpoints) ? item.checkpoints.length : 0} checkpoint</p><div className="mt-3 flex flex-wrap gap-2"><button onClick={() => openCodePreview(String(item.scenario_code || ""))} disabled={Boolean(busy)} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-bold text-slate-700 hover:border-indigo-400 disabled:opacity-40 dark:border-slate-700 dark:text-slate-200"><Code2 size={14} /> Xem testcase</button><button onClick={() => openScenarioEditor(item)} disabled={Boolean(busy) || Boolean(recording)} title={recording ? "Hãy kết thúc phiên đang soạn trước" : "Nạp lại các bước vào khung record để chỉnh sửa"} className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-300 px-2.5 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50 disabled:opacity-40 dark:border-indigo-800 dark:text-indigo-300 dark:hover:bg-indigo-950"><Pencil size={14} /> Sửa thao tác</button><button onClick={() => deleteScenario(item)} disabled={Boolean(busy) || Boolean(recording)} className="inline-flex items-center gap-1.5 rounded-lg border border-rose-300 px-2.5 py-1.5 text-xs font-bold text-rose-600 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-900 dark:hover:bg-rose-950"><Trash2 size={14} /> Xóa</button></div></div>)}
               {!suite.scenarios?.length && <p className="text-sm text-slate-500">Chưa có scenario. Hãy record ít nhất một luồng và sinh testcase.</p>}
