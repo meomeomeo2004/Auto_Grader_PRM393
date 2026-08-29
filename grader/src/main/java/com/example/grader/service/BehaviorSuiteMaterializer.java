@@ -284,8 +284,13 @@ public class BehaviorSuiteMaterializer {
         return result;
     }
 
-    /** Chỉ gỡ bundle nếu manifest xác nhận nó thuộc đúng Golden suite này. */
-    public void deletePublishedBundleIfOwned(String suiteId) {
+    /**
+     * Gỡ bundle đã publish nếu manifest xác nhận nó thuộc đúng bộ chấm này.
+     *
+     * @return mã đề mà bộ chấm này sở hữu, hoặc null nếu không sở hữu đề nào — người gọi
+     *         dùng nó để dọn nốt phía chấm bài (kết quả, mẻ chấm, bài nộp).
+     */
+    public String deletePublishedBundleIfOwned(String suiteId) {
         Map<String, Object> suite = authoring.getSuite(suiteId);
         String configuredExamId = text(suite, "exam_id");
         String suiteCode = ExamService.safeId(text(suite, "suite_code"), "bộ chấm");
@@ -298,15 +303,10 @@ public class BehaviorSuiteMaterializer {
                 Map<String, Object> content = mapper.readValue(manifest.toFile(), Map.class);
                 if (suiteId.equals(text(content, "suite_id"))) {
                     deleteRecursively(target);
-                    exams.findByExamId(examId).ifPresent(exam -> {
-                        exam.setTestcasePath(null);
-                        exam.setTestcaseStatus("MISSING");
-                        exam.setTestcasePublishedAt(null);
-                        exam.setStatus(ExamStatus.BUILDING);
-                        exams.save(exam);
-                    });
+                    return examId;
                 }
             }
+            return null;
         } catch (Exception e) {
             throw new IllegalStateException("Không gỡ được bundle đã publish: " + e.getMessage(), e);
         }
@@ -440,7 +440,6 @@ public class BehaviorSuiteMaterializer {
                     item.put("description", scenario.get("description"));
                     item.put("skill_code", scenario.getOrDefault("skill_code", "UI_BUTTONS_SELECTION"));
                     item.put("weight", Math.round(itemWeight * 1_000_000d) / 1_000_000d);
-                    item.put("variables", scenario.get("variables"));
                     item.put("initial_state", scenario.get("initial_state"));
                     item.put("steps", scenario.get("steps"));
                     item.put("viewport", viewport);
@@ -586,7 +585,7 @@ public class BehaviorSuiteMaterializer {
                 .map(item -> {
                     Map<String, Object> stable = new TreeMap<>();
                     for (String key : List.of("scenario_code", "name", "skill_code", "description", "display_order",
-                            "weight", "enabled", "variables", "initial_state", "steps", "checkpoints", "viewports")) {
+                            "weight", "enabled", "initial_state", "steps", "checkpoints", "viewports")) {
                         if (item.containsKey(key)) stable.put(key, item.get(key));
                     }
                     Map<String, Object> oracle = map(item.get("oracle"));

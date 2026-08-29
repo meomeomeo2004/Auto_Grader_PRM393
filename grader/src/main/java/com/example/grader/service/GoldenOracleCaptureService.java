@@ -125,7 +125,6 @@ public class GoldenOracleCaptureService {
             Map<String, Object> captureMetadata = Files.isRegularFile(metadata)
                     ? mapper.readValue(metadata.toFile(), new TypeReference<>() {})
                     : Map.of();
-            Map<String, String> variables = stringMap(captureMetadata.get("variables"));
             Map<String, Object> outputArtifact = artifacts.writeGeneratedFile(
                     suiteId,
                     BehaviorArtifactType.OUTPUT_DATABASE,
@@ -151,22 +150,26 @@ public class GoldenOracleCaptureService {
             // qua, không phải lỗi. Nướng TRƯỚC applyDerivedDatabaseCheckpoints vì hàm đó cũng
             // ghi checkpointsJson; nó đọc lại bản vừa lưu nên số chuẩn không bị mất.
             int daNuongBoCuc = 0;
+            int daNuongDuPhong = 0;
             Path layoutFile = captured.resolveSibling("captured-layout.json");
             if (Files.isRegularFile(layoutFile) && Files.size(layoutFile) > 0) {
                 Map<String, Object> layout = mapper.readValue(layoutFile.toFile(), new TypeReference<>() {});
                 daNuongBoCuc = authoring.applyCapturedLayout(scenarioId, map(layout.get("components")));
+                // Đường dự phòng: cách tìm lại widget khi bài nộp quên gắn nhãn. Engine chỉ
+                // ghi mô tả nào DUY NHẤT trên cây Golden nên ở đây nhận sao dùng vậy.
+                daNuongDuPhong = authoring.applyCapturedTargets(scenarioId, map(layout.get("targets")));
             }
 
             List<Map<String, Object>> checkpoints = artifacts.databaseDiffCheckpoints(suiteId);
             Map<String, Object> completedScenario = authoring.applyDerivedDatabaseCheckpoints(
-                    scenarioId, checkpoints, variables, String.valueOf(outputArtifact.get("sha256")));
+                    scenarioId, checkpoints, String.valueOf(outputArtifact.get("sha256")));
 
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("scenario", completedScenario);
             result.put("output_database", outputArtifact);
             result.put("database_checkpoint_count", checkpoints.size());
             result.put("layout_checkpoint_count", daNuongBoCuc);
-            result.put("materialized_variables", variables);
+            result.put("fallback_target_count", daNuongDuPhong);
             result.put("execution_code", executionCode);
             result.put("log", limitLog(output.toString()));
             return result;

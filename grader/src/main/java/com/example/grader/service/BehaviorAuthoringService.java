@@ -11,7 +11,6 @@ import java.time.Instant;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.*;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -457,8 +456,6 @@ public class BehaviorAuthoringService {
 
         List<Map<String, Object>> steps = new ArrayList<>();
         List<Map<String, Object>> checkpoints = new ArrayList<>();
-        Map<String, Object> variables = new LinkedHashMap<>();
-        Map<String, Integer> variableOccurrences = new LinkedHashMap<>();
         int actionNo = 0;
         for (Map<String, Object> event : trace) {
             String kind = text(event, "kind", "");
@@ -473,19 +470,13 @@ public class BehaviorAuthoringService {
                 if (event.containsKey("target")) step.put("target", event.get("target"));
                 if (event.containsKey("delta")) step.put("delta", event.get("delta"));
                 if (event.containsKey("direction")) step.put("direction", event.get("direction"));
-                if ("enter_text".equals(action) && event.get("value") != null) {
-                    String variableBase = variableName(map(event.get("target")), actionNo);
-                    int occurrence = variableOccurrences.merge(variableBase, 1, Integer::sum);
-                    String variable = occurrence == 1 ? variableBase : variableBase + "_" + occurrence;
-                    variables.put(variable, Map.of(
-                            "generator", generatorFor(variable, String.valueOf(event.get("value"))),
-                            "example", String.valueOf(event.get("value")),
-                            "target", variableBase,
-                            "version", occurrence));
-                    step.put("value", "${" + variable + "}");
-                } else if (event.containsKey("value")) {
-                    step.put("value", event.get("value"));
-                }
+                // GIÁ TRỊ NGƯỜI RA ĐỀ GÕ LÀ GIÁ TRỊ CHẠY THẬT — không biến hoá.
+                // Trước đây mọi enter_text bị thay bằng biến sinh tự động để chống cắm cứng.
+                // Lớp đó thừa: bài chấm chạy trên hidden.db mà sinh viên không bao giờ thấy,
+                // dữ liệu khó đoán là do người ra đề tự chọn. Đổi lại nó làm mọi tiêu chí phụ
+                // thuộc giá trị nhập (ví dụ tổng tháng sau khi thêm) không khai nổi số chuẩn,
+                // và tệ hơn là sửa đầu vào của người ra đề mà giao diện không hề báo.
+                if (event.containsKey("value")) step.put("value", event.get("value"));
                 step.put("timeout_ms", number(event.get("timeout_ms"), 5_000));
                 steps.add(step);
             } else if ("checkpoint".equals(kind)
@@ -523,23 +514,7 @@ public class BehaviorAuthoringService {
             steps.add(boot);
         }
 
-        Map<String, String> examples = new LinkedHashMap<>();
-        List<Map.Entry<String, Object>> variableEntries = new ArrayList<>(variables.entrySet());
-        Collections.reverse(variableEntries);
-        variableEntries.forEach(entry -> {
-            String key = entry.getKey();
-            Object value = entry.getValue();
-            Object example = map(value).get("example");
-            if (example != null && !String.valueOf(example).isBlank()) {
-                examples.put(key, String.valueOf(example));
-            }
-        });
-        checkpoints = checkpoints.stream()
-                .map(item -> map(parameterize(item, examples)))
-                .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
-
-        Map<String, Object> finalObservation = map(parameterize(
-                readObject(recording.getFinalObservationJson()), examples));
+        Map<String, Object> finalObservation = readObject(recording.getFinalObservationJson());
         if (!finalObservation.isEmpty()) {
             checkpoints.add(new LinkedHashMap<>(Map.of(
                     "id", "checkpoint_final",
@@ -607,7 +582,6 @@ public class BehaviorAuthoringService {
             scenario.setDisplayOrder((int) scenarios.countBySuiteIdAndEnabledTrue(suite.getId()) + 1);
         }
         scenario.setWeight(number(body.get("weight"), Math.max(1.0, checkpoints.size())));
-        scenario.setVariablesJson(json(variables));
         scenario.setInitialStateJson(recording.getInitialStateJson());
         scenario.setStepsJson(json(steps));
         scenario.setCheckpointsJson(json(checkpoints));
@@ -621,7 +595,6 @@ public class BehaviorAuthoringService {
         // Record trên Golden App chính là nguồn oracle đầu tiên. Giá trị nhập đã được tách
         // thành biến, còn snapshot UI/DB vẫn giữ nguyên để replay cùng seed đối chiếu.
         Map<String, Object> input = new LinkedHashMap<>();
-        variables.forEach((key, value) -> input.put(key, map(value).get("example")));
         List<Map<String, Object>> databaseObservations = checkpoints.stream()
                 .filter(item -> "database_observation".equals(text(item, "kind", "")))
                 .toList();
@@ -658,7 +631,6 @@ public class BehaviorAuthoringService {
     @Transactional
     public Map<String, Object> applyDerivedDatabaseCheckpoints(String scenarioId,
                                                                 List<Map<String, Object>> derived,
-                                                                Map<String, String> materializedVariables,
                                                                 String outputSha256) {
         BehaviorScenario scenario = scenario(scenarioId);
         ensureEditable(suite(scenario.getSuiteId()));
@@ -672,12 +644,12 @@ public class BehaviorAuthoringService {
                 .collect(java.util.stream.Collectors.joining("\n"));
         int next = checkpoints.size() + 1;
         for (Map<String, Object> raw : derived == null ? List.<Map<String, Object>>of() : derived) {
-            Map<String, Object> checkpoint = map(parameterizeCaptured(raw, materializedVariables));
+            Map<String, Object> checkpoint = map(raw);
             validateDatabaseObservation(checkpoint);
             List<String> uiValues = map(checkpoint.get("row")).values().stream()
                     .filter(Objects::nonNull)
                     .map(String::valueOf)
-                    .filter(value -> value.matches(".*\\$\\{[A-Za-z0-9_]+}.*"))
+                    .filter(value -> !value.isBlank())
                     .filter(uiCheckpointCorpus::contains)
                     .distinct()
                     .toList();
@@ -714,7 +686,6 @@ public class BehaviorAuthoringService {
                         || "entity_consistency".equals(text(item, "kind", "")))
                 .toList());
         observation.put("output_database_sha256", outputSha256);
-        observation.put("captured_variables", materializedVariables == null ? Map.of() : materializedVariables);
         oracle.setDatabaseObservationJson(json(observation));
         oracle.setStatus(OracleStatus.READY);
         oracles.save(oracle);
@@ -772,13 +743,42 @@ public class BehaviorAuthoringService {
         return daNuong;
     }
 
+    /**
+     * Nướng mô tả dự phòng (đo trên Golden lúc thu oracle) vào target của các bước bấm/gõ.
+     *
+     * CHỈ vá steps, KHÔNG vá checkpoint: đường lui dùng để ĐI TỚI màn kế, còn tiêu chí
+     * "có nhãn đúng" phải trượt thật khi bài nộp quên nhãn. Nhờ vậy quên một cái nút chỉ
+     * mất đúng tiêu chí nhãn thay vì kéo sập cả màn phía sau.
+     */
+    @Transactional
+    public int applyCapturedTargets(String scenarioId, Map<String, Object> nhan) {
+        if (nhan == null || nhan.isEmpty()) return 0;
+        BehaviorScenario scenario = scenario(scenarioId);
+        ensureEditable(suite(scenario.getSuiteId()));
+        List<Map<String, Object>> steps = new ArrayList<>(readObjectList(scenario.getStepsJson()));
+        int daNuong = 0;
+        for (Map<String, Object> step : steps) {
+            Map<String, Object> target = new LinkedHashMap<>(map(step.get("target")));
+            String label = text(target, "label", "");
+            if (label.isBlank()) continue;
+            Map<String, Object> moTa = map(nhan.get(label));
+            if (moTa.isEmpty()) continue;
+            target.put("fallback", List.of(moTa));
+            step.put("target", target);
+            daNuong++;
+        }
+        if (daNuong == 0) return 0;
+        scenario.setStepsJson(json(steps));
+        scenarios.save(scenario);
+        return daNuong;
+    }
+
     @Transactional
     public Map<String, Object> updateScenario(String scenarioId, Map<String, Object> body) {
         BehaviorScenario scenario = scenario(scenarioId);
         BehaviorSuite suite = suite(scenario.getSuiteId());
         ensureEditable(suite);
-        boolean invalidatesReplay = body.containsKey("variables")
-                || body.containsKey("initial_state")
+        boolean invalidatesReplay = body.containsKey("initial_state")
                 || body.containsKey("steps")
                 || body.containsKey("checkpoints")
                 || body.containsKey("viewports");
@@ -790,7 +790,6 @@ public class BehaviorAuthoringService {
         if (body.containsKey("display_order")) {
             scenario.setDisplayOrder((int) number(body.get("display_order"), scenario.getDisplayOrder()));
         }
-        if (body.containsKey("variables")) scenario.setVariablesJson(normalizeObject(body.get("variables"), Map.of()));
         if (body.containsKey("initial_state")) scenario.setInitialStateJson(normalizeObject(body.get("initial_state"), Map.of()));
         if (body.containsKey("steps")) scenario.setStepsJson(normalizeArray(body.get("steps")));
         if (body.containsKey("checkpoints")) scenario.setCheckpointsJson(normalizeArray(body.get("checkpoints")));
@@ -1076,7 +1075,6 @@ public class BehaviorAuthoringService {
         out.put("weight", scenario.getWeight());
         out.put("enabled", scenario.getEnabled());
         if (full) {
-            out.put("variables", readObject(scenario.getVariablesJson()));
             out.put("initial_state", readObject(scenario.getInitialStateJson()));
             out.put("steps", readArray(scenario.getStepsJson()));
             out.put("checkpoints", readArray(scenario.getCheckpointsJson()));
@@ -1104,44 +1102,20 @@ public class BehaviorAuthoringService {
     }
 
     private List<Map<String, Object>> scenarioTrace(BehaviorScenario scenario) {
-        Map<String, Object> examples = new LinkedHashMap<>();
-        readObject(scenario.getVariablesJson()).forEach((key, definition) -> {
-            Object example = map(definition).get("example");
-            if (example != null) examples.put(key, example);
-        });
         List<Map<String, Object>> trace = new ArrayList<>();
         for (Object raw : readArray(scenario.getStepsJson())) {
-            Map<String, Object> event = map(materializeExamples(raw, examples));
+            Map<String, Object> event = map(raw);
             event.put("kind", "action");
             trace.add(event);
         }
         for (Object raw : readArray(scenario.getCheckpointsJson())) {
-            Map<String, Object> event = map(materializeExamples(raw, examples));
+            Map<String, Object> event = map(raw);
             event.putIfAbsent("kind", "checkpoint");
             event.put("checkpoint", true);
             trace.add(event);
         }
         for (int index = 0; index < trace.size(); index++) trace.get(index).put("sequence", index + 1);
         return trace;
-    }
-
-    private Object materializeExamples(Object value, Map<String, Object> examples) {
-        if (value instanceof Map<?, ?> source) {
-            Map<String, Object> out = new LinkedHashMap<>();
-            source.forEach((key, item) -> out.put(String.valueOf(key), materializeExamples(item, examples)));
-            return out;
-        }
-        if (value instanceof List<?> source) {
-            return source.stream().map(item -> materializeExamples(item, examples)).toList();
-        }
-        if (!(value instanceof String text)) return value;
-        Object exact = examples.get(text.replaceAll("^\\$\\{([^}]+)}$", "$1"));
-        if (text.matches("^\\$\\{[^}]+}$") && exact != null) return exact;
-        String result = text;
-        for (Map.Entry<String, Object> entry : examples.entrySet()) {
-            result = result.replace("${" + entry.getKey() + "}", String.valueOf(entry.getValue()));
-        }
-        return result;
     }
 
     private Map<String, Object> oracleView(OracleSnapshot oracle) {
@@ -1275,31 +1249,7 @@ public class BehaviorAuthoringService {
         return Map.of("id", "desktop", "width", 1280, "height", 800, "device_pixel_ratio", 1.0);
     }
 
-    private String variableName(Map<String, Object> target, int index) {
-        String candidate = text(target, "semanticId", "");
-        if (candidate.isBlank()) candidate = text(target, "key", "");
-        if (candidate.isBlank()) candidate = text(target, "label", "");
-        candidate = candidate.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", "_").replaceAll("^_+|_+$", "");
-        return candidate.isBlank() ? "input_" + index : candidate;
-    }
 
-    private String generatorFor(String variable, String example) {
-        if (variable.contains("email")) return "email";
-        if (variable.contains("uid") || variable.endsWith("_id")) return "stable_id";
-        if (variable.contains("first")) return "first_name";
-        if (variable.contains("last")) return "last_name";
-        if (variable.contains("phone")) return "phone";
-        // ĐỊNH DẠNG CỦA Ô NHẬP QUYẾT ĐỊNH BỘ SINH. Mọi enter_text đều bị biến hoá để
-        // sinh viên không hardcode được theo đề; nhưng bộ sinh "text" trả chuỗi kiểu
-        // value_123456, nên ô Số tiền hay Ngày chi sẽ nhận chữ, validate của chính đề
-        // chặn lại và bài Golden KHÔNG lưu được gì — luồng Thêm hoá ra không thêm.
-        // Đã gặp thật ở PE_PRM393_SP27. Nhìn giá trị người ra đề gõ lúc ghi để chọn
-        // bộ sinh giữ ĐÚNG ĐỊNH DẠNG mà vẫn đổi giá trị mỗi lượt chấm.
-        String mau = example == null ? "" : example.trim();
-        if (mau.matches("\\d{4}-\\d{2}-\\d{2}")) return "date";
-        if (mau.matches("\\d+")) return "integer";
-        return "text";
-    }
 
     private String locatorAttribute(Map<String, Object> target) {
         for (String key : List.of("semanticId", "semantic_id", "valueKey", "value_key", "key",
@@ -1327,76 +1277,8 @@ public class BehaviorAuthoringService {
         return value instanceof List<?> source ? new ArrayList<>(source) : new ArrayList<>();
     }
 
-    private Object parameterize(Object value, Map<String, String> examples) {
-        if (value instanceof Map<?, ?> source) {
-            Map<String, Object> out = new LinkedHashMap<>();
-            source.forEach((key, item) -> out.put(String.valueOf(key), parameterize(item, examples)));
-            return out;
-        }
-        if (value instanceof List<?> source) {
-            return source.stream().map(item -> parameterize(item, examples)).toList();
-        }
-        if (!(value instanceof String text)) return value;
-        return substituteExamples(text, examples);
-    }
 
-    /**
-     * Thay giá trị đã ghi lúc record bằng ${tên_biến} trong MỘT lượt quét theo ranh giới từ.
-     *
-     * <p>KHÔNG được gọi String.replace() tuần tự cho từng biến trên cùng một "result": nếu giá trị
-     * ghi lại rất ngắn (vd người soạn chỉ gõ "a" vào ô Họ và tên) thì "a" khớp vào bất cứ đâu có chữ
-     * "a", kể cả bên trong từ khác ("email" -> "em[a]il") hoặc bên trong ${...} vừa chèn của biến
-     * trước đó trong cùng vòng lặp — sinh ra chuỗi hỏng kiểu {@code ${em${h_v_t_n}il}}. Quét một lần
-     * bằng regex gộp (giá trị dài xét trước) trên văn bản GỐC thì tránh được cả hai lỗi trên.
-     */
-    private String substituteExamples(String text, Map<String, String> examples) {
-        List<Map.Entry<String, String>> candidates = examples.entrySet().stream()
-                .filter(entry -> !entry.getValue().isEmpty())
-                .sorted((a, b) -> b.getValue().length() - a.getValue().length())
-                .toList();
-        if (candidates.isEmpty()) return text;
 
-        StringBuilder pattern = new StringBuilder();
-        for (Map.Entry<String, String> entry : candidates) {
-            if (pattern.length() > 0) pattern.append('|');
-            pattern.append("\\b").append(Pattern.quote(entry.getValue())).append("\\b");
-        }
-        Matcher matcher = Pattern.compile(pattern.toString(), Pattern.UNICODE_CHARACTER_CLASS).matcher(text);
-        StringBuilder out = new StringBuilder();
-        while (matcher.find()) {
-            String matched = matcher.group();
-            String variable = candidates.stream()
-                    .filter(entry -> entry.getValue().equals(matched))
-                    .map(Map.Entry::getKey)
-                    .findFirst()
-                    .orElse(null);
-            if (variable == null) continue;
-            matcher.appendReplacement(out, Matcher.quoteReplacement("${" + variable + "}"));
-        }
-        matcher.appendTail(out);
-        return out.toString();
-    }
-
-    private Object parameterizeCaptured(Object value, Map<String, String> variables) {
-        if (value instanceof Map<?, ?> source) {
-            Map<String, Object> out = new LinkedHashMap<>();
-            source.forEach((key, item) -> out.put(
-                    String.valueOf(key), parameterizeCaptured(item, variables)));
-            return out;
-        }
-        if (value instanceof List<?> source) {
-            return source.stream().map(item -> parameterizeCaptured(item, variables)).toList();
-        }
-        if (value == null || variables == null || variables.isEmpty()) return value;
-        String actual = String.valueOf(value);
-        for (Map.Entry<String, String> entry : variables.entrySet()) {
-            if (entry.getValue() != null && !entry.getValue().isBlank()
-                    && actual.equals(entry.getValue())) {
-                return "${" + entry.getKey() + "}";
-            }
-        }
-        return value;
-    }
 
     private String uniqueScenarioCode(String suiteId, String base) {
         String value = base.isBlank() ? "SCENARIO" : base;

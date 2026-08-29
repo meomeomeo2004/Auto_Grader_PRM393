@@ -1232,16 +1232,23 @@ public class ExamService {
             log.warn("Không xóa được submissions của {}: {}", examId, e.getMessage());
         }
 
+        // Lịch sử chấm phải đi cùng đề. Trước đây chỉ xoá bản ghi `exam` nên trang chấm
+        // bài vẫn liệt kê đủ điểm của bộ chấm đã bị xoá — người dùng tưởng xoá hụt.
+        long resultsRemoved = resultRepository.deleteByExamId(examId);
+        long batchesRemoved = batchRepository.deleteByExamId(examId);
+
         boolean dbRemoved = examRepository.findByExamId(examId)
                 .map(e -> { examRepository.delete(e); return true; })
                 .orElse(false);
 
-        log.info("🗑️ Đã xóa đề {} (ảnh legacy: {}, submissions: {}, DB: {})",
-                examId, imageRemoved, submissionsRemoved, dbRemoved);
+        log.info("🗑️ Đã xóa đề {} (ảnh legacy: {}, submissions: {}, kết quả: {}, mẻ: {}, DB: {})",
+                examId, imageRemoved, submissionsRemoved, resultsRemoved, batchesRemoved, dbRemoved);
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("examId", examId);
         r.put("imageRemoved", imageRemoved);
         r.put("submissionsRemoved", submissionsRemoved);
+        r.put("resultsRemoved", resultsRemoved);
+        r.put("batchesRemoved", batchesRemoved);
         r.put("dbRecordRemoved", dbRemoved);
         return r;
     }
