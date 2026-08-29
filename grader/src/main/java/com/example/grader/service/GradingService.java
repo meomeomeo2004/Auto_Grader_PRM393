@@ -12,6 +12,7 @@ import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
@@ -134,8 +135,20 @@ public class GradingService {
 
     public String gradeSubmission(String batchId, String studentId, String examId, String testcasePath,
                                   Path tempDir, Path zipPath) throws Exception {
+        return gradeSubmission(batchId, studentId, examId, testcasePath, tempDir, zipPath, null);
+    }
+
+    /**
+     * @param evidenceTarget nơi giữ ảnh màn hình bằng chứng của bài này (mỗi luồng một PNG do
+     *                       engine chụp). null = không thu bằng chứng. Thư mục tạm bị xoá sau
+     *                       lượt chấm nên ảnh phải được CHUYỂN ra đây trước khi dọn.
+     */
+    public String gradeSubmission(String batchId, String studentId, String examId, String testcasePath,
+                                  Path tempDir, Path zipPath, Path evidenceTarget) throws Exception {
         Path extractDir = tempDir.resolve("extracted");
         Files.createDirectories(extractDir);
+        Path evidenceDir = tempDir.resolve("evidence");
+        Files.createDirectories(evidenceDir);
 
         try {
             unzip(zipPath.toFile(), extractDir.toFile());
@@ -172,9 +185,29 @@ public class GradingService {
                             Files.isDirectory(projectRoot.resolve("assets")),
                             Files.isDirectory(studentLib.resolve("assets")),
                             "exam_project"),
-                    examId, testcasePath
+                    examId, testcasePath, evidenceDir
             );
         } finally {
+            // Chuyển ảnh bằng chứng ra chỗ bền TRƯỚC khi tempDir bị xoá. Ghi đè bản của lần
+            // chấm trước (chấm lại = bằng chứng mới). Lỗi ở đây chỉ mất bằng chứng, nuốt.
+            if (evidenceTarget != null) {
+                try {
+                    if (Files.isDirectory(evidenceDir)) {
+                        try (Stream<Path> pngs = Files.list(evidenceDir)) {
+                            List<Path> files = pngs.filter(f -> f.toString().endsWith(".png")).toList();
+                            if (!files.isEmpty()) {
+                                Files.createDirectories(evidenceTarget);
+                                for (Path png : files) {
+                                    Files.copy(png, evidenceTarget.resolve(png.getFileName().toString()),
+                                            StandardCopyOption.REPLACE_EXISTING);
+                                }
+                            }
+                        }
+                    }
+                } catch (Exception evidence) {
+                    log.warn("[{}] Không lưu được ảnh bằng chứng: {}", studentId, evidence.toString());
+                }
+            }
             // QUAN TRỌNG: dọn thư mục tạm KHÔNG được ném lỗi đè lên lý do chấm thật (vd probe
             // mount thư mục này → Windows khóa file → Files.walk có thể ném và che mất lỗi 0/0).
             try { deleteDirectory(tempDir.toFile()); }
@@ -801,10 +834,17 @@ class UserListScreen extends HomeScreen {
 
     // ── Gọi Docker ───────────────────────────────────────────────
     private String runDockerGrader(String batchId, String studentId, String libPath, String assetsPath,
-                                   String pubspecPath, String examId, String testcasePath) throws Exception {
+                                   String pubspecPath, String examId, String testcasePath,
+                                   Path evidenceDir) throws Exception {
         // Tách phần mount + ảnh ra để vừa chạy chấm, vừa tái dùng cho probe chẩn đoán khi 0/0.
         List<String> mounts = new ArrayList<>(List.of(
                 "-v", toDockerPath(libPath) + ":/app/lib"));
+        if (evidenceDir != null && Files.isDirectory(evidenceDir)) {
+            // Thư mục RIÊNG mỗi bài cho ảnh bằng chứng — không dùng /app/test vì đó là thư mục
+            // CHUNG của cả đề, hai bài chấm song song sẽ ghi đè nhau.
+            mounts.add("-v");
+            mounts.add(toDockerPath(evidenceDir.toAbsolutePath().toString()) + ":/app/evidence");
+        }
         if (assetsPath != null && Files.isDirectory(Path.of(assetsPath))) {
             mounts.add("-v");
             mounts.add(toDockerPath(assetsPath) + ":/app/assets");
@@ -846,6 +886,10 @@ class UserListScreen extends HomeScreen {
                 "docker", "run", "--name", containerName, "--rm", "--memory", runMemory, "--cpus", runCpus));
         command.add("-e");
         command.add("GRADER_ANALYZE_LIB=" + analyzeEnabled);
+        if (evidenceDir != null && Files.isDirectory(evidenceDir)) {
+            command.add("-e");
+            command.add("GRADER_EVIDENCE_DIR=/app/evidence");
+        }
         command.add("-e");
         command.add("GRADER_BATCH_TIMEOUT_SECONDS=" + testcaseProcessTimeoutSeconds);
         command.add("-e");

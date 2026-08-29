@@ -225,6 +225,15 @@ public class GoldenValidationService {
     }
 
     private List<Boolean> parseCheckpointResults(String output) {
+        // Từ ảnh chấm có pipeline 4 tầng (2026-08-22), stdout container chỉ còn khối
+        // GRADE_RESULT của bộ hợp nhất; marker ###RAR_CHECKPOINT### nằm lại trong file
+        // log BÊN TRONG container. Đếm marker khi đó luôn ra 0/0 và preflight trượt
+        // bất kể bộ đề đúng sai — lỗi đã gặp thật với PE_PRM393_SP27. Vì vậy ưu tiên
+        // đọc GRADE_RESULT (chỉ đếm tiêu chí tầng hành vi: preflight tắt tầng tĩnh,
+        // tầng đơn vị không có); không thấy khối này mới rơi về cách đếm marker cũ
+        // để vẫn tương thích ảnh đời trước.
+        List<Boolean> fromMerge = parseMergedBehaviorResults(output);
+        if (!fromMerge.isEmpty()) return fromMerge;
         List<Boolean> result = new ArrayList<>();
         for (String line : output.split("\\R")) {
             String message = line;
@@ -243,6 +252,28 @@ public class GoldenValidationService {
                 result.add(node.path("passed").asBoolean(false));
             } catch (Exception ignored) {
             }
+        }
+        return result;
+    }
+
+    /** Đọc test_cases tầng BEHAVIOR_REPLAY từ khối GRADE_RESULT; rỗng nếu không có khối. */
+    private List<Boolean> parseMergedBehaviorResults(String output) {
+        List<Boolean> result = new ArrayList<>();
+        int start = output.indexOf("--- GRADE_RESULT_START ---");
+        if (start < 0) return result;
+        int end = output.indexOf("--- GRADE_RESULT_END ---", start);
+        if (end < 0) return result;
+        String json = output.substring(start + "--- GRADE_RESULT_START ---".length(), end).trim();
+        try {
+            JsonNode root = mapper.readTree(json);
+            for (JsonNode testCase : root.path("test_cases")) {
+                String runner = testCase.path("runner").asText("BEHAVIOR_REPLAY");
+                if (!"BEHAVIOR_REPLAY".equals(runner)) continue;
+                result.add("passed".equals(testCase.path("status").asText("")));
+            }
+        } catch (Exception ignored) {
+            // Khối hỏng thì coi như không có, để fallback marker xử lý.
+            result.clear();
         }
         return result;
     }

@@ -13,6 +13,12 @@
 # syntax=docker/dockerfile:1
 FROM ghcr.io/cirruslabs/flutter:stable
 
+# Phiên bản ảnh nền. Backend trỏ tới NHÃN CỤ THỂ (grader.base-image), không dùng
+# `latest` nữa: đổi ảnh chấm là việc phải nhìn thấy được trong git, không phải thứ
+# xảy ra âm thầm khi ai đó build lại máy mình.
+ARG GRADER_BASE_VERSION=dev
+LABEL grader.base.version="${GRADER_BASE_VERSION}"
+
 # Tắt analytics để CLI không treo chờ prompt khi build/chạy
 ENV FLUTTER_SUPPRESS_ANALYTICS=true \
     DART_DISABLE_ANALYTICS=true \
@@ -38,6 +44,10 @@ RUN flutter pub get
 RUN flutter precache --universal
 
 # ── File tiện ích KHÔNG đổi giữa các đề thi ─────────────────────────────────
+# Luật phân tích tĩnh (N1-02). Đặt ở /app — cha của /app/lib — để `dart analyze /app/lib`
+# tự tìm thấy khi đi ngược lên. Đề nào cần luật riêng thì mount đè đúng đường dẫn này.
+COPY analysis_options.yaml ./analysis_options.yaml
+
 COPY scripts/      ./scripts/
 COPY run_grader.sh ./run_grader.sh
 # Chuẩn hoá CRLF → LF để shebang hợp lệ trên Linux + cấp quyền chạy

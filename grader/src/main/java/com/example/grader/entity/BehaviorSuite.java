@@ -63,6 +63,14 @@ public class BehaviorSuite {
     @Column(name = "runtime_config_json", columnDefinition = "LONGTEXT")
     private String runtimeConfigJson;
 
+    /**
+     * Luật chấm tĩnh (nhóm Kiến trúc, lint) dạng {"rules":[...]} — nguồn sự thật để
+     * materializer sinh dòng `runner: STATIC_ANALYSIS`; xem StaticRuleService.
+     */
+    @Lob
+    @Column(name = "static_rules_json", columnDefinition = "LONGTEXT")
+    private String staticRulesJson;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 

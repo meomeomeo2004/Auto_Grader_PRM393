@@ -56,8 +56,6 @@ public class BatchGradingService {
     @Autowired private ExamResultRepository resultRepo;
     @Autowired private GradingBatchRepository batchRepo;
     @Autowired private ExamRepository examRepo;
-    @Autowired private SyllabusService    syllabusService;
-    @Autowired private CompetencyService  competencyService;
     @Autowired private GradingRuntimeSettingsService runtimeSettings;
 
     /** Bản hợp đồng `result.json` mà backend này phát hành — xem SPEC_grader_result_json/. */
@@ -420,8 +418,12 @@ public class BatchGradingService {
             // Ép testcase (chấm lại đề cũ dùng snapshot); mặc định lấy testcase hiện tại của đề.
             String testcasePath = job.testcasePath() != null ? job.testcasePath()
                     : examRepo.findByExamId(job.examId()).map(Exam::getTestcasePath).orElse(null);
+            // Ảnh bằng chứng nằm cạnh zip bài nộp — cùng vòng đời với batch (xoá batch là xoá theo).
+            Path evidenceTarget = batchDir(job.examId(), job.batchId())
+                    .resolve("_evidence").resolve(job.studentId());
             String resultJson = gradingService.gradeSubmission(
-                    job.batchId(), job.studentId(), job.examId(), testcasePath, tempDir, zipPath);
+                    job.batchId(), job.studentId(), job.examId(), testcasePath, tempDir, zipPath,
+                    evidenceTarget);
 
             float score = parseScore(resultJson);
             String fullJson = assembleResultJson(job, resultJson);   // JSON đầy đủ cho lịch sử/năng lực
@@ -819,46 +821,20 @@ public class BatchGradingService {
             Map<String, Object> matrix = loadSkillsMatrix(exam);
             enrichTestCases(testCases, matrix);
 
-            // Nhãn phân loại của result.json v2 — xem TestCaseTaxonomy.
-            annotateTaxonomy(testCases, matrix);
-
-            // Chuẩn hóa schema kết quả: chỉ dùng expected; expect chỉ được đọc để tương thích dữ liệu cũ.
-            normalizeExpectedFields(testCases);
 
             // Chuẩn hoá lỗi từng testcase FAIL: log thô của flutter test (Expected/Actual + stack trace
             // dài như "log backend") → actual/error gọn, sạch để FE hiển thị đẹp.
             // error.message là chẩn đoán kỹ thuật; student_safe_summary là hướng dẫn riêng cho SV.
             sanitizeTestCaseErrors(testCases);
 
-            // Đặt trước khối try để giữ thứ tự khoá test_cases → competency_assessment. Đây là
-            // CÙNG tham chiếu list, nên các bước sửa bên dưới vẫn phản ánh vào JSON.
+            // Dẫn xuất vài field mà engine đời cũ chưa gửi đủ; KHÔNG bơm thêm nhãn phân loại.
+            fillDerivedFields(testCases);
+
             if (!testCases.isEmpty()) root.put("test_cases", testCases);
-
-            // Gắn nhãn KIẾN THỨC (skill_name/category/category_label) + ĐỘ KHÓ cho từng testcase,
-            // rồi tính NĂNG LỰC theo category — dùng chung 1 resolver.
-            String annotationError = null;
-            try {
-                SyllabusService.Resolver resolver = syllabusService.resolver();
-                competencyService.annotateTestCases(testCases, resolver);
-                List<Map<String, Object>> comp = competencyService.assess(testCases, resolver);
-                if (!comp.isEmpty()) root.put("competency_assessment", comp);
-            } catch (Exception ce) {
-                // Khối trên ngã thì bài này bị SUY GIẢM. Phải nói ra, nếu không nó trông y hệt
-                // một bài bình thường và bên đọc sẽ nhận xét như thể mọi nhãn đều đầy đủ.
-                annotationError = ce.getClass().getSimpleName()
-                        + (ce.getMessage() == null ? "" : ": " + TestErrorClassifier.shorten(ce.getMessage(), 160));
-                log.warn("Tính competency/annotate lỗi cho {}: {}", job.studentId(), ce.getMessage());
-            }
-
-            // SAU khối try: khoá hợp đồng phải có mặt kể cả khi khối trên đã ngã.
-            guaranteeContractKeys(testCases);
             gradingResult.putIfAbsent("not_run_tests", countStatus(testCases, "not_run"));
-            gradingResult.put("annotation_error", annotationError);
 
             if (g.has("analyze_result"))
                 root.put("analyze_result", mapper.convertValue(g.get("analyze_result"), Object.class));
-
-            root.put("teacher_note", (exam != null && exam.getTeacherNote() != null) ? exam.getTeacherNote() : "");
 
             return mapper.writeValueAsString(root);
         } catch (Exception e) {
@@ -893,67 +869,44 @@ public class BatchGradingService {
     }
 
     /**
-     * Gắn `rubric` (nhóm chức năng) và `layer` (tầng kiểm thử) cho từng testcase.
-     * <p>Chạy CẢ KHI không có matrix, vì layer của đề legacy vẫn suy được từ tiền tố test_id.
-     * Luôn ĐẶT khoá kể cả giá trị null để bên đọc không phải đoán schema.
-     */
-    @SuppressWarnings("unchecked")
-    private void annotateTaxonomy(List<Map<String, Object>> tcs, Map<String, Object> matrix) {
-        for (Map<String, Object> tc : tcs) {
-            String testId = String.valueOf(tc.get("test_id"));
-            Object raw = matrix == null ? null : matrix.get(testId);
-            Map<String, Object> row = raw instanceof Map<?, ?> m ? (Map<String, Object>) m : null;
-            if (isBlank(tc.get("rubric"))) tc.put("rubric", TestCaseTaxonomy.rubricOf(row));
-            if (isBlank(tc.get("layer")))  tc.put("layer",  TestCaseTaxonomy.layerOf(row, testId));
-            // Nhãn hiển thị của rubric. Đặt khoá kể cả khi null — bên đọc hiểu "khoá vắng mặt =
-            // dữ liệu cũ, được phép tự suy", nên thiếu khoá trên dữ liệu MỚI sẽ đẩy họ đi đoán.
-            if (isBlank(tc.get("rubric_label")))
-                tc.put("rubric_label", TestCaseTaxonomy.rubricLabelOf(row));
-        }
-    }
-
-    private boolean isBlank(Object value) {
-        return value == null || String.valueOf(value).isBlank();
-    }
-
-    /** Nhãn kiến thức do CompetencyService gắn — cả khối biến mất nếu resolver ném lỗi. */
-    private static final List<String> KNOWLEDGE_KEYS =
-            List.of("chapter", "category", "category_label", "skill_name", "difficulty_label");
-
-    /**
-     * Bảo đảm mọi khoá của hợp đồng CÓ MẶT ở từng testcase, kể cả khi giá trị là null.
+     * Dẫn xuất vài field mà engine đời cũ chưa gửi đủ, và DỌN các field không ai đọc.
      *
-     * <p>Chạy SAU khối gắn nhãn kiến thức, vì khối đó nằm trong try/catch: `syllabusService`
-     * ném lỗi là mất sạch `chapter`/`category`/`skill_name`/`difficulty_label`. Bên đọc hiểu
-     * *"khoá vắng mặt = dữ liệu cũ, được phép tự suy"*, nên thiếu khoá trên dữ liệu MỚI sẽ đẩy
-     * họ quay lại đoán — đúng thứ hai bên đã thống nhất bỏ.
+     * <p>Trước đây chỗ này còn bơm thêm 8 nhãn phân loại (`rubric`, `rubric_label`, `layer`,
+     * `chapter`, `category`, `category_label`, `skill_name`, `difficulty_label`) cùng
+     * `blocked_by` luôn null, chỉ để thoả một hợp đồng ngoài. Hợp đồng đó đã bỏ; giữ lại
+     * chỉ làm result_json phình ra mà không ai đọc.
      *
-     * <p>Ở đây chỉ ĐẶT KHOÁ, không bịa giá trị.
+     * <p>Ở đây chỉ SUY field từ dữ liệu đã có, không bịa giá trị mới.
      */
-    private void guaranteeContractKeys(List<Map<String, Object>> tcs) {
+    private void fillDerivedFields(List<Map<String, Object>> tcs) {
         for (Map<String, Object> tc : tcs) {
             String status = String.valueOf(tc.getOrDefault("status", "")).toLowerCase();
             boolean notRun = "not_run".equals(status);
-            // Dẫn xuất từ status. Engine chung đã gửi sẵn; đề legacy thì suy tại đây.
             if (!(tc.get("executed") instanceof Boolean)) tc.put("executed", !notRun);
-            // not_run vẫn tính vào total_weight nhưng điểm phải là 0 (SPEC mục 4).
-            if (notRun) tc.put("score", 0);
-            // Mã lỗi PHẲNG cho máy đọc. Đọc `error.code` của grader ĐỀ LEGACY (grader riêng của
-            // giáo viên vẫn có thể gửi object error) trước khi bỏ object đó đi.
+            // Mã lỗi PHẲNG cho máy đọc. Rút `error.code` của đề legacy ra TRƯỚC khi bỏ object đó.
             if (tc.get("error_code") == null) {
                 Object error = tc.get("error");
-                tc.put("error_code", error instanceof Map<?, ?> m ? m.get("code") : null);
+                Object code = error instanceof Map<?, ?> m ? m.get("code") : null;
+                if (code != null) tc.put("error_code", code);
             }
             attachCaseDiagnostic(tc, status);
-            // P2b — GỠ HẲN hai trường. Phải gỡ ở đây, sau khi đã rút `error_code` ra: grader của
-            // đề legacy vẫn gửi chúng, và bỏ sót là hợp đồng nói một đằng dữ liệu một nẻo.
             tc.remove("error");
             tc.remove("student_safe_summary");
-            // Hoãn tới P4b, luôn null — nhưng khoá phải có mặt (SPEC mục 4).
-            tc.putIfAbsent("blocked_by", null);
-            for (String key : KNOWLEDGE_KEYS) tc.putIfAbsent(key, null);
+            // `score` là field DẪN XUẤT: hệ thống không có chấm điểm một phần, đạt thì trọn
+            // max_score, không đạt thì 0. Giữ hai số cho cùng một thông tin là mời gọi lệch nhau.
+            tc.remove("score");
+            // Nhãn phân loại của hợp đồng cũ — không nơi nào đọc.
+            for (String key : DEAD_KEYS) tc.remove(key);
         }
     }
+
+    /** Field của hợp đồng cũ, đã xác nhận không nơi nào trong hệ thống đọc tới. */
+    private static final List<String> DEAD_KEYS = List.of(
+            "blocked_by", "rubric", "rubric_label", "layer",
+            "chapter", "category", "category_label", "skill_name", "difficulty_label",
+            // `expected`/`expect`: câu đặc tả giống hệt nhau ở mọi bài nộp, không nói gì về
+            // BÀI NÀY. Grader của đề legacy vẫn gửi, nên phải dọn ở đây.
+            "expected", "expect", "skill");
 
     private int countStatus(List<Map<String, Object>> tcs, String status) {
         int n = 0;
@@ -964,8 +917,12 @@ public class BatchGradingService {
     }
 
     /**
-     * Bổ sung skill_code / difficulty / skill (tên hiển thị) cho mỗi testcase, đọc từ
-     * skills_matrix.json của đề. Chỉ điền khi testcase CHƯA có (không ghi đè dữ liệu grader).
+     * Bổ sung skill_code / difficulty cho mỗi testcase, đọc từ skills_matrix.json của đề.
+     * Chỉ điền khi testcase CHƯA có (không ghi đè dữ liệu grader).
+     *
+     * <p>2026-08-22 bỏ hẳn phần dựng `expected`: field đó đã gỡ khỏi result.json. Tên tiêu chí
+     * do giáo viên viết đã mô tả đủ, và một câu đặc tả thứ hai không nói thêm gì về BÀI NÀY —
+     * nó giống hệt nhau ở mọi bài nộp.
      */
     private void enrichTestCases(List<Map<String, Object>> tcs, Map<String, Object> matrix) {
         if (tcs.isEmpty() || matrix == null) return;
@@ -974,28 +931,7 @@ public class BatchGradingService {
             if (meta instanceof Map<?, ?> m) {
                 putIfAbsent(tc, "skill_code", m.get("skill_code"));
                 putIfAbsent(tc, "difficulty", m.get("difficulty"));
-                putIfAbsent(tc, "skill",      m.get("skill"));
-                // Expected trong rubric là nội dung giáo viên đã cấu hình, nên là nguồn
-                // sự thật cuối cùng khi dựng result_json kể cả grader trả metadata cũ.
-                // Riêng testcase GROUP: đề publish TRƯỚC bản sửa còn giữ câu tự sinh đếm số
-                // assert, phải dựng lại tại đây — xem TestCaseTaxonomy.groupExpected.
-                Object configuredExpected = TestCaseTaxonomy.groupExpected(m);
-                if (configuredExpected == null) configuredExpected = m.get("expected");
-                if (configuredExpected != null && !String.valueOf(configuredExpected).isBlank()) {
-                    tc.put("expected", configuredExpected);
-                }
             }
-        }
-    }
-
-    /** Kết quả mới chỉ phát hành expected, không phát hành alias expect. */
-    private void normalizeExpectedFields(List<Map<String, Object>> tcs) {
-        for (Map<String, Object> tc : tcs) {
-            Object expected = tc.get("expected");
-            if (expected == null || String.valueOf(expected).isBlank()) expected = tc.get("expect");
-            if (expected == null || String.valueOf(expected).isBlank()) expected = "PASS";
-            tc.put("expected", expected);
-            tc.remove("expect");
         }
     }
 
@@ -1035,7 +971,13 @@ public class BatchGradingService {
             Object rawObj = tc.get("actual");
             if (rawObj == null || String.valueOf(rawObj).isBlank()) rawObj = tc.get("error_log");
             String raw = rawObj == null ? "" : String.valueOf(rawObj);
-            if (!raw.isBlank()) applyStructuredError(tc, raw);
+            // TÔN TRỌNG `actual_source`. Có cờ này nghĩa là tầng chấm ĐÃ viết sẵn câu tiếng
+            // Việt mô tả đúng thứ nó quan sát được. Bộ bóc log dưới đây chỉ hiểu log thô của
+            // flutter test; đem nó chạy lên câu đã sạch thì bóc không ra gì, rồi ghi đè bằng
+            // "Không thu được kết quả quan sát" — xoá mất đúng dòng mà phúc khảo cần đọc.
+            boolean daCoNguon = tc.get("actual_source") != null
+                    && !String.valueOf(tc.get("actual_source")).isBlank();
+            if (!raw.isBlank() && !daCoNguon) applyStructuredError(tc, raw);
             // SAU CÙNG: quan sát có cấu trúc ghi đè `actual` do bóc log. Thứ tự này bắt buộc —
             // classifier cần đọc LOG THÔ để ra `error_code` đúng, nên không được thay `actual`
             // trước nó; còn câu cho sinh viên đọc thì quan sát luôn tốt hơn bản đoán từ chữ.
@@ -1134,8 +1076,13 @@ public class BatchGradingService {
      */
     private void attachCaseDiagnostic(Map<String, Object> tc, String status) {
         if ("passed".equals(status)) {
-            tc.putIfAbsent("error_origin", null);
-            tc.putIfAbsent("error_stage", null);
+            // Dòng đạt không có lỗi để mô tả: GỠ khoá thay vì đặt null. Đặt null nghĩa là
+            // "có chỗ cho thông tin này nhưng chưa biết", trong khi sự thật là "không có".
+            tc.remove("error_origin");
+            tc.remove("error_stage");
+            tc.remove("observation");
+            tc.remove("violations");
+            tc.remove("error_code");
             tc.putIfAbsent("requires_manual_review", false);
             return;
         }

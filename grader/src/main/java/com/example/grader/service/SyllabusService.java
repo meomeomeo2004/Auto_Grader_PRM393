@@ -24,7 +24,7 @@ import java.util.Optional;
 /**
  * Quản lý SYLLABUS (danh mục năng lực): category + skill. Nguồn runtime là DB; lần đầu
  * (DB rỗng) seed từ resources/syllabus.json. Cung cấp tra cứu skill→category để
- * {@link CompetencyService} đánh giá năng lực, và CRUD cho giảng viên.
+ * CRUD khung năng lực cho giảng viên.
  *
  * Tra cứu category cho 1 testcase theo 3 lớp (bền vững với đề cũ):
  *   1) skill_code (chuẩn mới) → category của skill đó
