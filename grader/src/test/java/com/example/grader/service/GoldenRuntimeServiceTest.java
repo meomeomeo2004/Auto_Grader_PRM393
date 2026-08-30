@@ -43,7 +43,10 @@ class GoldenRuntimeServiceTest {
         golden.setSha256("abc123");
         when(artifacts.active("suite-1", BehaviorArtifactType.GOLDEN_SOLUTION)).thenReturn(golden);
 
-        Path root = temp.resolve("suite-1").resolve("abc123");
+        // Thư mục runtime khoá theo SHA + RECORDER_BRIDGE_VERSION (content-addressed, xem
+        // runtimeVersion()), không phải chỉ SHA — gọi qua reflection để không hardcode version.
+        String runtimeVersion = ReflectionTestUtils.invokeMethod(service, "runtimeVersion", golden);
+        Path root = temp.resolve("suite-1").resolve(runtimeVersion);
         Files.createDirectories(root);
         Files.writeString(root.resolve("index.html"), "<html></html>", StandardCharsets.UTF_8);
         Files.writeString(root.resolve("flutter.js"), "console.log('ok')", StandardCharsets.UTF_8);
@@ -94,7 +97,7 @@ class GoldenRuntimeServiceTest {
                 "name: exam_project\nflutter:\n  uses-material-design: true\n",
                 StandardCharsets.UTF_8);
 
-        ReflectionTestUtils.invokeMethod(service, "prepareProject", source, target);
+        ReflectionTestUtils.invokeMethod(service, "prepareProject", "suite-1", source, target);
 
         assertThat(Files.readString(target.resolve("lib/main.dart"), StandardCharsets.UTF_8))
                 .contains("package:exam_project/models/user.dart")

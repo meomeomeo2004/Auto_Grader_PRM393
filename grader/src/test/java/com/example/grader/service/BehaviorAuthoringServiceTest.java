@@ -95,23 +95,22 @@ class BehaviorAuthoringServiceTest {
 
         Map<String, Object> scenario = service.abstractRecording(recordingId, Map.of(
                 "scenario_code", "ADD_FINAL_USER"));
-        Map<?, ?> variables = (Map<?, ?>) scenario.get("variables");
-        assertTrue(variables.containsKey("field_email"));
-        assertTrue(variables.containsKey("field_email_2"));
+        // Không còn biến hoá: giá trị người ra đề gõ (kể cả bản nháp "invalid" lẫn bản cuối
+        // "final@example.com") được replay y nguyên, theo đúng thứ tự đã gõ.
         List<?> steps = (List<?>) scenario.get("steps");
-        assertEquals("${field_email}", ((Map<?, ?>) steps.get(0)).get("value"));
-        assertEquals("${field_email_2}", ((Map<?, ?>) steps.get(1)).get("value"));
+        assertEquals("invalid", ((Map<?, ?>) steps.get(0)).get("value"));
+        assertEquals("final@example.com", ((Map<?, ?>) steps.get(1)).get("value"));
 
+        // Row phải dùng ĐÚNG giá trị thật (không phải "${var}"): applyDerivedDatabaseCheckpoints
+        // giờ nâng checkpoint thành entity_consistency bằng cách so khớp literal giữa row DB và
+        // text đã thấy ở checkpoint UI (dòng "final@example.com" ở trên) — không biến hoá nữa.
         Map<String, Object> completed = service.applyDerivedDatabaseCheckpoints(
                 String.valueOf(scenario.get("id")),
                 List.of(Map.of(
                         "kind", "database_observation",
                         "table", "users",
                         "operation", "INSERT",
-                        "row", Map.of("email", "generated-final@example.test"))),
-                Map.of(
-                        "field_email", "generated-first@example.test",
-                        "field_email_2", "generated-final@example.test"),
+                        "row", Map.of("email", "final@example.com"))),
                 "c".repeat(64));
         List<?> checkpoints = (List<?>) completed.get("checkpoints");
         Map<?, ?> consistency = checkpoints.stream()
@@ -119,8 +118,8 @@ class BehaviorAuthoringServiceTest {
                 .filter(item -> "entity_consistency".equals(item.get("kind")))
                 .findFirst().orElseThrow();
         assertEquals("cross_layer", consistency.get("scope"));
-        assertEquals(List.of("${field_email_2}"), consistency.get("ui_values"));
-        assertEquals("${field_email_2}", ((Map<?, ?>) consistency.get("row")).get("email"));
+        assertEquals(List.of("final@example.com"), consistency.get("ui_values"));
+        assertEquals("final@example.com", ((Map<?, ?>) consistency.get("row")).get("email"));
     }
 
     @Test
@@ -317,9 +316,9 @@ class BehaviorAuthoringServiceTest {
                 "scenario_code", "ADD_USER",
                 "weight", 3.0));
         assertEquals("ADD_USER", scenario.get("scenario_code"));
-        @SuppressWarnings("unchecked")
-        Map<String, Object> variables = (Map<String, Object>) scenario.get("variables");
-        assertTrue(variables.containsKey("field_uid"));
+        // Không còn biến hoá: giá trị "SV01" đã gõ được giữ nguyên trong step, không đổi thành "${...}".
+        List<?> steps = (List<?>) scenario.get("steps");
+        assertEquals("SV01", ((Map<?, ?>) steps.get(0)).get("value"));
         assertFalse(((List<?>) scenario.get("checkpoints")).isEmpty());
 
         // Production gọi bước này sau khi Docker replay Golden trên Hidden DB và
@@ -328,7 +327,6 @@ class BehaviorAuthoringServiceTest {
         service.applyDerivedDatabaseCheckpoints(
                 String.valueOf(scenario.get("id")),
                 List.of(),
-                Map.of("field_uid", "SV01"),
                 "a".repeat(64));
 
         Map<String, Object> published = service.publish(String.valueOf(suite.get("id")));
@@ -464,7 +462,7 @@ class BehaviorAuthoringServiceTest {
 
         String scenarioId = String.valueOf(firstAbstract.get("id"));
         service.applyDerivedDatabaseCheckpoints(
-                scenarioId, List.of(), Map.of(), "b".repeat(64));
+                scenarioId, List.of(), "b".repeat(64));
         assertEquals("READY", oracleRepository
                 .findFirstByScenarioIdOrderByCreatedAtDesc(scenarioId).orElseThrow().getStatus().name());
 
