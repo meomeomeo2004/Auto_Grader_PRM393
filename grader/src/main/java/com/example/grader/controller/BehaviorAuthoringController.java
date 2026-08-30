@@ -112,6 +112,13 @@ public class BehaviorAuthoringController {
     @PutMapping("/suites/{id}")
     public ResponseEntity<?> updateSuite(@PathVariable String id, @RequestBody Map<String, Object> body) {
         return call(() -> {
+            // Đổi tên database phải soi lại mã Golden TRƯỚC khi lưu — lệch tên là replay
+            // boot database trống và chấm sai âm thầm (đã xảy ra 29/8).
+            if (body.containsKey("database_contract")) {
+                Map<String, Object> contract = map(body.get("database_contract"));
+                Object name = contract.containsKey("database_name") ? contract.get("database_name") : contract.get("name");
+                artifactService.crossCheckDeclaredDatabaseName(id, name == null ? "" : String.valueOf(name).trim());
+            }
             Map<String, Object> suite = service.updateSuite(id, body);
             if (body.containsKey("runtime_config")) {
                 artifactService.writeGenerated(
@@ -159,6 +166,13 @@ public class BehaviorAuthoringController {
     @PostMapping("/recordings/{id}/events")
     public ResponseEntity<?> appendEvent(@PathVariable String id, @RequestBody Map<String, Object> body) {
         return call(() -> service.appendEvent(id, body));
+    }
+
+    @PutMapping("/recordings/{id}/events/{sequence}")
+    public ResponseEntity<?> updateEvent(@PathVariable String id, @PathVariable int sequence,
+                                         @RequestBody Map<String, Object> body) {
+        return call(() -> service.updateEventWeight(id, sequence,
+                body.get("weight") instanceof Number number ? number.doubleValue() : 1.0));
     }
 
     @DeleteMapping("/recordings/{id}/events/{sequence}")
@@ -239,6 +253,11 @@ public class BehaviorAuthoringController {
                 capture = captureService.capture(
                         recordingSuiteId, String.valueOf(scenario.get("id")));
                 scenario = map(capture.get("scenario"));
+                // Cảnh báo hỏng-im-lặng phải theo response ra tới toast, không được rơi ở đây.
+                if (capture.get("capture_warning") != null) {
+                    scenario = new LinkedHashMap<>(scenario);
+                    scenario.put("capture_warning", capture.get("capture_warning"));
+                }
             }
             writeTestcaseDefinition(recordingSuiteId, scenario.get("scenario_code"));
             Map<String, Object> result = new LinkedHashMap<>(scenario);
@@ -264,6 +283,10 @@ public class BehaviorAuthoringController {
             if (replayChanged) {
                 Map<String, Object> capture = captureService.capture(suiteId, id);
                 scenario = map(capture.get("scenario"));
+                if (capture.get("capture_warning") != null) {
+                    scenario = new LinkedHashMap<>(scenario);
+                    scenario.put("capture_warning", capture.get("capture_warning"));
+                }
             }
             writeTestcaseDefinition(suiteId, scenario.get("scenario_code"));
             return scenario;

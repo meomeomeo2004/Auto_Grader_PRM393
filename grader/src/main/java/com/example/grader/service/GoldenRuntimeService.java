@@ -30,7 +30,7 @@ import java.util.zip.ZipFile;
 public class GoldenRuntimeService {
     private static final long MAX_EXPANDED_BYTES = 1_000L * 1024 * 1024;
     private static final int MAX_ZIP_ENTRIES = 20_000;
-    private static final String RECORDER_BRIDGE_VERSION = "semantic-v10";   // v4: quét thành phần CHỈ trong flutter-view (v3 vớ nhầm DOM của extension)
+    private static final String RECORDER_BRIDGE_VERSION = "semantic-v14";   // v4: quét thành phần CHỈ trong flutter-view (v3 vớ nhầm DOM của extension)
 
     @Value("${grader.base-image:grading-base:latest}")
     private String baseImage;
@@ -299,7 +299,7 @@ public class GoldenRuntimeService {
                 Future<void> main() async {
                   WidgetsFlutterBinding.ensureInitialized();
                   // Dấu phiên bản để phân định bản build đang CHẠY với bản bị cache.
-                  debugPrint('recorder-entry semantic-v10');
+                  debugPrint('recorder-entry semantic-v14');
                   // Giữ handle sống suốt phiên để cây ngữ nghĩa luôn được dựng.
                   SemanticsBinding.instance.ensureSemantics();
                   // SQLite THẬT trên web + nạp hidden.db TRƯỚC khi app khởi động — đúng cách
@@ -370,7 +370,13 @@ public class GoldenRuntimeService {
                       if (!(node instanceof Element)) continue;
                       const rawLabel = node.getAttribute('aria-label') || node.getAttribute('data-semantics-label');
                       if (rawLabel && rawLabel !== 'Enable accessibility') {
-                        return {target: splitLabelHint(rawLabel), attribute: 'label', attributeValue: rawLabel};
+                        // Chi tach label/hint cho O NHAP that: Flutter chi gop labelText+hintText
+                        // o input. Dong danh sach cung co nhan hai dong (title+subtitle) nhung
+                        // tach ra la sai — replay so nhan TUYET DOI se khong bao gio khop.
+                        const laONhap = node.tagName === 'INPUT' || node.tagName === 'TEXTAREA'
+                          || node.getAttribute('role') === 'textbox';
+                        return {target: laONhap ? splitLabelHint(rawLabel) : {label: rawLabel},
+                                attribute: 'label', attributeValue: rawLabel};
                       }
                       const hint = node.getAttribute('placeholder');
                       if (hint) return {target: {hint}, attribute: 'hint', attributeValue: hint};
@@ -415,11 +421,66 @@ public class GoldenRuntimeService {
                   // input sau moi lan go, nen khoa theo phan tu thi moi ky tu thanh mot su kien
                   // rieng (da gap: 8 su kien cho mot o). 700ms de go het roi moi ghi mot lan.
                   const textTimers = new Map();
+                  // MOT phien go dang cho ghi. Flutter web thay the phan tu input sau moi
+                  // ky tu va phan tu moi thuong MAT dinh danh (khong aria-label) — nen cac
+                  // su kien go sau ky tu dau khong nhan dien duoc muc tieu, va moi cach doc
+                  // gia tri theo timer deu ra chuoi cut ("abyu", roi te hon: mot ky tu "a").
+                  // Chot dung: GHI KHI O MAT FOCUS (blur) — thoi diem duy nhat phan tu con
+                  // song va mang DU chu; timer 700ms chi la duong lui khi nguoi go dung tay
+                  // lau ma chua roi o (doc tu document.activeElement dang giu chu day du).
+                  let goDangCho = null; // {found, el, giaTri}
+                  const textValues = new Map();
+                  // Nguon gia tri BEN nhat: node semantics (aria-label) — Flutter dong bo
+                  // FULL noi dung o vao day moi khung hinh va KHONG trao node nay khi go
+                  // (chi trao phan tu editing). Doc tu day thi ky tu cuoi cung khong mat.
+                  function docTuSemantics(found) {
+                    if (!found || found.attribute !== 'label' && found.attribute !== 'hint') return null;
+                    const root = document.querySelector('flutter-view') || document.body;
+                    for (const el of root.querySelectorAll('input, textarea')) {
+                      const nhan = el.getAttribute('aria-label') || el.getAttribute('placeholder') || '';
+                      if (nhan === found.attributeValue || nhan.split(String.fromCharCode(10))[0] === found.attributeValue) {
+                        if (typeof el.value === 'string' && el.value.length > 0) return el.value;
+                      }
+                    }
+                    return null;
+                  }
+                  function chotEnterText() {
+                    if (!goDangCho) return;
+                    const {found, el, giaTri} = goDangCho;
+                    goDangCho = null;
+                    for (const k of ['go', 'blur']) { const t = textTimers.get(k); if (t) { clearTimeout(t); textTimers.delete(k); } }
+                    let value = docTuSemantics(found);
+                    if (value === null) value = (el && el.isConnected && typeof el.value === 'string') ? el.value : giaTri;
+                    send({kind: 'action', stage: 'ACTION', action: 'enter_text', ...found, valueType: 'string', value, browser: 'flutter_tester'});
+                  }
+                  document.addEventListener('focusout', event => {
+                    const el = event.target;
+                    if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return;
+                    if (!goDangCho) return;
+                    // KHONG chot ngay: Flutter trao phan tu editing giua chung phien go va
+                    // cu trao nao cung ban focusout — chot tai day la cat cut o ky tu vua go
+                    // (dung loi "abyu" da gap). Hoan mot nhip; neu 120ms sau khong co cu go
+                    // tiep theo thi day la roi o THAT -> chot (gia tri doc tu semantics).
+                    goDangCho.el = el; goDangCho.giaTri = el.value;
+                    const old = textTimers.get('blur'); if (old) clearTimeout(old);
+                    textTimers.set('blur', setTimeout(chotEnterText, 120));
+                  }, true);
                   document.addEventListener('input', event => {
                     const target = event.target;
                     if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return;
                     const found = semanticNode(event);
                     if (!found) {
+                      // Ky tu thu 2 tro di: Flutter da thay phan tu input, dinh danh mat.
+                      // Neu dang co phien go thi day la TIEP DIEN cua chinh phien do —
+                      // gia han timer va cap nhat phan tu, dung canh bao om som.
+                      if (goDangCho) {
+                        goDangCho.el = target;
+                        goDangCho.giaTri = target.value;
+                        const oldBlur = textTimers.get('blur'); if (oldBlur) { clearTimeout(oldBlur); textTimers.delete('blur'); }
+                        const old = textTimers.get('go'); if (old) clearTimeout(old);
+                        textTimers.set('go', setTimeout(chotEnterText, 700));
+                        return;
+                      }
                       warnNoTarget();
                       return;
                     }
@@ -434,11 +495,15 @@ public class GoldenRuntimeService {
                       return;
                     }
                     const key = found.attribute + '=' + found.attributeValue;
-                    const old = textTimers.get(key); if (old) clearTimeout(old);
-                    textTimers.set(key, setTimeout(() => {
-                      textTimers.delete(key);
-                      send({kind: 'action', stage: 'ACTION', action: 'enter_text', ...found, valueType: 'string', value: target.value, browser: 'flutter_tester'});
-                    }, 700));
+                    // Su kien go sau ky tu dau co the khong nhan dien duoc muc tieu (found
+                    // null da bi chan o tren) — nen moi su kien TOI DUOC day deu cap nhat
+                    // phien dang cho; gia tri that se doc lai luc chot.
+                    // Doi o giua chung (goDangCho cua o khac con treo): chot o cu truoc.
+                    if (goDangCho && goDangCho.found.attributeValue !== found.attributeValue) chotEnterText();
+                    goDangCho = {found, el: target, giaTri: target.value};
+                    const oldBlur = textTimers.get('blur'); if (oldBlur) { clearTimeout(oldBlur); textTimers.delete('blur'); }
+                    const old = textTimers.get('go'); if (old) clearTimeout(old);
+                    textTimers.set('go', setTimeout(chotEnterText, 700));
                   }, true);
                   document.addEventListener('scroll', event => {
                     const target = event.target instanceof Element ? event.target : document.scrollingElement;

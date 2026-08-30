@@ -393,9 +393,12 @@ public class BehaviorSuiteMaterializer {
             // Tiêu chí GIAO DIỆN mang trọng số TUYỆT ĐỐI (điểm của nhóm chia đều lúc tick),
             // KHÔNG tham gia phần chia trọng số của scenario — nếu tham gia, thêm một thành
             // phần giao diện sẽ pha loãng điểm của chính các checkpoint chức năng cùng luồng.
+            // MỘT luật điểm duy nhất: mọi checkpoint — kể cả tiêu chí giao diện — chia
+            // trọng số hàm theo tỷ lệ. Trước đây tiêu chí giao diện mang điểm TUYỆT ĐỐI
+            // cộng ngoài hàm, nên UI_MAIN khai 14đ mà ruột có thể phình vượt 14 — mâu
+            // thuẫn với bảng Chia điểm và thẻ ngân sách 100 (tổng con phải bằng cha).
             double checkpointTotal = checkpoints.stream()
                     .map(BehaviorSuiteMaterializer::map)
-                    .filter(item -> !ABSOLUTE_WEIGHT_KINDS.contains(text(item, "kind")))
                     .mapToDouble(item -> Math.max(0.0001, number(item.get("weight"), 1.0)))
                     .sum();
             if (checkpointTotal <= 0) checkpointTotal = 1.0;
@@ -413,11 +416,9 @@ public class BehaviorSuiteMaterializer {
                 List<Object> checkpointViewports = databaseCheckpoint || componentCheckpoint
                         ? List.of(first(scenarioViewports))
                         : scenarioViewports;
-                double checkpointWeight = componentCheckpoint
-                        ? number(checkpoint.get("weight"), 1.0)
-                        : scenarioWeight
-                                * Math.max(0.0001, number(checkpoint.get("weight"), 1.0))
-                                / checkpointTotal;
+                double checkpointWeight = scenarioWeight
+                        * Math.max(0.0001, number(checkpoint.get("weight"), 1.0))
+                        / checkpointTotal;
                 int viewportIndex = 0;
                 for (Object rawViewport : checkpointViewports) {
                     viewportIndex++;
