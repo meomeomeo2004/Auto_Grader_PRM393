@@ -386,6 +386,30 @@ public class BehaviorAuthoringService {
     }
 
     @Transactional
+    /** Sửa điểm của một event checkpoint trong phiên record — ô nhập inline trên danh sách. */
+    public Map<String, Object> updateEventWeight(String recordingId, int sequence, double weight) {
+        if (sequence < 1) throw new IllegalArgumentException("sequence event phải lớn hơn hoặc bằng 1");
+        if (weight < 0.25) throw new IllegalArgumentException("Điểm checkpoint tối thiểu 0.25");
+        GoldenRecording recording = recordingForUpdate(recordingId);
+        if (recording.getStatus() != RecordingStatus.ACTIVE) {
+            throw new IllegalStateException("Chỉ sửa được điểm trong phiên ACTIVE");
+        }
+        List<Map<String, Object>> trace = readObjectList(recording.getRawTraceJson());
+        for (Map<String, Object> event : trace) {
+            Object value = event.get("sequence");
+            if (value instanceof Number number && number.intValue() == sequence) {
+                if ("action".equals(text(event, "kind", ""))) {
+                    throw new IllegalArgumentException("Action không mang điểm — chỉ checkpoint mới có.");
+                }
+                event.put("weight", weight);
+                recording.setRawTraceJson(json(trace));
+                recordings.save(recording);
+                return event;
+            }
+        }
+        throw new IllegalArgumentException("Không tìm thấy event sequence " + sequence);
+    }
+
     public Map<String, Object> deleteEvent(String recordingId, int sequence) {
         if (sequence < 1) throw new IllegalArgumentException("sequence event phải lớn hơn hoặc bằng 1");
         GoldenRecording recording = recordingForUpdate(recordingId);
@@ -495,6 +519,27 @@ public class BehaviorAuthoringService {
                 checkpoints.add(checkpoint);
             }
         }
+        // Dịch ràng buộc tiên quyết: người soạn chọn theo SỐ THỨ TỰ checkpoint trong
+        // danh sách record (id thật chỉ sinh ra ở đây). Chỉ cho trỏ về checkpoint ĐỨNG
+        // TRƯỚC — vòng phụ thuộc bị loại ngay từ cách khai, khỏi cần dò chu trình.
+        for (int index = 0; index < checkpoints.size(); index++) {
+            Map<String, Object> checkpoint = checkpoints.get(index);
+            Object raw = checkpoint.remove("requires_index");
+            if (raw == null) continue;
+            int viTri = (int) number(raw, 0);
+            if (viTri < 1 || viTri > checkpoints.size()) {
+                throw new IllegalArgumentException(
+                        "Điều kiện tiên quyết của checkpoint thứ " + (index + 1)
+                        + " trỏ tới vị trí không tồn tại: " + viTri);
+            }
+            if (viTri - 1 >= index) {
+                throw new IllegalArgumentException(
+                        "Checkpoint thứ " + (index + 1) + " chỉ được ràng buộc vào checkpoint ĐỨNG TRƯỚC nó"
+                        + " (đang trỏ tới vị trí " + viTri + ").");
+            }
+            checkpoint.put("requires", text(checkpoints.get(viTri - 1), "id", ""));
+        }
+
         if (checkpoints.stream().noneMatch(item -> "database_observation".equals(text(item, "kind", "")))) {
             for (Object raw : objectList(body.get("database_checkpoints"))) {
                 Map<String, Object> checkpoint = map(raw);
@@ -634,6 +679,19 @@ public class BehaviorAuthoringService {
                                                                 String outputSha256) {
         BehaviorScenario scenario = scenario(scenarioId);
         ensureEditable(suite(scenario.getSuiteId()));
+        // Checkpoint tự sinh bị xoá đi tách lại mỗi lần capture — nhưng ĐIỂM và RÀNG BUỘC
+        // là của người soạn, không phải của phép tách. Không thừa kế thì mỗi lần capture
+        // lại nuốt mất phần chia điểm (ca thật 30/8: đặt entity 8đ làm cha, capture xong
+        // tụt về 1đ). Khoá nhận diện: bảng + operation — ổn định qua các lần tách.
+        Map<String, Map<String, Object>> cuTheoKhoa = new LinkedHashMap<>();
+        for (Map<String, Object> item : readObjectList(scenario.getCheckpointsJson())) {
+            if (Set.of("hidden_output_diff", "hidden_output_consistency")
+                    .contains(text(item, "generated_from", ""))) {
+                cuTheoKhoa.putIfAbsent(
+                        text(item, "table", "") + "|" + text(item, "operation", "").toUpperCase(Locale.ROOT),
+                        item);
+            }
+        }
         List<Map<String, Object>> checkpoints = readObjectList(scenario.getCheckpointsJson()).stream()
                 .filter(item -> !Set.of("hidden_output_diff", "hidden_output_consistency")
                         .contains(text(item, "generated_from", "")))
@@ -667,6 +725,14 @@ public class BehaviorAuthoringService {
             } else {
                 checkpoint.put("generated_from", "hidden_output_diff");
                 checkpoint.put("id", "database_diff_" + next++);
+            }
+            Map<String, Object> cu = cuTheoKhoa.get(
+                    text(checkpoint, "table", "") + "|" + text(checkpoint, "operation", "").toUpperCase(Locale.ROOT));
+            if (cu != null) {
+                checkpoint.put("weight", cu.getOrDefault("weight", 1.0));
+                // Giữ nguyên id cũ: các checkpoint con đang trỏ `requires` vào id này.
+                checkpoint.put("id", text(cu, "id", text(checkpoint, "id", "")));
+                if (cu.get("requires") != null) checkpoint.put("requires", cu.get("requires"));
             }
             checkpoint.putIfAbsent("weight", 1.0);
             checkpoints.add(checkpoint);

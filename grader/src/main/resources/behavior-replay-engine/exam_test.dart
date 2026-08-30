@@ -112,8 +112,15 @@ Future<void> _runBehaviorScenario(
       );
     }
 
+    // Chạy hết mọi phép kiểm TRƯỚC rồi mới in kết quả: luật `requires` (điều kiện
+    // tiên quyết) cần biết số phận của checkpoint khác trong cùng nhóm. Tiên quyết
+    // trượt thì checkpoint phụ thuộc bị hạ xuống trượt dù tự nó đạt — UI hiện đúng
+    // trong khi database không đổi là cái đạt vô nghĩa, người chấm tay cũng cho 0.
+    final ketQua = <String, bool>{};
+    final thongDiep = <String, String>{};
     for (final checkpointCase in cases) {
       final checkpoint = _asMap(checkpointCase['checkpoint']);
+      final khoa = _text(checkpoint, 'id', _text(checkpointCase, 'test_id'));
       stdout.writeln('${_stageMarker}TESTCASE_ASSERTION');
       try {
         await _assertCheckpoint(
@@ -128,10 +135,39 @@ Future<void> _runBehaviorScenario(
           ),
         );
         _throwPendingException(tester, 'checkpoint');
-        _printCheckpoint(checkpointCase, true, 'Đã đáp ứng yêu cầu');
+        ketQua[khoa] = true;
+        thongDiep[khoa] = 'Đã đáp ứng yêu cầu';
       } catch (error) {
-        _printCheckpoint(checkpointCase, false, error.toString());
+        ketQua[khoa] = false;
+        thongDiep[khoa] = error.toString();
       }
+    }
+    // Lan truyền tiên quyết theo chuỗi (A cần B, B cần C): lặp tới khi ổn định.
+    var doi = true;
+    while (doi) {
+      doi = false;
+      for (final checkpointCase in cases) {
+        final checkpoint = _asMap(checkpointCase['checkpoint']);
+        final khoa = _text(checkpoint, 'id', _text(checkpointCase, 'test_id'));
+        final tienQuyet = _text(checkpoint, 'requires');
+        if (tienQuyet.isEmpty || ketQua[khoa] != true) continue;
+        if (ketQua[tienQuyet] == false) {
+          ketQua[khoa] = false;
+          thongDiep[khoa] =
+              'Tự thân ĐẠT nhưng điều kiện tiên quyết "$tienQuyet" trượt '
+              '(${thongDiep[tienQuyet] ?? ''}) nên không được tính điểm.';
+          doi = true;
+        }
+      }
+    }
+    for (final checkpointCase in cases) {
+      final checkpoint = _asMap(checkpointCase['checkpoint']);
+      final khoa = _text(checkpoint, 'id', _text(checkpointCase, 'test_id'));
+      _printCheckpoint(
+        checkpointCase,
+        ketQua[khoa] ?? false,
+        thongDiep[khoa] ?? 'Không có kết quả',
+      );
     }
   } catch (error, stackTrace) {
     for (final checkpointCase in cases) {
@@ -1331,15 +1367,31 @@ Finder _finder(Map<String, dynamic> target, {bool duPhong = false}) {
     final semantics = find.bySemanticsLabel(label);
     if (semantics.evaluate().isNotEmpty) return semantics;
   }
+  // NHÃN HAI DÒNG. Dòng danh sách (ListTile) gộp title + subtitle thành một nhãn
+  // ngăn bởi xuống dòng; recorder đời cũ tách nhầm thành label + hint (phép tách đó
+  // chỉ đúng cho ô nhập). Ghép lại để so tuyệt đối — thiếu nhánh này thì bấm vào
+  // dòng danh sách không bao giờ tìm thấy đích, cả kịch bản EDIT chết theo.
+  if (label.isNotEmpty && hint.isNotEmpty) {
+    final gop = find.bySemanticsLabel('$label\n$hint');
+    if (gop.evaluate().isNotEmpty) return gop;
+  }
   if (label.isNotEmpty || hint.isNotEmpty) {
     final finder = find.byWidgetPredicate((widget) {
       final decoration = switch (widget) {
         TextField field => field.decoration,
         _ => null,
       };
+      // `label` ghi được từ web phải khớp CẢ hintText: Flutter web phơi hintText thành
+      // aria-label nên recorder ghi là `label`, còn flutter_test thì ô ĐÃ CÓ CHỮ không
+      // hiện hint trong semantics nữa — chỉ decoration còn giữ. Thiếu vế này thì mọi
+      // enter_text trên màn Sửa (ô có sẵn nội dung) đều không tìm thấy đích.
       return decoration != null &&
-          (label.isEmpty || decoration.labelText == label) &&
-          (hint.isEmpty || decoration.hintText == hint);
+          (label.isEmpty ||
+              decoration.labelText == label ||
+              decoration.hintText == label) &&
+          (hint.isEmpty ||
+              decoration.hintText == hint ||
+              decoration.labelText == hint);
     });
     if (finder.evaluate().isNotEmpty) return finder;
   }

@@ -15,6 +15,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.InputStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.security.MessageDigest;
@@ -309,11 +311,92 @@ public class BehaviorArtifactService {
         return result;
     }
 
+    /**
+     * Đối chiếu tên database mà mã Golden thực sự mở với hợp đồng của bộ chấm.
+     *
+     * Điểm hẹn dữ liệu chỉ có MỘT dây an toàn là cái tên này; lệch một chữ thì replay
+     * boot database trống và output bị chụp từ file không ai ghi — cả hai đều hỏng
+     * IM LẶNG (đã xảy ra thật 29/8: hợp đồng ghi hidden.db, golden mở app.db). Chặn
+     * ngay tại cửa upload rẻ hơn vô hạn so với truy vết ba ngày sau ở kịch bản xóa.
+     *
+     * Cách quét: gom mọi chuỗi '*.db' trong lib/**.dart của ZIP, bỏ chuỗi có '/'
+     * (đường dẫn assets như 'assets/hidden.db' là nguồn NẠP, không phải file MỞ).
+     * Không tìm thấy tên nào thì bỏ qua — không đoán bừa.
+     */
+    public void crossCheckGoldenDatabaseName(String suiteId, Path goldenZip) throws Exception {
+        String declared = declaredDatabaseName(suiteId);
+        if (declared.isBlank()) return;
+        Set<String> found = scanDartDatabaseNames(goldenZip);
+        if (!found.isEmpty() && !found.contains(declared)) {
+            throw new IllegalArgumentException(
+                    "Mã Golden mở database " + found + " nhưng hợp đồng bộ chấm khai '" + declared
+                    + "'. Hai bên phải cùng một tên (đề bài quy định tên nào thì cả hai theo tên đó),"
+                    + " nếu không replay sẽ boot database trống và chấm sai âm thầm.");
+        }
+    }
+
+    /** Bản kiểm ngược cho lúc ĐỔI HỢP ĐỒNG khi Golden đã nằm sẵn trong kho. */
+    public void crossCheckDeclaredDatabaseName(String suiteId, String declared) {
+        if (declared == null || declared.isBlank()) return;
+        artifacts.findFirstBySuiteIdAndArtifactTypeAndActiveTrueOrderByVersionDesc(
+                        suiteId, BehaviorArtifactType.GOLDEN_SOLUTION)
+                .ifPresent(golden -> {
+                    try {
+                        Set<String> found = scanDartDatabaseNames(Path.of(golden.getStoragePath()));
+                        if (!found.isEmpty() && !found.contains(declared)) {
+                            throw new IllegalArgumentException(
+                                    "Golden đang mở database " + found + ", không thể khai hợp đồng là '"
+                                    + declared + "'.");
+                        }
+                    } catch (IllegalArgumentException e) {
+                        throw e;
+                    } catch (Exception e) {
+                        throw new IllegalStateException("Không đọc được Golden ZIP để đối chiếu: " + e.getMessage(), e);
+                    }
+                });
+    }
+
+    private String declaredDatabaseName(String suiteId) {
+        return suites.findById(suiteId)
+                .map(s -> {
+                    try {
+                        JsonNode contract = mapper.readTree(
+                                s.getDatabaseContractJson() == null ? "{}" : s.getDatabaseContractJson());
+                        String name = contract.path("database_name").asText("");
+                        if (name.isBlank()) name = contract.path("name").asText("");
+                        return name.trim();
+                    } catch (Exception e) {
+                        return "";
+                    }
+                })
+                .orElse("");
+    }
+
+    private Set<String> scanDartDatabaseNames(Path zip) throws Exception {
+        Set<String> found = new java.util.LinkedHashSet<>();
+        java.util.regex.Pattern mau = java.util.regex.Pattern.compile("['\"]([-A-Za-z0-9_./]+[.]db)['\"]");
+        try (ZipFile file = new ZipFile(zip.toFile())) {
+            var entries = file.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
+                String entryName = entry.getName().replace('\\', '/');
+                if (entry.isDirectory() || !entryName.endsWith(".dart") || !entryName.contains("lib/")) continue;
+                String source = new String(file.getInputStream(entry).readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+                java.util.regex.Matcher m = mau.matcher(source);
+                while (m.find()) {
+                    String name = m.group(1);
+                    if (!name.contains("/") && !name.contains("\\")) found.add(name);
+                }
+            }
+        }
+        return found;
+    }
+
     private void validateContent(String suiteId, BehaviorArtifactType type, Path candidate) throws Exception {
         switch (type) {
             case STUDENT_DATABASE, HIDDEN_DATABASE, OUTPUT_DATABASE -> validateSqlite(candidate);
             case AUTOMATION_RECORD, TESTCASE_DEFINITION, GRADING_ENVIRONMENT -> validateJson(type, candidate);
-            case GOLDEN_SOLUTION -> validateZip(candidate);
+            case GOLDEN_SOLUTION -> { validateZip(candidate); crossCheckGoldenDatabaseName(suiteId, candidate); }
         }
         if (type == BehaviorArtifactType.STUDENT_DATABASE) {
             artifacts.findFirstBySuiteIdAndArtifactTypeAndActiveTrueOrderByVersionDesc(

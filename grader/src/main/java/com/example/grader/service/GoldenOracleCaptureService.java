@@ -165,6 +165,23 @@ public class GoldenOracleCaptureService {
                     scenarioId, checkpoints, String.valueOf(outputArtifact.get("sha256")));
 
             Map<String, Object> result = new LinkedHashMap<>();
+            // Luồng có nhập liệu mà không đẻ nổi một checkpoint database nào là dấu hiệu
+            // gần như chắc chắn của hỏng-im-lặng: điểm hẹn database lệch, hoặc giá trị
+            // nhập bị hỏng nên app không lưu (cả hai đều đã xảy ra thật 29-30/8, đều
+            // "thành công" xanh mượt trong khi kịch bản Thêm không kiểm database gì cả).
+            List<?> cacBuoc = completedScenario.get("steps") instanceof List<?> l1 ? l1 : List.of();
+            List<?> cacKiem = completedScenario.get("checkpoints") instanceof List<?> l2 ? l2 : List.of();
+            boolean coNhapLieu = cacBuoc.stream()
+                    .anyMatch(s -> "enter_text".equals(String.valueOf(map(s).get("action"))));
+            boolean coKiemDb = cacKiem.stream()
+                    .anyMatch(c -> Set.of("database_observation", "entity_consistency")
+                            .contains(String.valueOf(map(c).get("kind"))));
+            if (coNhapLieu && !coKiemDb) {
+                result.put("capture_warning",
+                        "Luồng có nhập liệu nhưng replay KHÔNG làm database thay đổi — không sinh được"
+                        + " checkpoint database nào. Kiểm lại: giá trị nhập có qua được validate không,"
+                        + " app có thật sự lưu không. Nếu bỏ qua, kịch bản này sẽ không kiểm database.");
+            }
             result.put("scenario", completedScenario);
             result.put("output_database", outputArtifact);
             result.put("database_checkpoint_count", checkpoints.size());
