@@ -1,5 +1,7 @@
 # build-base.ps1 - Build anh nen dung chung (chay 1 lan, hoac khi doi pubspec.base.yaml)
-# Dung: .\build-base.ps1
+# Dung: .\build-base.ps1                 build + gan nhan ghim neu may chua co
+#       .\build-base.ps1 -TagOnly        chi bao dam nhan ghim (khong build lai)
+#       .\build-base.ps1 -RetagPinned    de len nhan ghim dang tro vao anh khac
 #
 # Ghi chu:
 # - Loi Docker "failed to compute cache key: commit failed: input/output error"
@@ -8,7 +10,9 @@
 
 [CmdletBinding()]
 param(
-  [switch]$NoCache
+  [switch]$NoCache,
+  [switch]$TagOnly,
+  [switch]$RetagPinned
 )
 
 $ErrorActionPreference = "Continue"
@@ -85,6 +89,62 @@ function Invoke-Build($title, [string]$buildKit, [bool]$useNoCache, [bool]$plain
   return $false
 }
 
+# Backend KHONG chay bang `latest` ma ghim nhan phien ban (xem ghi chu o application.yml):
+# diem cua sinh vien phu thuoc anh nay nen doi anh phai thay duoc trong git. Doc nhan
+# ghim tu chinh application.yml de chi co MOT nguon su that - bump nhan o do la script
+# tu theo, khong phai sua hai cho.
+function Get-PinnedImage {
+  $yml = Join-Path $here "..\grader\src\main\resources\application.yml"
+  if (-not (Test-Path $yml)) { return "" }
+  foreach ($line in (Get-Content $yml)) {
+    # Dang co bien moi truong: base-image: ${GRADER_BASE_IMAGE:grading-base:<nhan>}
+    if ($line -match '^\s*base-image:\s*\$\{GRADER_BASE_IMAGE:([^}]+)\}') { return $Matches[1].Trim() }
+    # Dang khai thang: base-image: grading-base:<nhan>
+    if ($line -match '^\s*base-image:\s*([^\s#]+)\s*$') { return $Matches[1].Trim() }
+  }
+  return ""
+}
+
+# Gan nhan ghim cho anh vua build. May moi clone chi co `latest`, trong khi backend goi
+# `docker run <nhan-ghim>` - recorder/capture/validate KHONG tu build anh nen se chet
+# ngay o buoc soan de (da xay ra 31/8 tren may thanh vien).
+function Set-PinnedTag {
+  $pinned = Get-PinnedImage
+  if (-not $pinned -or $pinned -eq $image) { return "" }
+
+  $pinnedId = [string](& docker images -q $pinned)
+  $latestId = [string](& docker images -q $image)
+  if ($pinnedId -and $pinnedId.Trim() -ne $latestId.Trim() -and -not $RetagPinned) {
+    # Nhan ghim la ban dong bang dung de cham diem: khong am tham keo sang anh moi.
+    Write-Host ""
+    Write-Host "[BO QUA] Nhan ghim $pinned da co san va tro vao anh KHAC." -ForegroundColor Yellow
+    Write-Host "  Nhan ghim quyet dinh diem cua sinh vien nen script khong tu de len."
+    Write-Host "  Neu that su muon de: .\build-base.ps1 -RetagPinned"
+    return $pinned
+  }
+
+  & docker tag $image $pinned | Out-Null
+  if ($LASTEXITCODE -eq 0) {
+    Write-Host "  [OK] Da gan nhan ghim: $pinned" -ForegroundColor Green
+  } else {
+    Write-Host "  [LOI] Khong gan duoc nhan ghim $pinned (exit=$LASTEXITCODE)" -ForegroundColor Yellow
+    Write-Host "  Gan tay: docker tag $image $pinned"
+  }
+  return $pinned
+}
+
+# -TagOnly: may da co anh roi, chi thieu nhan ghim - khong bat nguoi dung cho build lai.
+if ($TagOnly) {
+  & docker image inspect $image *> $null
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "[LOI] Chua co $image tren may - chay .\build-base.ps1 (bo -TagOnly) de build truoc." -ForegroundColor Yellow
+    exit 1
+  }
+  $pinnedTag = Set-PinnedTag
+  if (-not $pinnedTag) { Write-Host "  [OK] application.yml khong ghim nhan rieng - khong can gan them." -ForegroundColor Green }
+  exit 0
+}
+
 Ensure-DockerReady
 
 Write-Host "Building grading-base:latest (lan dau co the mat 10-20 phut)..." -ForegroundColor Cyan
@@ -126,5 +186,11 @@ if (-not $ok) {
   exit 1
 }
 
+$pinnedTag = Set-PinnedTag
+
 Write-Host ""
-Write-Host "OK - grading-base:latest da san sang. Cac de thi se build trong vai giay." -ForegroundColor Green
+if ($pinnedTag) {
+  Write-Host "OK - $image + $pinnedTag da san sang. Cac de thi se build trong vai giay." -ForegroundColor Green
+} else {
+  Write-Host "OK - $image da san sang. Cac de thi se build trong vai giay." -ForegroundColor Green
+}

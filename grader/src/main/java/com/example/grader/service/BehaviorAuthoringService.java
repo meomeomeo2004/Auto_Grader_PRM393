@@ -410,6 +410,10 @@ public class BehaviorAuthoringService {
         throw new IllegalArgumentException("Không tìm thấy event sequence " + sequence);
     }
 
+    // BẮT BUỘC @Transactional: recordingForUpdate() khóa bi quan PESSIMISTIC_WRITE, mà khóa
+    // này đòi phải nằm trong transaction — thiếu là ném "No active transaction" ngay khi bấm
+    // xóa action (đã xảy ra 31/8). Bốn hàm sửa phiên record còn lại đều đã có.
+    @Transactional
     public Map<String, Object> deleteEvent(String recordingId, int sequence) {
         if (sequence < 1) throw new IllegalArgumentException("sequence event phải lớn hơn hoặc bằng 1");
         GoldenRecording recording = recordingForUpdate(recordingId);

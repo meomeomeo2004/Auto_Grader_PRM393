@@ -41,10 +41,17 @@ Trang "Lịch sử" → GET /api/exam/{examId}/results
 ## Gotchas (đã gây lỗi thật — đừng lặp lại)
 1. **Hai phiên bản Jackson cùng classpath.** `com.fasterxml.jackson` (Jackson 2) và `tools.jackson` (Jackson 3, mặc định Spring Boot 4) đều có. **Chia theo TỪNG FILE, không theo tầng** — luôn kiểm import của chính file đang sửa: `SyllabusService` = Jackson 2, còn `BatchGradingService` = **Jackson 3** (`TypeReference` ở `tools.jackson.core.type`).
 2. **skill_code phải có trong syllabus (bảng `skill`).** Upload testcase validate nghiêm (`ExamService.validateSkillCodes` ném lỗi) để giữ taxonomy sạch.
-3. **Cần Docker bật + image `grading-base:latest`** để chấm. Build ảnh: `grader-base/build-base.ps1` (lâu, Flutter SDK).
+3. **Cần Docker bật + ảnh nền đúng NHÃN GHIM** (`grader.base-image` trong `application.yml`, hiện là
+   `grading-base:2026-08-22e`) — không phải `latest`. Đường chấm bài tự build khi thiếu, nhưng đường
+   soạn đề (recorder/capture/validate) gọi `docker run` thẳng nên thiếu nhãn là chết ngay.
+   `grader-base/build-base.ps1` build `latest` rồi gắn thêm nhãn ghim đọc từ `application.yml`
+   (`-TagOnly` để chỉ gắn nhãn, `-RetagPinned` để đè nhãn đang trỏ ảnh khác).
 4. **KHÔNG có xác thực.** Đăng nhập/đăng ký/role/bảng `teachers` đã bị gỡ bỏ hoàn toàn — mọi `/api/**` đều mở, đừng thêm code đọc token hay `@RequestAttribute("teacherEmail")`. Các cột audit (`created_by`, `manual_by`) vẫn còn và được điền bằng `AppActor.DEFAULT`. Hệ quả: **chỉ chạy localhost**, đừng expose cổng 8080 ra mạng.
 
 ## Quy ước khi sửa code
 - Comment trong repo bằng tiếng Việt, súc tích, giải thích "tại sao" (theo style sẵn có).
+- **File `.ps1` viết THUẦN ASCII** (comment tiếng Việt không dấu, dùng `-` thay `—`). PowerShell 5.1 đọc
+  file không BOM theo CP1252: `—` hóa thành `â€”`, ký tự cuối là nháy kép cong → đứt chuỗi, lệch khối
+  `if`, mà parser vẫn báo hợp lệ. Triệu chứng: script chạy, exit 0, **không in gì**.
 - Sửa xong backend: `mvnw -q -o compile`. Sửa FE: `npx tsc --noEmit`. Đừng tự khởi động lại service đang chạy của user trừ khi cần test.
 - Scratchpad/tạm: dùng thư mục scratch của session, KHÔNG rải file tạm vào repo.
