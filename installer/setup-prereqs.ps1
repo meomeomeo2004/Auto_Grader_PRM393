@@ -227,6 +227,16 @@ if (-not (Have "docker")) {
     & docker image inspect grading-base:latest *> $null
     if ($LASTEXITCODE -eq 0) {
       Write-Host "  [OK] grading-base da co" -ForegroundColor Green
+      # Co anh chua chac da co NHAN GHIM ma backend goi toi: may cai tu ban setup cu
+      # chi co `latest`, chay lai setup se nhay qua day va van thieu nhan -> soan de
+      # chet ngay. Gan nhan mat vai giay, khong build lai gi ca.
+      if (Test-Path $base) {
+        try {
+          & powershell -NoProfile -ExecutionPolicy Bypass -File $base -TagOnly
+        } catch {
+          Write-Host "  [CANH BAO] Khong gan duoc nhan ghim: $_" -ForegroundColor Yellow
+        }
+      }
     } elseif (Test-Path $base) {
       Write-Host "  Build grading-base (Flutter SDK, lan dau RAT LAU ~10-20 phut)..." -ForegroundColor Yellow
       Push-Location (Split-Path $base)
