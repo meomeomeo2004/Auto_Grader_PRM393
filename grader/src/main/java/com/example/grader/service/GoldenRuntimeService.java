@@ -30,7 +30,7 @@ import java.util.zip.ZipFile;
 public class GoldenRuntimeService {
     private static final long MAX_EXPANDED_BYTES = 1_000L * 1024 * 1024;
     private static final int MAX_ZIP_ENTRIES = 20_000;
-    private static final String RECORDER_BRIDGE_VERSION = "semantic-v14";   // v4: quét thành phần CHỈ trong flutter-view (v3 vớ nhầm DOM của extension)
+    private static final String RECORDER_BRIDGE_VERSION = "semantic-v15";   // v15: chỉ chốt input khi đổi thao tác, không cắt theo thời gian nghỉ gõ
 
     @Value("${grader.base-image:grading-base:latest}")
     private String baseImage;
@@ -333,6 +333,7 @@ public class GoldenRuntimeService {
                 (() => {
                   const TYPE = 'GOLDEN_RECORDER_EVENT';
                   const COMMAND = 'GOLDEN_RECORDER_COMMAND';
+                  const FLUSHED = 'GOLDEN_RECORDER_FLUSHED';
                   const timers = new WeakMap();
                   const scrollOffsets = new WeakMap();
                   const send = payload => window.parent.postMessage({type: TYPE, payload}, '*');
@@ -410,6 +411,12 @@ public class GoldenRuntimeService {
                       warnNoTarget();
                       return;
                     }
+                    // Thao tác logic khác là ranh giới chắc chắn của phiên nhập. Chốt
+                    // giá trị đầy đủ TRƯỚC tap để replay giữ đúng thứ tự. Bấm lại chính
+                    // ô đang nhập thì chưa phải đổi thao tác nên chưa cần chốt.
+                    const el = event.target;
+                    const laONhap = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
+                    if (goDangCho && !(laONhap && cungLocator(goDangCho.found, found))) chotEnterText();
                     send({kind: 'action', stage: 'ACTION', action: name, ...found, valueType: 'string', value, browser: 'flutter_tester'});
                   }
                   document.addEventListener('click', event => {
@@ -417,19 +424,15 @@ public class GoldenRuntimeService {
                     if (target instanceof Element && target.getAttribute('aria-label') === 'Enable accessibility') return;
                     action(event, 'tap');
                   }, true);
-                  // Chong doi theo LOCATOR chu khong theo phan tu DOM: Flutter Web tao lai the
-                  // input sau moi lan go, nen khoa theo phan tu thi moi ky tu thanh mot su kien
-                  // rieng (da gap: 8 su kien cho mot o). 700ms de go het roi moi ghi mot lan.
-                  const textTimers = new Map();
-                  // MOT phien go dang cho ghi. Flutter web thay the phan tu input sau moi
-                  // ky tu va phan tu moi thuong MAT dinh danh (khong aria-label) — nen cac
-                  // su kien go sau ky tu dau khong nhan dien duoc muc tieu, va moi cach doc
-                  // gia tri theo timer deu ra chuoi cut ("abyu", roi te hon: mot ky tu "a").
-                  // Chot dung: GHI KHI O MAT FOCUS (blur) — thoi diem duy nhat phan tu con
-                  // song va mang DU chu; timer 700ms chi la duong lui khi nguoi go dung tay
-                  // lau ma chua roi o (doc tu document.activeElement dang giu chu day du).
+                  // Một phiên nhập LOGIC đang chờ ghi. Không dùng debounce theo thời gian:
+                  // người dùng có thể dừng suy nghĩ bao lâu tùy ý rồi gõ tiếp. Flutter Web
+                  // còn thay DOM input giữa các ký tự, nên locator của lần focus/nhập đầu
+                  // phải được giữ độc lập với vòng đời phần tử DOM.
                   let goDangCho = null; // {found, el, giaTri}
-                  const textValues = new Map();
+                  let oDangFocus = null;
+                  let dangGhepBoGo = false;
+                  const cungLocator = (a, b) => Boolean(a && b
+                    && a.attribute === b.attribute && a.attributeValue === b.attributeValue);
                   // Nguon gia tri BEN nhat: node semantics (aria-label) — Flutter dong bo
                   // FULL noi dung o vao day moi khung hinh va KHONG trao node nay khi go
                   // (chi trao phan tu editing). Doc tu day thi ky tu cuoi cung khong mat.
@@ -439,7 +442,8 @@ public class GoldenRuntimeService {
                     for (const el of root.querySelectorAll('input, textarea')) {
                       const nhan = el.getAttribute('aria-label') || el.getAttribute('placeholder') || '';
                       if (nhan === found.attributeValue || nhan.split(String.fromCharCode(10))[0] === found.attributeValue) {
-                        if (typeof el.value === 'string' && el.value.length > 0) return el.value;
+                        // Chuỗi rỗng cũng là giá trị hợp lệ sau thao tác xóa hết.
+                        if (typeof el.value === 'string') return el.value;
                       }
                     }
                     return null;
@@ -448,62 +452,64 @@ public class GoldenRuntimeService {
                     if (!goDangCho) return;
                     const {found, el, giaTri} = goDangCho;
                     goDangCho = null;
-                    for (const k of ['go', 'blur']) { const t = textTimers.get(k); if (t) { clearTimeout(t); textTimers.delete(k); } }
-                    let value = docTuSemantics(found);
-                    if (value === null) value = (el && el.isConnected && typeof el.value === 'string') ? el.value : giaTri;
+                    // Nguồn ưu tiên: input còn sống -> node semantics hiện tại -> snapshot
+                    // đầy đủ cuối cùng từ event input. Không ghép delta ký tự nên paste,
+                    // cut, undo/redo và bộ gõ tiếng Việt đều giữ đúng giá trị cuối.
+                    let value = (el && el.isConnected && typeof el.value === 'string') ? el.value : null;
+                    if (value === null) value = docTuSemantics(found);
+                    if (value === null) value = giaTri;
                     send({kind: 'action', stage: 'ACTION', action: 'enter_text', ...found, valueType: 'string', value, browser: 'flutter_tester'});
                   }
-                  document.addEventListener('focusout', event => {
-                    const el = event.target;
-                    if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return;
-                    if (!goDangCho) return;
-                    // KHONG chot ngay: Flutter trao phan tu editing giua chung phien go va
-                    // cu trao nao cung ban focusout — chot tai day la cat cut o ky tu vua go
-                    // (dung loi "abyu" da gap). Hoan mot nhip; neu 120ms sau khong co cu go
-                    // tiep theo thi day la roi o THAT -> chot (gia tri doc tu semantics).
-                    goDangCho.el = el; goDangCho.giaTri = el.value;
-                    const old = textTimers.get('blur'); if (old) clearTimeout(old);
-                    textTimers.set('blur', setTimeout(chotEnterText, 120));
-                  }, true);
-                  document.addEventListener('input', event => {
+                  function capNhatONhap(event, canhBao = true) {
                     const target = event.target;
                     if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return;
-                    const found = semanticNode(event);
+                    const found = semanticNode(event) || oDangFocus || (goDangCho && goDangCho.found);
                     if (!found) {
-                      // Ky tu thu 2 tro di: Flutter da thay phan tu input, dinh danh mat.
-                      // Neu dang co phien go thi day la TIEP DIEN cua chinh phien do —
-                      // gia han timer va cap nhat phan tu, dung canh bao om som.
-                      if (goDangCho) {
-                        goDangCho.el = target;
-                        goDangCho.giaTri = target.value;
-                        const oldBlur = textTimers.get('blur'); if (oldBlur) { clearTimeout(oldBlur); textTimers.delete('blur'); }
-                        const old = textTimers.get('go'); if (old) clearTimeout(old);
-                        textTimers.set('go', setTimeout(chotEnterText, 700));
-                        return;
-                      }
-                      warnNoTarget();
+                      if (canhBao) warnNoTarget();
                       return;
                     }
-                    // O nhap PHAI duoc nhan dien bang nhan ngu nghia hoac goi y nhap lieu.
-                    // Nhan dang 'text' la chu tinh (vi du chu thich duoi o) — luc replay no tro
-                    // vao mot Text widget, khong phai o nhap, va enterText se bao "Bad state: No element".
                     if (found.attribute !== 'label' && found.attribute !== 'hint') {
-                      window.parent.postMessage({type: 'GOLDEN_RECORDER_WARNING', payload: {message:
+                      if (canhBao) window.parent.postMessage({type: 'GOLDEN_RECORDER_WARNING', payload: {message:
                         'O nhap nay khong co nhan ngu nghia rieng; recorder chi doc duoc chu tinh "'
                         + String(found.attributeValue).slice(0, 40)
                         + '". Hay them Semantics(label: ...) hoac hintText cho o nhap trong Golden Solution.'}}, '*');
                       return;
                     }
-                    const key = found.attribute + '=' + found.attributeValue;
-                    // Su kien go sau ky tu dau co the khong nhan dien duoc muc tieu (found
-                    // null da bi chan o tren) — nen moi su kien TOI DUOC day deu cap nhat
-                    // phien dang cho; gia tri that se doc lai luc chot.
-                    // Doi o giua chung (goDangCho cua o khac con treo): chot o cu truoc.
-                    if (goDangCho && goDangCho.found.attributeValue !== found.attributeValue) chotEnterText();
+                    if (goDangCho && !cungLocator(goDangCho.found, found)) chotEnterText();
+                    oDangFocus = found;
                     goDangCho = {found, el: target, giaTri: target.value};
-                    const oldBlur = textTimers.get('blur'); if (oldBlur) { clearTimeout(oldBlur); textTimers.delete('blur'); }
-                    const old = textTimers.get('go'); if (old) clearTimeout(old);
-                    textTimers.set('go', setTimeout(chotEnterText, 700));
+                  }
+                  document.addEventListener('focusin', event => {
+                    const target = event.target;
+                    if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return;
+                    const found = semanticNode(event);
+                    if (!found) return;
+                    if (goDangCho && !cungLocator(goDangCho.found, found)) chotEnterText();
+                    oDangFocus = found;
+                  }, true);
+                  document.addEventListener('focusout', event => {
+                    const el = event.target;
+                    if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return;
+                    if (!goDangCho) return;
+                    // Không chốt theo blur DOM: Flutter tự thay input trong lúc gõ và phát
+                    // blur giả. Chỉ giữ snapshot; focusin/action/flush mới là ranh giới logic.
+                    goDangCho.el = el; goDangCho.giaTri = el.value;
+                  }, true);
+                  document.addEventListener('compositionstart', () => { dangGhepBoGo = true; }, true);
+                  document.addEventListener('compositionend', event => {
+                    dangGhepBoGo = false;
+                    capNhatONhap(event, false);
+                  }, true);
+                  document.addEventListener('input', event => capNhatONhap(event), true);
+                  document.addEventListener('keydown', event => {
+                    const el = event.target;
+                    if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) || dangGhepBoGo) return;
+                    // Tab luôn chuyển control; Enter chỉ là ranh giới ở input một dòng,
+                    // không cắt nội dung xuống dòng hợp lệ của textarea.
+                    if (event.key === 'Tab' || (event.key === 'Enter' && el instanceof HTMLInputElement)) {
+                      capNhatONhap(event, false);
+                      chotEnterText();
+                    }
                   }, true);
                   document.addEventListener('scroll', event => {
                     const target = event.target instanceof Element ? event.target : document.scrollingElement;
@@ -514,6 +520,7 @@ public class GoldenRuntimeService {
                     scrollOffsets.set(target, current);
                     const old = timers.get(target); if (old) clearTimeout(old);
                     timers.set(target, setTimeout(() => {
+                      chotEnterText();
                       send({kind: 'action', stage: 'ACTION', action: 'scroll', ...found, delta: {x: previous.x - current.x, y: previous.y - current.y}, valueType: 'json', value: '', browser: 'flutter_tester'});
                     }, 250));
                   }, true);
@@ -556,7 +563,28 @@ public class GoldenRuntimeService {
                     window.parent.postMessage({type: 'GOLDEN_RECORDER_INVENTORY', payload: {items}}, '*');
                   }
                   window.addEventListener('message', event => {
-                    if (event.data && event.data.type === COMMAND && event.data.action === 'snapshot_ui') inventory();
+                    if (!event.data || event.data.type !== COMMAND) return;
+                    if (event.data.action === 'snapshot_ui') {
+                      chotEnterText();
+                      inventory();
+                    }
+                    if (event.data.action === 'flush_input') {
+                      const requestId = event.data.request_id || '';
+                      let done = false;
+                      const finish = () => {
+                        if (done) return;
+                        done = true;
+                        chotEnterText();
+                        window.parent.postMessage({type: FLUSHED, payload: {request_id: requestId}}, '*');
+                      };
+                      // Cho Flutter tối đa hai frame để đồng bộ value semantics. Tab nền
+                      // có thể không chạy rAF nên vẫn có fallback 250ms.
+                      const fallback = setTimeout(finish, 250);
+                      requestAnimationFrame(() => requestAnimationFrame(() => {
+                        clearTimeout(fallback);
+                        finish();
+                      }));
+                    }
                   });
                   const enable = () => {
                     const placeholder = document.querySelector('flt-semantics-placeholder[aria-label="Enable accessibility"]');

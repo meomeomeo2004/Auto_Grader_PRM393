@@ -75,7 +75,11 @@ class GoldenRuntimeServiceTest {
         String html = Files.readString(index, StandardCharsets.UTF_8);
         assertThat(html).contains("GOLDEN_RECORDER_EVENT");
         assertThat(html).contains("GOLDEN_RECORDER_COMMAND");
+        assertThat(html).contains("GOLDEN_RECORDER_FLUSHED");
         assertThat(html).contains("snapshot_ui");
+        assertThat(html).contains("flush_input");
+        assertThat(html).contains("compositionend");
+        assertThat(html).doesNotContain("setTimeout(chotEnterText, 700)");
         assertThat(html).contains("aria-label");
         assertThat(html).doesNotContain("document.elementFromPoint");
     }

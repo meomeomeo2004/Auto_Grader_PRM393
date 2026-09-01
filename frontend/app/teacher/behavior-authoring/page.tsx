@@ -233,11 +233,19 @@ function BehaviorAuthoringEditor() {
   const [staticSel, setStaticSel] = useState<Record<string, { checked: boolean; weight: number }>>({});
   const goldenFrame = useRef<HTMLIFrameElement | null>(null);
   const authoringPanel = useRef<HTMLDivElement | null>(null);
-  // The Golden iframe can still emit a debounced event immediately after Stop.
-  // Keep an imperative session guard so those late events never reach a closed
-  // recording while React is waiting for the next render/refresh.
+  // Iframe có thể còn phát event chốt input ngay trước Stop. Guard imperative giữ
+  // event đó trong đúng phiên khi React vẫn đang chờ render/refresh kế tiếp.
   const activeRecordingId = useRef<string | null>(null);
   const acceptsRecorderEvents = useRef(false);
+  // Event từ iframe phải được ghi tuần tự. Nếu /stop chạy trước request enter_text
+  // cuối cùng, backend đổi phiên khỏi ACTIVE và action hợp lệ bị mất do race.
+  const recorderEventQueue = useRef<Promise<void>>(Promise.resolve());
+  const recorderQueueError = useRef<Error | null>(null);
+  const flushWaiters = useRef(new Map<string, {
+    resolve: () => void;
+    reject: (error: Error) => void;
+    timer: number;
+  }>());
   const requestedSuite = search.get("suite");
   const previewUrl = useMemo(() => absoluteRuntimeUrl(runtimeUrl), [runtimeUrl]);
   const runtimeOrigin = useMemo(() => {
@@ -438,6 +446,7 @@ function BehaviorAuthoringEditor() {
   const closeSuite = () => {
     activeRecordingId.current = null;
     acceptsRecorderEvents.current = false;
+    resetRecorderTransport();
     setSuite(null);
     setRecording(null);
     setArtifacts([]);
@@ -474,6 +483,7 @@ function BehaviorAuthoringEditor() {
 
   const startRecording = () => suite && run("record-start", async () => {
     setEditingScenarioId(null);
+    resetRecorderTransport();
     const created = await api<Recording>(`/behavior-authoring/suites/${suite.id}/recordings`, {
       method: "POST", body: JSON.stringify({ name: scenarioName, viewport: { width: viewportWidth, height: viewportHeight, device_pixel_ratio: 1 }, initial_state: { reset_storage: true } }),
     });
@@ -501,27 +511,87 @@ function BehaviorAuthoringEditor() {
     );
   };
 
+  const resetRecorderTransport = () => {
+    recorderEventQueue.current = Promise.resolve();
+    recorderQueueError.current = null;
+    flushWaiters.current.forEach((waiter) => window.clearTimeout(waiter.timer));
+    flushWaiters.current.clear();
+  };
+
+  /** Ghi event iframe theo đúng thứ tự; lỗi ghi event phải chặn Stop thay vì mất action âm thầm. */
+  const enqueueRecorderEvent = (event: JsonMap, recordingId: string, suiteId: string) => {
+    recorderEventQueue.current = recorderEventQueue.current.then(async () => {
+      if (recorderQueueError.current) return;
+      try {
+        await api(`/behavior-authoring/recordings/${recordingId}/events`, {
+          method: "POST",
+          body: JSON.stringify(event),
+        });
+        // Refresh chỉ để cập nhật danh sách đang nhìn; event đã lưu thành công thì lỗi
+        // refresh không được biến thành lỗi dữ liệu và khóa cả phiên record.
+        try { await refresh(suiteId); }
+        catch { setNotice("Đã lưu thao tác nhưng chưa làm mới được danh sách hiển thị."); }
+      } catch (caught) {
+        const failure = caught instanceof Error ? caught : new Error(String(caught));
+        recorderQueueError.current = failure;
+        setError(`Không lưu được thao tác record: ${failure.message}`);
+      }
+    });
+    return recorderEventQueue.current;
+  };
+
+  /** Yêu cầu iframe chốt ô đang nhập và xác nhận đã phát event enter_text. */
+  const requestRecorderFlush = () => {
+    const frame = goldenFrame.current?.contentWindow;
+    if (!frame || !recorderReady || !recording || recording.status !== "ACTIVE") return Promise.resolve();
+    const requestId = globalThis.crypto?.randomUUID?.()
+      || `flush-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    return new Promise<void>((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        flushWaiters.current.delete(requestId);
+        reject(new Error("Golden recorder không xác nhận được giá trị ô nhập cuối. Hãy Build & mở Golden lại rồi thử tiếp."));
+      }, 3_000);
+      flushWaiters.current.set(requestId, { resolve, reject, timer });
+      frame.postMessage(
+        { type: "GOLDEN_RECORDER_COMMAND", action: "flush_input", request_id: requestId },
+        runtimeOrigin || "*",
+      );
+    });
+  };
+
+  const awaitRecorderEvents = async () => {
+    await recorderEventQueue.current;
+    if (recorderQueueError.current) throw recorderQueueError.current;
+  };
+
   const appendAction = (payload?: JsonMap) => {
     const recordingId = activeRecordingId.current;
     if (!recordingId || !acceptsRecorderEvents.current || recording?.status !== "ACTIVE" || !suite) {
       setError("Phiên record không còn nhận thao tác — hãy tải lại trang để nối lại phiên.");
       return;
     }
+    const targetNeeded = ["tap", "enter_text", "clear_text", "scroll"].includes(action);
+    const event = payload || {
+      kind: "action",
+      stage: "ACTION",
+      action,
+      target: targetNeeded ? { [locator]: locatorValue.trim() } : {},
+      attribute: targetNeeded ? locator : "none",
+      attributeValue: targetNeeded ? locatorValue.trim() : "",
+      valueType: "string",
+      value: action === "enter_text" ? inputValue : "",
+      browser: "flutter_tester",
+    };
+    if (payload) {
+      void enqueueRecorderEvent(event, recordingId, suite.id);
+      return;
+    }
     run("record-event", async () => {
-      const targetNeeded = ["tap", "enter_text", "clear_text", "scroll"].includes(action);
-      const event = payload || {
-        kind: "action",
-        stage: "ACTION",
-        action,
-        target: targetNeeded ? { [locator]: locatorValue.trim() } : {},
-        attribute: targetNeeded ? locator : "none",
-        attributeValue: targetNeeded ? locatorValue.trim() : "",
-        valueType: "string",
-        value: action === "enter_text" ? inputValue : "",
-        browser: "flutter_tester",
-      };
-      await api(`/behavior-authoring/recordings/${recordingId}/events`, { method: "POST", body: JSON.stringify(event) });
-      await refresh(suite.id);
+      // Action thêm tay cũng là ranh giới logic: lưu input còn chờ trước action mới.
+      await requestRecorderFlush();
+      await awaitRecorderEvents();
+      await enqueueRecorderEvent(event, recordingId, suite.id);
+      await awaitRecorderEvents();
       setLocatorValue(""); setInputValue("");
     });
   };
@@ -559,6 +629,10 @@ function BehaviorAuthoringEditor() {
       return;
     }
     run("record-ui-criteria", async () => {
+      // Checkpoint phải đứng sau giá trị cuối của ô đang nhập. Không dựa vào thời
+      // gian nghỉ gõ: bridge chốt theo lệnh và queue bảo đảm POST đúng thứ tự.
+      await requestRecorderFlush();
+      await awaitRecorderEvents();
       const screen = uiScreenName.trim() || "Màn hình";
       const slug = screen.normalize("NFD").replace(/[̀-ͯ]/g, "")
         .replace(/đ/g, "d").replace(/Đ/g, "D").replace(/[^a-zA-Z0-9]+/g, "_").toUpperCase().replace(/^_+|_+$/g, "");
@@ -691,6 +765,8 @@ function BehaviorAuthoringEditor() {
       return;
     }
     run("record-checkpoint", async () => {
+      await requestRecorderFlush();
+      await awaitRecorderEvents();
       const event: JsonMap = {
         kind: "checkpoint", stage: "ASSERT", action: "observe_ui", browser: "flutter_tester",
         attribute: uiCheckpointType === "component" ? checkpointLocator : uiCheckpointType,
@@ -753,6 +829,8 @@ function BehaviorAuthoringEditor() {
       return;
     }
     run("record-db-checkpoint", async () => {
+      await requestRecorderFlush();
+      await awaitRecorderEvents();
       let row: JsonMap = {};
       try {
         const parsed = JSON.parse(databaseRow || "{}");
@@ -788,40 +866,54 @@ function BehaviorAuthoringEditor() {
       setError("Cần nhập Mã luồng và Tên luồng (ô ngay trên nút này) trước khi sinh testcase.");
       return;
     }
-    // Close the client-side gate before the first network request. This is
-    // intentionally earlier than the backend transition to prevent iframe
-    // messages racing with /stop and /abstract.
-    acceptsRecorderEvents.current = false;
     run("record-stop", async () => {
-      if (recording.status === "ACTIVE") {
-        await api(`/behavior-authoring/recordings/${recordingId}/stop`, { method: "POST", body: JSON.stringify({ final_observation: {} }) });
-        setRecording((current) => current ? { ...current, status: "STOPPED" } : current);
-      }
-      const sinhXong = await api<JsonMap>(`/behavior-authoring/recordings/${recordingId}/abstract`, {
-        method: "POST",
-        body: JSON.stringify({
-          scenario_code: scenarioCode.trim().toUpperCase(),
-          name: scenarioName.trim(),
-          weight: scenarioWeight,
-          ...(editingScenarioId ? { replace_scenario_id: editingScenarioId } : {}),
-          viewports: [
-            // device_pixel_ratio để cố định 1: chấm bố cục đo bằng dp nên mật độ không
-            // đổi điểm, chỉ làm ảnh bằng chứng nặng thêm.
-            { width: viewportWidth, height: viewportHeight, device_pixel_ratio: 1, name: "phone" },
-          ],
-        }),
-      });
-      activeRecordingId.current = null;
-      setRecording(null);
-      await refresh(suite.id);
-      setEditingScenarioId(null);
-      if (sinhXong.capture_warning) {
-        // Sinh testcase THÀNH CÔNG nhưng có mùi hỏng-im-lặng — phải đỏ để không bị bỏ qua.
-        setError(`Đã sinh testcase, NHƯNG: ${String(sinhXong.capture_warning)}`);
-      } else {
-        setNotice(editingScenarioId
-          ? "Đã cập nhật scenario, replay Golden trên Database ẩn và tạo lại oracle."
-          : "Đã replay Golden trên Database ẩn, sinh Output Database, oracle và testcase-definition.json.");
+      let backendStopped = recording.status === "STOPPED";
+      try {
+        if (recording.status === "ACTIVE") {
+          // Iframe phát enter_text cuối rồi ACK; sau ACK mới đóng cổng nhận và đợi
+          // toàn bộ POST event hoàn tất. Đây là barrier chống /stop vượt request cuối.
+          await requestRecorderFlush();
+          acceptsRecorderEvents.current = false;
+          await awaitRecorderEvents();
+          await api(`/behavior-authoring/recordings/${recordingId}/stop`, { method: "POST", body: JSON.stringify({ final_observation: {} }) });
+          backendStopped = true;
+          setRecording((current) => current ? { ...current, status: "STOPPED" } : current);
+        } else {
+          acceptsRecorderEvents.current = false;
+          await awaitRecorderEvents();
+        }
+        const sinhXong = await api<JsonMap>(`/behavior-authoring/recordings/${recordingId}/abstract`, {
+          method: "POST",
+          body: JSON.stringify({
+            scenario_code: scenarioCode.trim().toUpperCase(),
+            name: scenarioName.trim(),
+            weight: scenarioWeight,
+            ...(editingScenarioId ? { replace_scenario_id: editingScenarioId } : {}),
+            viewports: [
+              // device_pixel_ratio để cố định 1: chấm bố cục đo bằng dp nên mật độ không
+              // đổi điểm, chỉ làm ảnh bằng chứng nặng thêm.
+              { width: viewportWidth, height: viewportHeight, device_pixel_ratio: 1, name: "phone" },
+            ],
+          }),
+        });
+        activeRecordingId.current = null;
+        setRecording(null);
+        resetRecorderTransport();
+        await refresh(suite.id);
+        setEditingScenarioId(null);
+        if (sinhXong.capture_warning) {
+          // Sinh testcase THÀNH CÔNG nhưng có mùi hỏng-im-lặng — phải đỏ để không bị bỏ qua.
+          setError(`Đã sinh testcase, NHƯNG: ${String(sinhXong.capture_warning)}`);
+        } else {
+          setNotice(editingScenarioId
+            ? "Đã cập nhật scenario, replay Golden trên Database ẩn và tạo lại oracle."
+            : "Đã replay Golden trên Database ẩn, sinh Output Database, oracle và testcase-definition.json.");
+        }
+      } catch (caught) {
+        // Flush/lưu event lỗi trước khi backend /stop thì phiên vẫn ACTIVE và phải cho
+        // người dùng sửa/thử lại. Nếu /stop đã thành công, state refresh sẽ đưa về STOPPED.
+        if (!backendStopped && recording.status === "ACTIVE") acceptsRecorderEvents.current = true;
+        throw caught;
       }
     });
   };
@@ -948,6 +1040,7 @@ function BehaviorAuthoringEditor() {
         setViewportHeight(Number(phone.height || 915));
       }
       const created = await api<Recording>(`/behavior-authoring/scenarios/${String(item.id)}/revision-recording`, { method: "POST" });
+      resetRecorderTransport();
       activeRecordingId.current = created.id;
       acceptsRecorderEvents.current = true;
       setEditingScenarioId(String(item.id));
@@ -967,7 +1060,10 @@ function BehaviorAuthoringEditor() {
     acceptsRecorderEvents.current = false;
     activeRecordingId.current = null;
     run("record-cancel", async () => {
+      // Đợi request đã gửi xong để không còn appendEvent chạy đua với DELETE.
+      await recorderEventQueue.current;
       await api(`/behavior-authoring/recordings/${recordingId}`, { method: "DELETE" });
+      resetRecorderTransport();
       setRecording(null);
       setEditingScenarioId(null);
       await refresh(suite.id);
@@ -993,6 +1089,16 @@ function BehaviorAuthoringEditor() {
       if (!event.data || typeof event.data !== "object") return;
       if (event.data.type === "GOLDEN_RECORDER_READY") {
         setRecorderReady(true);
+        return;
+      }
+      if (event.data.type === "GOLDEN_RECORDER_FLUSHED") {
+        const requestId = event.data.payload?.request_id;
+        if (typeof requestId !== "string") return;
+        const waiter = flushWaiters.current.get(requestId);
+        if (!waiter) return;
+        window.clearTimeout(waiter.timer);
+        flushWaiters.current.delete(requestId);
+        waiter.resolve();
         return;
       }
       if (event.data.type === "GOLDEN_RECORDER_INVENTORY") {
