@@ -32,6 +32,17 @@ public class BehaviorAuthoringService {
             // do engine đo trên Golden lúc capture oracle rồi nướng vào đây, không gõ tay.
             "component_position",
             "component_color",
+            // Trạng thái thật bên trong widget: công tắc bật hay tắt, dải trượt bao nhiêu,
+            // ô nhập có dùng bàn phím số không, nút có đúng loại không. Khác
+            // component_present ở chỗ cái kia chỉ hỏi "có trên màn hình không".
+            "widget_state",
+            // Kiểu chữ của MỘT dòng chữ (cỡ, độ đậm, phông, màu) đọc từ đoạn văn bản
+            // thật sự được vẽ — không phải từ style khai trên widget, vì phần thừa kế
+            // từ theme không nằm ở đó.
+            "text_style",
+            // Giá trị trong bảng chủ đề: vai trò màu, useMaterial3, phông toàn app,
+            // theme của từng thành phần.
+            "theme_value",
             // Màu chủ đạo của app: đọc thẳng ColorScheme từ cây widget, KHÔNG lấy mẫu
             // pixel. Bù đúng điểm mù của component_color — Material 3 cố ý làm các vai
             // outline/onSurfaceVariant gần như xám trung tính nên thành phần chỉ có
@@ -364,6 +375,37 @@ public class BehaviorAuthoringService {
             event.putIfAbsent("stage", "ASSERT");
             event.putIfAbsent("action", "observe_ui");
             event.putIfAbsent("browser", "flutter_tester");
+        } else if ("text_style".equals(kind)) {
+            if (map(event.get("target")).isEmpty() || text(event, "property", "").isBlank()) {
+                throw new IllegalArgumentException(
+                        "Tiêu chí kiểu chữ phải có target (dòng chữ cần đo) và thuộc tính cần đọc");
+            }
+            event.putIfAbsent("checkpoint", true);
+            // Cỡ chữ so tuyệt đối theo mặc định: sinh viên đặt 22 thì phải là 22, đây là
+            // con số người ra đề quy định chứ không phải phép đo có nhiễu. Riêng MÀU chữ
+            // engine tự dùng phép so màu với sai số 20% như mọi tiêu chí màu khác.
+            event.putIfAbsent("stage", "ASSERT");
+            event.putIfAbsent("action", "observe_ui");
+            event.putIfAbsent("browser", "flutter_tester");
+        } else if ("theme_value".equals(kind)) {
+            if (text(event, "property", "").isBlank()) {
+                throw new IllegalArgumentException("Tiêu chí chủ đề phải khai thuộc tính cần đọc");
+            }
+            event.putIfAbsent("checkpoint", true);
+            event.putIfAbsent("stage", "ASSERT");
+            event.putIfAbsent("action", "observe_ui");
+            event.putIfAbsent("browser", "flutter_tester");
+        } else if ("widget_state".equals(kind)) {
+            // Thiếu một trong hai thì lúc chấm engine không biết đọc gì của ai. Chặn ngay
+            // lúc ghi để người soạn đề sửa liền, đừng để lỗi trôi tới lượt capture.
+            if (text(event, "widget", "").isBlank() || text(event, "property", "").isBlank()) {
+                throw new IllegalArgumentException(
+                        "Tiêu chí trạng thái phải khai cả loại widget lẫn thuộc tính cần đọc");
+            }
+            event.putIfAbsent("checkpoint", true);
+            event.putIfAbsent("stage", "ASSERT");
+            event.putIfAbsent("action", "observe_ui");
+            event.putIfAbsent("browser", "flutter_tester");
         } else if ("component_present".equals(kind)) {
             // Không có target thì lúc chấm không biết tìm widget nào — chặn ngay lúc ghi,
             // đừng để lỗi trôi tới preflight.
@@ -511,6 +553,9 @@ public class BehaviorAuthoringService {
                     || "component_present".equals(kind)
                     || "component_position".equals(kind)
                     || "component_color".equals(kind)
+                    || "widget_state".equals(kind)
+                    || "text_style".equals(kind)
+                    || "theme_value".equals(kind)
                     || "theme_color".equals(kind)
                     || "screen_match".equals(kind)
                     || (bool(event.get("checkpoint"), false)
@@ -787,11 +832,22 @@ public class BehaviorAuthoringService {
             String kind = text(checkpoint, "kind", "");
             boolean laViTri = "component_position".equals(kind);
             boolean laMau = "component_color".equals(kind) || "theme_color".equals(kind);
-            if (!laViTri && !laMau) continue;
+            // Ba loại tiêu chí "đọc một giá trị rồi so": trạng thái widget, kiểu chữ, chủ đề.
+            // Chúng dùng CHUNG một kênh giá trị chuẩn (`observed`) nên chỉ có một luật nướng.
+            boolean laTrangThai = "widget_state".equals(kind)
+                    || "text_style".equals(kind)
+                    || "theme_value".equals(kind);
+            if (!laViTri && !laMau && !laTrangThai) continue;
             Map<String, Object> doDuoc = map(components.get(text(checkpoint, "id", "")));
             if (doDuoc.isEmpty()) continue;
             Map<String, Object> mongDoi = new LinkedHashMap<>(map(checkpoint.get("expect")));
-            if (laViTri) {
+            if (laTrangThai) {
+                Object giaTri = doDuoc.get("observed");
+                // Không đo được (tiêu chí khai sai, widget không có trên màn) thì KHÔNG nướng:
+                // để lúc chấm báo "chưa có giá trị chuẩn" còn hơn nướng rỗng rồi cái gì cũng đạt.
+                if (giaTri == null) continue;
+                mongDoi.put("value", giaTri);
+            } else if (laViTri) {
                 if (doDuoc.get("center_x") == null || doDuoc.get("center_y") == null) continue;
                 mongDoi.put("center_x", doDuoc.get("center_x"));
                 mongDoi.put("center_y", doDuoc.get("center_y"));
