@@ -43,6 +43,9 @@ public class BehaviorAuthoringService {
             // Giá trị trong bảng chủ đề: vai trò màu, useMaterial3, phông toàn app,
             // theme của từng thành phần.
             "theme_value",
+            // Cả luồng không vỡ bố cục (RenderFlex overflow). Không có giá trị chuẩn —
+            // engine tự bắt lỗi tràn trong lúc replay.
+            "no_overflow",
             // Màu chủ đạo của app: đọc thẳng ColorScheme từ cây widget, KHÔNG lấy mẫu
             // pixel. Bù đúng điểm mù của component_color — Material 3 cố ý làm các vai
             // outline/onSurfaceVariant gần như xám trung tính nên thành phần chỉ có
@@ -51,7 +54,7 @@ public class BehaviorAuthoringService {
             // So bố cục màn hình với ảnh chuẩn chụp từ Golden trong cùng container.
             "screen_match");
     private static final Set<String> ACTIONS = Set.of(
-            "boot", "tap", "enter_text", "clear_text", "scroll", "back", "restart", "wait_until");
+            "boot", "tap", "enter_text", "clear_text", "scroll", "drag", "back", "restart", "wait_until");
     private static final int MAX_EVENTS = 2_000;
 
     private final GoldenAppRepository goldenApps;
@@ -330,9 +333,17 @@ public class BehaviorAuthoringService {
         if ("action".equals(kind)) {
             String action = required(event, "action").toLowerCase(Locale.ROOT);
             if (!ACTIONS.contains(action)) throw new IllegalArgumentException("Action không hỗ trợ: " + action);
-            if (Set.of("tap", "enter_text", "clear_text", "scroll").contains(action)
+            if (Set.of("tap", "enter_text", "clear_text", "scroll", "drag").contains(action)
                     && map(event.get("target")).isEmpty()) {
                 throw new IllegalArgumentException("Action " + action + " phải có target ngữ nghĩa");
+            }
+            // Kéo mà không nói kéo bao xa thì engine không làm gì được — chặn ngay lúc
+            // ghi, đừng để tới lượt capture mới nổ.
+            if ("drag".equals(action)) {
+                Map<String, Object> delta = map(event.get("delta"));
+                if (number(delta.get("x"), 0) == 0 && number(delta.get("y"), 0) == 0) {
+                    throw new IllegalArgumentException("Action drag phải khai độ dời (kéo ngang hoặc kéo dọc khác 0)");
+                }
             }
             Map<String, Object> target = map(event.get("target"));
             event.putIfAbsent("stage", "ACTION");
@@ -384,6 +395,11 @@ public class BehaviorAuthoringService {
             // Cỡ chữ so tuyệt đối theo mặc định: sinh viên đặt 22 thì phải là 22, đây là
             // con số người ra đề quy định chứ không phải phép đo có nhiễu. Riêng MÀU chữ
             // engine tự dùng phép so màu với sai số 20% như mọi tiêu chí màu khác.
+            event.putIfAbsent("stage", "ASSERT");
+            event.putIfAbsent("action", "observe_ui");
+            event.putIfAbsent("browser", "flutter_tester");
+        } else if ("no_overflow".equals(kind)) {
+            event.putIfAbsent("checkpoint", true);
             event.putIfAbsent("stage", "ASSERT");
             event.putIfAbsent("action", "observe_ui");
             event.putIfAbsent("browser", "flutter_tester");
@@ -556,6 +572,7 @@ public class BehaviorAuthoringService {
                     || "widget_state".equals(kind)
                     || "text_style".equals(kind)
                     || "theme_value".equals(kind)
+                    || "no_overflow".equals(kind)
                     || "theme_color".equals(kind)
                     || "screen_match".equals(kind)
                     || (bool(event.get("checkpoint"), false)
@@ -1379,7 +1396,7 @@ public class BehaviorAuthoringService {
 
     private String locatorAttribute(Map<String, Object> target) {
         for (String key : List.of("semanticId", "semantic_id", "valueKey", "value_key", "key",
-                "label", "hint", "text", "role")) {
+                "label", "hint", "text", "text_prefix", "tooltip", "role")) {
             if (target.get(key) != null && !String.valueOf(target.get(key)).isBlank()) return key;
         }
         return "none";

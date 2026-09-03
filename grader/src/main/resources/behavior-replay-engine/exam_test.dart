@@ -59,6 +59,21 @@ Future<void> _runBehaviorScenario(
   _daChupAnhCuoi = false;
   _mauNenAnh = null;
 
+  // Chan overflow TRUOC khi no toi binding cua flutter_test: binding se bien no thanh
+  // pending exception, _throwPendingException nem ra, va ca nhom checkpoint chet theo.
+  // Moi loi khac van chuyen tiep nguyen ven cho binding.
+  _loiTranBoCuc.clear();
+  final void Function(FlutterErrorDetails)? xuLyCu = FlutterError.onError;
+  FlutterError.onError = (FlutterErrorDetails chiTiet) {
+    final String chuoi = chiTiet.exceptionAsString();
+    if (chuoi.contains('overflowed by')) {
+      _loiTranBoCuc.add(chuoi.split(String.fromCharCode(10)).first.trim());
+      return;
+    }
+    xuLyCu?.call(chiTiet);
+  };
+  addTearDown(() => FlutterError.onError = xuLyCu);
+
   try {
     sqfliteFfiInit();
     // Flutter widget tests run in a headless sandbox. The regular FFI factory
@@ -70,6 +85,7 @@ Future<void> _runBehaviorScenario(
     addTearDown(() {
       tester.view.resetPhysicalSize();
       tester.view.resetDevicePixelRatio();
+      tester.platformDispatcher.clearPlatformBrightnessTestValue();
     });
     if (_bool(_asMap(testCase['initial_state'])['reset_storage'], true)) {
       await tester.runAsync(() => _resetDatabase(databaseContract));
@@ -194,6 +210,15 @@ void _applyViewport(WidgetTester tester, Map<String, dynamic> viewport) {
   }
   tester.view.devicePixelRatio = ratio;
   tester.view.physicalSize = Size(width * ratio, height * ratio);
+  // CHE DO TOI theo kich ban. Dat TRUOC khi boot: MaterialApp doc platformBrightness
+  // luc build de chon theme/darkTheme, nen dat sau la muon. Capture cung chay qua day
+  // nen gia tri chuan mau/kieu chu tu la gia tri cua che do toi.
+  final doSang = _text(viewport, 'brightness').toLowerCase();
+  if (doSang == 'dark') {
+    tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
+  } else {
+    tester.platformDispatcher.clearPlatformBrightnessTestValue();
+  }
 }
 
 void _printCheckpoint(
@@ -273,6 +298,26 @@ Future<void> _runStep(
       final dy = _double(delta['y'], -300);
       await tester.drag(finder, Offset(dx, dy));
       return;
+    case 'drag':
+      // KEO mot widget — dai truot, keo-tha. Khac `scroll` o ba cho: BAT BUOC co
+      // target (keo cai gi?), khong co mac dinh ngam theo truc y, va cuon cho widget
+      // hien ra truoc khi keo. Do o sa ban: tester.drag doi Slider 40 -> 60 voi dx 80.
+      final finder = await _waitForTarget(
+        tester,
+        _asMap(step['target']),
+        timeout,
+      );
+      await tester.ensureVisible(finder);
+      final delta = _asMap(step['delta']);
+      final dx = _double(delta['x'], 0);
+      final dy = _double(delta['y'], 0);
+      if (dx == 0 && dy == 0) {
+        throw ArgumentError(
+          'Action drag phai khai do doi: delta.x hoac delta.y khac 0.',
+        );
+      }
+      await tester.drag(finder, Offset(dx, dy), warnIfMissed: false);
+      return;
     case 'back':
       await tester.pageBack();
       return;
@@ -338,6 +383,18 @@ Future<void> _assertCheckpoint(
   // chỉ hỏi "có trên màn hình không", cái này đọc giá trị thật bên trong widget.
   if (kind == 'widget_state') {
     await _assertWidgetState(tester, checkpoint, timeout);
+    return;
+  }
+
+  // KHONG VO BO CUC — ca luong (boot + moi buoc) khong co RenderFlex overflow nao.
+  // Khong can gia tri chuan: tren Golden ma tran thi tieu chi nay truot ngay luc
+  // capture, tuc nguoi ra de biet bai mau cua minh hong truoc khi sinh vien nop.
+  if (kind == 'no_overflow') {
+    if (_loiTranBoCuc.isNotEmpty) {
+      throw StateError(
+        'Bo cuc bi tran ${_loiTranBoCuc.length} cho trong luong nay — ${_loiTranBoCuc.first}',
+      );
+    }
     return;
   }
 
@@ -454,6 +511,37 @@ Future<void> _assertCheckpoint(
     );
     soPhepKiem++;
   }
+  // TIEN TO: dong ma phan duoi doi theo du lieu ("Tong thang: 608.000 d"). find.text so
+  // tuyet doi nen khong dung duoc. Engine biet text_prefix tu lau qua target, nhung
+  // khung "Noi dung text" chua tung co cho khai — no cu tra o day.
+  for (final raw in _asList(expectValue['visible_text_prefixes'])) {
+    final tienTo = (raw?.toString() ?? '');
+    if (tienTo.isEmpty) continue;
+    await _waitUntil(
+      tester,
+      () => find
+          .byWidgetPredicate(
+            (w) => w is Text && (w.data ?? '').startsWith(tienTo),
+          )
+          .evaluate()
+          .isNotEmpty,
+      timeout,
+      'Không thấy dòng chữ nào bắt đầu bằng "$tienTo" trên UI.',
+    );
+    soPhepKiem++;
+  }
+  for (final raw in _asList(expectValue['hidden_text_prefixes'])) {
+    final tienTo = (raw?.toString() ?? '');
+    if (tienTo.isEmpty) continue;
+    expect(
+      find.byWidgetPredicate(
+        (w) => w is Text && (w.data ?? '').startsWith(tienTo),
+      ),
+      findsNothing,
+      reason: 'Vẫn còn dòng chữ bắt đầu bằng "$tienTo" trên UI.',
+    );
+    soPhepKiem++;
+  }
   for (final raw in _asList(expectValue['hidden_texts'])) {
     final value = (raw?.toString() ?? '');
     expect(
@@ -493,6 +581,8 @@ String _moTaTarget(Map<String, dynamic> target) {
     final v = _text(target, khoa);
     if (v.isNotEmpty) return '"$v"';
   }
+  final tienTo = _text(target, 'text_prefix');
+  if (tienTo.isNotEmpty) return '"$tienTo…"';
   return target.toString();
 }
 
@@ -1308,6 +1398,15 @@ Future<Finder> _waitForTarget(
 /// Phải thu ĐÚNG LÚC bấm, không thu ở cuối kịch bản: cuối kịch bản màn hình đã chuyển
 /// đi, nhãn của màn trước không còn trên cây nên đo ra rỗng.
 final Map<String, dynamic> _moTaNhanDaThu = <String, dynamic>{};
+
+/// Loi TRAN BO CUC bat duoc trong luong hien tai, khu trung theo dong dau (overflow
+/// bao lai moi frame nen khong khu thi phinh vo han).
+///
+/// Vi sao ghi lai thay vi de no giet kich ban: do that tren sa ban, mot RenderFlex
+/// tran 388px lam CA kich ban thanh BEHAVIOR_REPLAY_FAILURE — mot loi cosmetic tren
+/// man Them la mat trang ham ADD. Tran bo cuc dang la mot DAU DIEM RIENG (no_overflow),
+/// khong dang la an tu cho moi tieu chi khac tren cung man.
+final Set<String> _loiTranBoCuc = <String>{};
 
 final bool _dangThuOracle =
     (Platform.environment['GRADER_CAPTURE_OUTPUT_PATH'] ?? '').isNotEmpty;

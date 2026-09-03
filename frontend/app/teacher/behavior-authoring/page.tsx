@@ -53,8 +53,8 @@ const DEFAULT_ALLOWED_PACKAGES = [
   "path_provider", "sembast_web", "image_picker", "intl",
 ];
 
-const ACTIONS = ["boot", "tap", "enter_text", "clear_text", "scroll", "back", "restart", "wait_until"];
-const LOCATORS = ["semanticId", "valueKey", "label", "hint", "text", "tooltip"];
+const ACTIONS = ["boot", "tap", "enter_text", "clear_text", "scroll", "drag", "back", "restart", "wait_until"];
+const LOCATORS = ["semanticId", "valueKey", "label", "hint", "text", "text_prefix", "tooltip"];
 
 // Loại widget hay gặp nhất trong đề Flutter — gợi ý thôi, gõ tên khác vẫn chạy vì
 // engine so bằng TÊN kiểu chứ không tra bảng cứng.
@@ -230,7 +230,13 @@ function BehaviorAuthoringEditor() {
   const [locator, setLocator] = useState("semanticId");
   const [locatorValue, setLocatorValue] = useState("");
   const [inputValue, setInputValue] = useState("");
+  // Do doi cho `drag`, tinh bang dp. Mac dinh keo ngang 80 — du de doi mot Slider
+  // 10 nac di hai nac (do o sa ban), va khong am tham keo doc.
+  const [keoX, setKeoX] = useState(80);
+  const [keoY, setKeoY] = useState(0);
   const [checkpointText, setCheckpointText] = useState("");
+  // Tiền tố: cho dòng mà phần đuôi đổi theo dữ liệu ("Tổng tháng: 608.000 ₫").
+  const [checkpointPrefixText, setCheckpointPrefixText] = useState("");
   const [thuGon, setThuGon] = useState(false);
   const [uiGroupWeight, setUiGroupWeight] = useState(0);
   const [viTriWeight, setViTriWeight] = useState(0);
@@ -242,7 +248,7 @@ function BehaviorAuthoringEditor() {
   const [chiaDiemCha, setChiaDiemCha] = useState<Record<string, string>>({});
   const [hiddenCheckpointText, setHiddenCheckpointText] = useState("");
   const [checkpointMode, setCheckpointMode] = useState<"ui" | "database">("ui");
-  const [uiCheckpointType, setUiCheckpointType] = useState<"text" | "widget_state" | "text_style" | "theme_value" | "no_exception">("text");
+  const [uiCheckpointType, setUiCheckpointType] = useState<"text" | "widget_state" | "text_style" | "theme_value" | "no_overflow" | "no_exception">("text");
   const [wsLocator, setWsLocator] = useState("label");
   const [wsLocatorValue, setWsLocatorValue] = useState("");
   const [wsWidget, setWsWidget] = useState("");
@@ -283,6 +289,8 @@ function BehaviorAuthoringEditor() {
   // theo % chiều rộng/cao), nên mật độ không đổi một điểm nào — nó chỉ quyết định ảnh
   // bằng chứng nét tới đâu và nặng bao nhiêu. Để cố định 1 cho ảnh gọn.
   const [viewportWidth, setViewportWidth] = useState(412);
+  // Chấm ở chế độ tối: cờ nằm TRONG object viewport nên đi qua mọi tầng như rộng/cao màn.
+  const [cheDoToi, setCheDoToi] = useState(false);
   const [viewportHeight, setViewportHeight] = useState(915);
   const [codePreview, setCodePreview] = useState<CodePreview | null>(null);
   const [previewFileName, setPreviewFileName] = useState("");
@@ -534,7 +542,7 @@ function BehaviorAuthoringEditor() {
   const startRecording = () => suite && run("record-start", async () => {
     setEditingScenarioId(null);
     const created = await api<Recording>(`/behavior-authoring/suites/${suite.id}/recordings`, {
-      method: "POST", body: JSON.stringify({ name: scenarioName, viewport: { width: viewportWidth, height: viewportHeight, device_pixel_ratio: 1 }, initial_state: { reset_storage: true } }),
+      method: "POST", body: JSON.stringify({ name: scenarioName, viewport: { width: viewportWidth, height: viewportHeight, device_pixel_ratio: 1, brightness: cheDoToi ? "dark" : "light" }, initial_state: { reset_storage: true } }),
     });
     activeRecordingId.current = created.id;
     acceptsRecorderEvents.current = created.status === "ACTIVE";
@@ -567,11 +575,12 @@ function BehaviorAuthoringEditor() {
       return;
     }
     run("record-event", async () => {
-      const targetNeeded = ["tap", "enter_text", "clear_text", "scroll"].includes(action);
+      const targetNeeded = ["tap", "enter_text", "clear_text", "scroll", "drag"].includes(action);
       const event = payload || {
         kind: "action",
         stage: "ACTION",
         action,
+        ...(action === "drag" ? { delta: { x: Number(keoX) || 0, y: Number(keoY) || 0 } } : {}),
         target: targetNeeded ? { [locator]: locatorValue.trim() } : {},
         attribute: targetNeeded ? locator : "none",
         attributeValue: targetNeeded ? locatorValue.trim() : "",
@@ -721,7 +730,7 @@ function BehaviorAuthoringEditor() {
 
   const appendUiCheckpoint = () => {
     const recordingId = activeRecordingId.current;
-    const textReady = Boolean(checkpointText.trim() || hiddenCheckpointText.trim());
+    const textReady = Boolean(checkpointText.trim() || hiddenCheckpointText.trim() || checkpointPrefixText.trim());
     if (uiCheckpointType === "text" && !textReady) { setError("Cần nhập text mong đợi cho checkpoint."); return; }
     if (uiCheckpointType === "widget_state" && !wsWidget.trim()) { setError("Cần chọn loại widget cần đọc trạng thái."); return; }
     if (uiCheckpointType === "text_style" && !tsLocatorValue.trim()) { setError("Cần nhập dòng chữ cần đo kiểu chữ."); return; }
@@ -751,6 +760,17 @@ function BehaviorAuthoringEditor() {
       }
       // KIỂU CHỮ và CHỦ ĐỀ: cùng khuôn "đọc một giá trị rồi so", giá trị chuẩn do hệ
       // thống tự đo trên Golden lúc sinh testcase.
+      if (uiCheckpointType === "no_overflow") {
+        await api(`/behavior-authoring/recordings/${recordingId}/events`, {
+          method: "POST",
+          body: JSON.stringify({
+            kind: "no_overflow", stage: "ASSERT", action: "observe_ui", browser: "flutter_tester",
+            name: "Cả luồng không vỡ bố cục",
+          }),
+        });
+        await refresh(suite.id);
+        return;
+      }
       if (uiCheckpointType === "text_style" || uiCheckpointType === "theme_value") {
         const laChu = uiCheckpointType === "text_style";
         const bang = laChu ? MAT_KIEU_CHU : GIA_TRI_CHU_DE;
@@ -782,6 +802,7 @@ function BehaviorAuthoringEditor() {
       if (uiCheckpointType === "text") {
         event.expect = {
           visible_texts: checkpointText.split(",").map((item) => item.trim()).filter(Boolean),
+          visible_text_prefixes: checkpointPrefixText.split(",").map((item) => item.trim()).filter(Boolean),
           hidden_texts: hiddenCheckpointText.split(",").map((item) => item.trim()).filter(Boolean),
           no_exception: true,
         };
@@ -794,7 +815,7 @@ function BehaviorAuthoringEditor() {
         body: JSON.stringify(event),
       });
       await refresh(suite.id);
-      setCheckpointText(""); setHiddenCheckpointText("");
+      setCheckpointText(""); setHiddenCheckpointText(""); setCheckpointPrefixText("");
     });
   };
 
@@ -873,7 +894,7 @@ function BehaviorAuthoringEditor() {
           viewports: [
             // device_pixel_ratio để cố định 1: chấm bố cục đo bằng dp nên mật độ không
             // đổi điểm, chỉ làm ảnh bằng chứng nặng thêm.
-            { width: viewportWidth, height: viewportHeight, device_pixel_ratio: 1, name: "phone" },
+            { width: viewportWidth, height: viewportHeight, device_pixel_ratio: 1, name: "phone", brightness: cheDoToi ? "dark" : "light" },
           ],
         }),
       });
@@ -1269,10 +1290,10 @@ function BehaviorAuthoringEditor() {
               <div className="flex items-center justify-between"><div><p className="text-xs font-bold uppercase tracking-widest text-indigo-500">Bước 4</p><h2 className="text-xl font-bold">Record → Abstract</h2></div>{recording ? <span className={`flex items-center gap-2 text-sm font-bold ${recording.status === "ACTIVE" ? "text-rose-500" : "text-amber-500"}`}><span className={`h-2 w-2 rounded-full ${recording.status === "ACTIVE" ? "animate-pulse bg-rose-500" : "bg-amber-500"}`} /> {recording.status === "ACTIVE" ? "Đang ghi" : "Chờ sinh testcase"}</span> : <span className="text-sm text-slate-500">Chưa ghi</span>}</div>
               {editingScenarioId && recording && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-indigo-300 bg-indigo-50 px-4 py-3 text-sm dark:border-indigo-800 dark:bg-indigo-950/30"><div><p className="font-bold text-indigo-700 dark:text-indigo-300">Đang sửa scenario {scenarioCode}</p><p className="mt-1 text-xs text-slate-600 dark:text-slate-300">Toàn bộ bước cũ đã nằm trong danh sách bên dưới. Hãy thao tác thêm trên Golden App hoặc dùng các form thêm action/checkpoint; có thể xóa từng bước cũ.</p></div><button onClick={cancelActiveRecording} disabled={Boolean(busy)} className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-bold disabled:opacity-40 dark:border-slate-700">Hủy sửa</button></div>}
               <div className="mt-4 grid gap-3 sm:grid-cols-3"><input value={scenarioCode} disabled={Boolean(editingScenarioId)} onChange={(e) => setScenarioCode(e.target.value)} placeholder="Mã luồng (vd: ADD, EDIT, FILTER_ALL)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700" /><input value={scenarioName} onChange={(e) => setScenarioName(e.target.value)} placeholder="Tên luồng (vd: Thêm khoản chi)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><input type="number" min={0.1} step={0.5} value={scenarioWeight} onChange={(e) => setScenarioWeight(chanTrongSoHam(Number(e.target.value)))} aria-label="Trọng số scenario" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /></div>
-              <div className="mt-2 grid gap-2 sm:grid-cols-2"><label className="text-xs font-semibold text-slate-500">Rộng màn (dp)<input type="number" min={240} value={viewportWidth} onChange={(e) => setViewportWidth(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label><label className="text-xs font-semibold text-slate-500">Cao màn (dp)<input type="number" min={320} value={viewportHeight} onChange={(e) => setViewportHeight(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label></div>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2"><label className="text-xs font-semibold text-slate-500">Rộng màn (dp)<input type="number" min={240} value={viewportWidth} onChange={(e) => setViewportWidth(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label><label className="text-xs font-semibold text-slate-500">Cao màn (dp)<input type="number" min={320} value={viewportHeight} onChange={(e) => setViewportHeight(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label><label className="flex items-center gap-2 text-xs font-semibold text-slate-500 sm:col-span-2"><input type="checkbox" checked={cheDoToi} onChange={() => setCheDoToi((v) => !v)} /> Chấm hàm này ở chế độ tối <span className="font-normal">— engine đặt platformBrightness = dark trước khi boot; bài có darkTheme sẽ tự đổi, giá trị chuẩn màu/kiểu chữ đo ở chế độ tối. Khung Golden bên trên vẫn hiện sáng.</span></label></div>
               <p className="mt-2 text-xs font-semibold text-slate-600 dark:text-slate-300">Khung máy Android, tính bằng dp — cỡ mà Android Studio hiển thị cho máy ảo (Pixel: 412×915). Mọi phép chấm bố cục đều đo bằng dp nên không cần khai mật độ điểm ảnh.</p>
               {!recording ? <><button onClick={startRecording} disabled={!recordingInputsReady || Boolean(busy)} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-rose-600 px-4 py-2.5 font-bold text-white disabled:opacity-40"><Radio size={18} /> Bắt đầu record</button>{!recordingInputsReady && <p className="mt-2 text-xs text-amber-600">Cần đủ Database phát sinh viên, Database ẩn và Golden Solution.</p>}</> : <>
-                <div className="mt-5 rounded-xl border border-slate-200 p-4 dark:border-slate-700"><h3 className="font-bold">Thêm action</h3><div className="mt-3 grid gap-2 sm:grid-cols-2"><select value={action} onChange={(e) => setAction(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{ACTIONS.map((item) => <option key={item} value={item}>{item}</option>)}</select><select value={locator} onChange={(e) => setLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{item}</option>)}</select><input value={locatorValue} onChange={(e) => setLocatorValue(e.target.value)} placeholder="Giá trị nhận diện" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><input value={inputValue} onChange={(e) => setInputValue(e.target.value)} placeholder="Dữ liệu nhập (nếu có)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /></div><button onClick={() => appendAction()} className="mt-3 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-bold text-white"><Plus size={16} /> Thêm action</button></div>
+                <div className="mt-5 rounded-xl border border-slate-200 p-4 dark:border-slate-700"><h3 className="font-bold">Thêm action</h3><div className="mt-3 grid gap-2 sm:grid-cols-2"><select value={action} onChange={(e) => setAction(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{ACTIONS.map((item) => <option key={item} value={item}>{item}</option>)}</select><select value={locator} onChange={(e) => setLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{item}</option>)}</select><input value={locatorValue} onChange={(e) => setLocatorValue(e.target.value)} placeholder="Giá trị nhận diện" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><input value={inputValue} onChange={(e) => setInputValue(e.target.value)} placeholder="Dữ liệu nhập (nếu có)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /></div>{action === "drag" && <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-500"><span>Độ dời (dp):</span><label className="flex items-center gap-1">ngang <input type="number" step={10} value={keoX} onChange={(e) => setKeoX(Number(e.target.value))} className="w-20 rounded border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-600" /></label><label className="flex items-center gap-1">dọc <input type="number" step={10} value={keoY} onChange={(e) => setKeoY(Number(e.target.value))} className="w-20 rounded border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-600" /></label><span>— dương là sang phải / xuống dưới. Kéo dải trượt: chỉ cần ngang.</span></div>}<button onClick={() => appendAction()} className="mt-3 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-bold text-white"><Plus size={16} /> Thêm action</button></div>
                 <div className="mt-3 rounded-xl border border-slate-200 p-4 dark:border-slate-700">
                   <div className="flex items-center justify-between gap-3">
                     <div><h3 className="font-bold">Thêm checkpoint</h3><p className="text-xs text-slate-500">Mỗi checkpoint trở thành một đầu điểm độc lập. Điểm và ràng buộc chia ở bảng "Chia điểm" trên thẻ hàm, sau khi sinh testcase.</p></div>
@@ -1283,14 +1304,16 @@ function BehaviorAuthoringEditor() {
                   </div>
                   {checkpointMode === "ui" ? (
                     <div className="mt-3 space-y-2">
-                      <select value={uiCheckpointType} onChange={(e) => setUiCheckpointType(e.target.value as "text" | "widget_state" | "text_style" | "theme_value" | "no_exception")} className="w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">
+                      <select value={uiCheckpointType} onChange={(e) => setUiCheckpointType(e.target.value as "text" | "widget_state" | "text_style" | "theme_value" | "no_overflow" | "no_exception")} className="w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">
                         <option value="text">Nội dung text xuất hiện / không xuất hiện</option>
                         <option value="widget_state">Trạng thái thật bên trong widget</option>
                         <option value="text_style">Kiểu chữ của một dòng chữ</option>
                         <option value="theme_value">Bảng chủ đề của app (màu, phông, Material 3)</option>
+                        <option value="no_overflow">Không vỡ bố cục (RenderFlex overflow)</option>
                         <option value="no_exception">Luồng không phát sinh exception</option>
                       </select>
-                      {uiCheckpointType === "text" && <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
+                      {uiCheckpointType === "text" && <div className="grid gap-2 sm:grid-cols-[1fr_1fr_1fr_auto]">
+                        <div className="flex min-w-0 gap-1"><input value={checkpointPrefixText} onChange={(e) => setCheckpointPrefixText(e.target.value)} placeholder="Bắt đầu bằng… (tiền tố, cách nhau dấu phẩy)" title="Cho dòng mà phần đuôi đổi theo dữ liệu — ví dụ 'Tổng tháng:' khớp 'Tổng tháng: 608.000 ₫'" className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><button type="button" onClick={() => setCheckpointPrefixText((t) => t + "₫")} title="Chèn ký hiệu đồng (₫)" className="shrink-0 rounded-lg border border-slate-300 px-2.5 text-sm font-bold text-slate-600 hover:border-indigo-400 dark:border-slate-600 dark:text-slate-300">₫</button></div>
                         <div className="flex min-w-0 gap-1"><input value={checkpointText} onChange={(e) => setCheckpointText(e.target.value)} placeholder="Text phải xuất hiện, cách nhau dấu phẩy" className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><button type="button" onClick={() => setCheckpointText((t) => t + "₫")} title="Chèn ký hiệu đồng (₫) — bàn phím Việt không gõ được U+20AB, mà engine so text tuyệt đối" className="shrink-0 rounded-lg border border-slate-300 px-2.5 text-sm font-bold text-slate-600 hover:border-indigo-400 dark:border-slate-600 dark:text-slate-300">₫</button></div>
                         <div className="flex min-w-0 gap-1"><input value={hiddenCheckpointText} onChange={(e) => setHiddenCheckpointText(e.target.value)} placeholder="Text không được xuất hiện (tùy chọn)" className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><button type="button" onClick={() => setHiddenCheckpointText((t) => t + "₫")} title="Chèn ký hiệu đồng (₫)" className="shrink-0 rounded-lg border border-slate-300 px-2.5 text-sm font-bold text-slate-600 hover:border-indigo-400 dark:border-slate-600 dark:text-slate-300">₫</button></div>
                         <button onClick={appendUiCheckpoint} title="Lưu checkpoint UI" className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white"><Check size={16} /></button>
@@ -1323,6 +1346,10 @@ function BehaviorAuthoringEditor() {
                           {laThuocTinhMau(tvProperty) && <label className="flex items-center gap-1 whitespace-nowrap text-xs text-slate-500">sai số <input type="number" min={0.5} max={50} step={0.5} value={saiSoMau} onChange={(e) => setSaiSoMau(Number(e.target.value))} className="w-14 rounded border border-slate-300 bg-transparent px-1.5 py-1 dark:border-slate-600" />%</label>}
                           <button onClick={appendUiCheckpoint} title="Lưu tiêu chí chủ đề" className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white"><Check size={16} /></button>
                         </div>
+                      </div>}
+                      {uiCheckpointType === "no_overflow" && <div className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2 text-sm dark:bg-slate-800">
+                        <span>Đạt khi không màn nào trong luồng bị tràn (sọc vàng-đen). Từ nay tràn bố cục <b>không còn làm chết cả hàm</b> — nó chỉ trượt đúng tiêu chí này.</span>
+                        <button onClick={appendUiCheckpoint} title="Lưu tiêu chí không vỡ bố cục" className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white"><Check size={16} /></button>
                       </div>}
                       {uiCheckpointType === "no_exception" && <div className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2 text-sm dark:bg-slate-800">
                         <span>Checkpoint pass khi luồng chạy tới đây mà ứng dụng không ném exception.</span>
@@ -1456,6 +1483,8 @@ function BehaviorAuthoringEditor() {
                     const thay_ = Array.isArray(exp.visible_texts) ? exp.visible_texts.filter(Boolean) : [];
                     const an = Array.isArray(exp.hidden_texts) ? exp.hidden_texts.filter(Boolean) : [];
                     if (thay_.length) phan.push(`phải thấy: ${thay_.join(" · ")}`);
+                    const tienTo = Array.isArray(exp.visible_text_prefixes) ? exp.visible_text_prefixes.filter(Boolean) : [];
+                    if (tienTo.length) phan.push(`bắt đầu bằng: ${tienTo.join(" · ")}`);
                     if (an.length) phan.push(`không được thấy: ${an.join(" · ")}`);
                     if (c.table) phan.push(`bảng ${String(c.table)} · ${String(c.operation || "")}${c.count !== undefined ? ` · tổng row ${String(c.count)}` : ""}`);
                     if (c.row && Object.keys(c.row as JsonMap).length) phan.push(`row: ${JSON.stringify(c.row)}`);
