@@ -100,6 +100,11 @@ class BehaviorSuiteMaterializerTest {
                 "skills_matrix.json", "contract.json", "suite_manifest.json")) {
             assertTrue(Files.exists(output.resolve(file)), file + " phải được sinh");
         }
+        String generatedRunner = Files.readString(output.resolve("exam_test.dart"));
+        assertTrue(generatedRunner.contains("find.bySemanticsIdentifier(value)"),
+                "runner phải phát lại semanticId bằng semantics finder thật");
+        assertTrue(generatedRunner.contains("return count == 1;"),
+                "action mơ hồ không được ngầm lấy widget đầu tiên");
         JsonNode matrix = new ObjectMapper().readTree(output.resolve("skills_matrix.json").toFile());
         assertEquals(3, matrix.size());
         assertEquals(3.0, matrix.get("RAR_USER_ADD_USER_UI_VISIBLE_PHONE").get("weight").asDouble(), 0.0001);

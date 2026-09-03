@@ -1107,15 +1107,15 @@ function BehaviorAuthoringEditor() {
           .filter((it: JsonMap) => typeof it?.attribute === "string" && typeof it?.attributeValue === "string")
           .map((it: JsonMap) => ({
             attribute: String(it.attribute), value: String(it.attributeValue), role: String(it.role || ""),
-            // label/hint là thành phần ngữ nghĩa thật (nút, ô nhập) → tick sẵn. Chữ trần có
+            // semanticId/label/hint là thành phần ngữ nghĩa thật (nút, ô nhập) → tick sẵn. Chữ trần có
             // thể là DỮ LIỆU đang hiển thị chứ không phải khung màn hình — để giảng viên tự cân nhắc.
-            checked: it.attribute === "label" || it.attribute === "hint",
+            checked: it.attribute === "semanticId" || it.attribute === "label" || it.attribute === "hint",
           })));
         return;
       }
       if (event.data.type === "GOLDEN_RECORDER_WARNING") {
         const message = event.data.payload?.message;
-        if (typeof message === "string") setNotice(message);
+        if (typeof message === "string") setError(message);
         return;
       }
       if (!acceptsRecorderEvents.current || !activeRecordingId.current || event.data.type !== "GOLDEN_RECORDER_EVENT") return;

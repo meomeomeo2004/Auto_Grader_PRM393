@@ -1347,25 +1347,47 @@ Map<String, dynamic>? _moTaDuPhong(String nhan) {
   return null;
 }
 
+bool _locatorDungDuoc(
+  Finder finder,
+  Map<String, dynamic> target, {
+  required bool action,
+}) {
+  final count = finder.evaluate().length;
+  if (!action) return count > 0;
+  // Action khong duoc ngam lay .first khi locator khop nhieu widget. Chi cho phep
+  // nhieu ket qua neu bo cham chu dong khai index va index do ton tai.
+  if (target.containsKey('index')) {
+    final index = _int(target['index'], 0);
+    return index >= 0 && index < count;
+  }
+  return count == 1;
+}
+
 Finder _finder(Map<String, dynamic> target, {bool duPhong = false}) {
-  for (final keyName in const [
-    'semanticId',
-    'semantic_id',
-    'valueKey',
-    'value_key',
-    'key',
-  ]) {
+  // Semantics.identifier la dinh danh on dinh cua semantics tree va duoc Flutter Web
+  // phoi thanh flt-semantics-identifier. Thu semantics finder truoc; fallback ValueKey
+  // giu tuong thich voi cac bo cham cu tung dung semanticId lam key cua widget.
+  for (final keyName in const ['semanticId', 'semantic_id']) {
+    final value = _text(target, keyName);
+    if (value.isNotEmpty) {
+      final semantics = find.bySemanticsIdentifier(value);
+      if (_locatorDungDuoc(semantics, target, action: duPhong)) return semantics;
+      final finder = find.byKey(ValueKey<String>(value));
+      if (_locatorDungDuoc(finder, target, action: duPhong)) return finder;
+    }
+  }
+  for (final keyName in const ['valueKey', 'value_key', 'key']) {
     final value = _text(target, keyName);
     if (value.isNotEmpty) {
       final finder = find.byKey(ValueKey<String>(value));
-      if (finder.evaluate().isNotEmpty) return finder;
+      if (_locatorDungDuoc(finder, target, action: duPhong)) return finder;
     }
   }
   final label = _text(target, 'label');
   final hint = _text(target, 'hint');
   if (label.isNotEmpty) {
     final semantics = find.bySemanticsLabel(label);
-    if (semantics.evaluate().isNotEmpty) return semantics;
+    if (_locatorDungDuoc(semantics, target, action: duPhong)) return semantics;
   }
   // NHÃN HAI DÒNG. Dòng danh sách (ListTile) gộp title + subtitle thành một nhãn
   // ngăn bởi xuống dòng; recorder đời cũ tách nhầm thành label + hint (phép tách đó
@@ -1373,7 +1395,7 @@ Finder _finder(Map<String, dynamic> target, {bool duPhong = false}) {
   // dòng danh sách không bao giờ tìm thấy đích, cả kịch bản EDIT chết theo.
   if (label.isNotEmpty && hint.isNotEmpty) {
     final gop = find.bySemanticsLabel('$label\n$hint');
-    if (gop.evaluate().isNotEmpty) return gop;
+    if (_locatorDungDuoc(gop, target, action: duPhong)) return gop;
   }
   if (label.isNotEmpty || hint.isNotEmpty) {
     final finder = find.byWidgetPredicate((widget) {
@@ -1393,19 +1415,23 @@ Finder _finder(Map<String, dynamic> target, {bool duPhong = false}) {
               decoration.hintText == hint ||
               decoration.labelText == hint);
     });
-    if (finder.evaluate().isNotEmpty) return finder;
+    if (_locatorDungDuoc(finder, target, action: duPhong)) return finder;
   }
   final text = _text(target, 'text');
-  if (text.isNotEmpty) return find.text(text);
+  if (text.isNotEmpty) {
+    final finder = find.text(text);
+    if (_locatorDungDuoc(finder, target, action: duPhong)) return finder;
+  }
   // TIỀN TỐ VĂN BẢN. Hợp đồng nhãn của đề khai `text_prefix` cho những dòng mà phần
   // đuôi thay đổi theo dữ liệu — ví dụ "Tổng tháng: 608.000 ₫". find.text so khớp
   // TUYỆT ĐỐI nên không dùng được ở đây; thiếu nhánh này thì đúng những mục hợp đồng
   // ấy không có cách nào kiểm.
   final textPrefix = _text(target, 'text_prefix');
   if (textPrefix.isNotEmpty) {
-    return find.byWidgetPredicate(
+    final finder = find.byWidgetPredicate(
       (widget) => widget is Text && (widget.data ?? '').startsWith(textPrefix),
     );
+    if (_locatorDungDuoc(finder, target, action: duPhong)) return finder;
   }
   // CÓ khóa nhận diện nhưng CHƯA khớp widget nào ở nhịp poll này (ví dụ label khai
   // đúng mà màn hình chưa mở, hoặc app dùng hint thay label). Đây là "không thấy",
@@ -1429,6 +1455,8 @@ Finder _finder(Map<String, dynamic> target, {bool duPhong = false}) {
     'key',
     'label',
     'hint',
+    'text',
+    'text_prefix',
   ];
   if (khoaNhanDien.any((k) => _text(target, k).isNotEmpty)) {
     return find.byWidgetPredicate((_) => false);

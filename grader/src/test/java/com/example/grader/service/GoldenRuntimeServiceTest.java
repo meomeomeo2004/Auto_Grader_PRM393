@@ -81,6 +81,11 @@ class GoldenRuntimeServiceTest {
         assertThat(html).contains("compositionend");
         assertThat(html).doesNotContain("setTimeout(chotEnterText, 700)");
         assertThat(html).contains("aria-label");
+        assertThat(html).contains("flt-semantics-identifier");
+        assertThat(html).contains("INTERACTIVE_ROLES");
+        assertThat(html).contains("CONTAINER_ROLES");
+        assertThat(html).contains("Khong ghi thao tac de tranh chon nham element cha");
+        assertThat(html).contains("uniqueLocator('semanticId', semanticId, elements)");
         assertThat(html).doesNotContain("document.elementFromPoint");
     }
 
