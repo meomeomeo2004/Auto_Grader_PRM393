@@ -235,8 +235,6 @@ function BehaviorAuthoringEditor() {
   const [keoX, setKeoX] = useState(80);
   const [keoY, setKeoY] = useState(0);
   const [checkpointText, setCheckpointText] = useState("");
-  // Tiền tố: cho dòng mà phần đuôi đổi theo dữ liệu ("Tổng tháng: 608.000 ₫").
-  const [checkpointPrefixText, setCheckpointPrefixText] = useState("");
   const [thuGon, setThuGon] = useState(false);
   const [uiGroupWeight, setUiGroupWeight] = useState(0);
   const [viTriWeight, setViTriWeight] = useState(0);
@@ -730,7 +728,7 @@ function BehaviorAuthoringEditor() {
 
   const appendUiCheckpoint = () => {
     const recordingId = activeRecordingId.current;
-    const textReady = Boolean(checkpointText.trim() || hiddenCheckpointText.trim() || checkpointPrefixText.trim());
+    const textReady = Boolean(checkpointText.trim() || hiddenCheckpointText.trim());
     if (uiCheckpointType === "text" && !textReady) { setError("Cần nhập text mong đợi cho checkpoint."); return; }
     if (uiCheckpointType === "widget_state" && !wsWidget.trim()) { setError("Cần chọn loại widget cần đọc trạng thái."); return; }
     if (uiCheckpointType === "text_style" && !tsLocatorValue.trim()) { setError("Cần nhập dòng chữ cần đo kiểu chữ."); return; }
@@ -802,7 +800,6 @@ function BehaviorAuthoringEditor() {
       if (uiCheckpointType === "text") {
         event.expect = {
           visible_texts: checkpointText.split(",").map((item) => item.trim()).filter(Boolean),
-          visible_text_prefixes: checkpointPrefixText.split(",").map((item) => item.trim()).filter(Boolean),
           hidden_texts: hiddenCheckpointText.split(",").map((item) => item.trim()).filter(Boolean),
           no_exception: true,
         };
@@ -815,7 +812,7 @@ function BehaviorAuthoringEditor() {
         body: JSON.stringify(event),
       });
       await refresh(suite.id);
-      setCheckpointText(""); setHiddenCheckpointText(""); setCheckpointPrefixText("");
+      setCheckpointText(""); setHiddenCheckpointText("");
     });
   };
 
@@ -1312,8 +1309,7 @@ function BehaviorAuthoringEditor() {
                         <option value="no_overflow">Không vỡ bố cục (RenderFlex overflow)</option>
                         <option value="no_exception">Luồng không phát sinh exception</option>
                       </select>
-                      {uiCheckpointType === "text" && <div className="grid gap-2 sm:grid-cols-[1fr_1fr_1fr_auto]">
-                        <div className="flex min-w-0 gap-1"><input value={checkpointPrefixText} onChange={(e) => setCheckpointPrefixText(e.target.value)} placeholder="Bắt đầu bằng… (tiền tố, cách nhau dấu phẩy)" title="Cho dòng mà phần đuôi đổi theo dữ liệu — ví dụ 'Tổng tháng:' khớp 'Tổng tháng: 608.000 ₫'" className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><button type="button" onClick={() => setCheckpointPrefixText((t) => t + "₫")} title="Chèn ký hiệu đồng (₫)" className="shrink-0 rounded-lg border border-slate-300 px-2.5 text-sm font-bold text-slate-600 hover:border-indigo-400 dark:border-slate-600 dark:text-slate-300">₫</button></div>
+                      {uiCheckpointType === "text" && <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
                         <div className="flex min-w-0 gap-1"><input value={checkpointText} onChange={(e) => setCheckpointText(e.target.value)} placeholder="Text phải xuất hiện, cách nhau dấu phẩy" className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><button type="button" onClick={() => setCheckpointText((t) => t + "₫")} title="Chèn ký hiệu đồng (₫) — bàn phím Việt không gõ được U+20AB, mà engine so text tuyệt đối" className="shrink-0 rounded-lg border border-slate-300 px-2.5 text-sm font-bold text-slate-600 hover:border-indigo-400 dark:border-slate-600 dark:text-slate-300">₫</button></div>
                         <div className="flex min-w-0 gap-1"><input value={hiddenCheckpointText} onChange={(e) => setHiddenCheckpointText(e.target.value)} placeholder="Text không được xuất hiện (tùy chọn)" className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><button type="button" onClick={() => setHiddenCheckpointText((t) => t + "₫")} title="Chèn ký hiệu đồng (₫)" className="shrink-0 rounded-lg border border-slate-300 px-2.5 text-sm font-bold text-slate-600 hover:border-indigo-400 dark:border-slate-600 dark:text-slate-300">₫</button></div>
                         <button onClick={appendUiCheckpoint} title="Lưu checkpoint UI" className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white"><Check size={16} /></button>

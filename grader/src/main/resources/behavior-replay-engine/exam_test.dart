@@ -511,9 +511,17 @@ Future<void> _assertCheckpoint(
     );
     soPhepKiem++;
   }
-  // TIEN TO: dong ma phan duoi doi theo du lieu ("Tong thang: 608.000 d"). find.text so
-  // tuyet doi nen khong dung duoc. Engine biet text_prefix tu lau qua target, nhung
-  // khung "Noi dung text" chua tung co cho khai — no cu tra o day.
+  // TIEN TO cho noi dung: dong ma phan duoi doi theo du lieu ("Tong thang: 608.000 d").
+  //
+  // MAN SOAN DE KHONG PHOI RA cho nay, co y: du lieu cham chay tren hidden.db co dinh
+  // nen moi con so deu tat dinh, go dung chuoi day du la xong — them mot o nua chi tao
+  // duong thu tu de noi "chu X co tren man hinh". Giu nhanh nay trong engine vi no re
+  // va vi de nao that su can (gia tri nguoi ra de khong doan truoc duoc) thi chi phai
+  // mo lai form, khong phai sua ca ba tang.
+  //
+  // Con `text_prefix` trong TARGET thi khac han va VAN duoc phoi ra: no de TRO VAO mot
+  // widget cho tieu chi khac do (co chu, mau, vi tri cua dong tong), cho ma khop tuyet
+  // doi khong the dung vi noi dung doi sau moi lan Them/Sua/Xoa.
   for (final raw in _asList(expectValue['visible_text_prefixes'])) {
     final tienTo = (raw?.toString() ?? '');
     if (tienTo.isEmpty) continue;

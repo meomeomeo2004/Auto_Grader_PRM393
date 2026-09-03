@@ -1146,14 +1146,19 @@ public class BehaviorAuthoringService {
                 throw new IllegalArgumentException("Loại semantic node không được hỗ trợ: " + role);
             }
         }
+        // TIỀN TỐ cũng là một nội dung hợp lệ. Thiếu hai dòng này thì tiêu chí chỉ khai
+        // tiền tố bị chặn ngay tại cửa — engine hiểu, form gửi đúng, mà backend từ chối.
         if (map(event.get("target")).isEmpty()
                 && objectList(expect.get("visible_texts")).isEmpty()
+                && objectList(expect.get("visible_text_prefixes")).isEmpty()
                 && objectList(expect.get("hidden_texts")).isEmpty()
+                && objectList(expect.get("hidden_text_prefixes")).isEmpty()
                 && semanticNodes.isEmpty()
                 && event.get("text") == null
                 && !bool(event.get("no_exception"), false)) {
             throw new IllegalArgumentException(
-                    "Checkpoint UI phải có target, semantic_nodes, visible_texts, hidden_texts, text hoặc no_exception");
+                    "Checkpoint UI phải có target, semantic_nodes, visible_texts, hidden_texts, "
+                    + "tiền tố (bắt đầu bằng…), text hoặc no_exception");
         }
         event.putIfAbsent("checkpoint", true);
         event.putIfAbsent("scope", "ui");
