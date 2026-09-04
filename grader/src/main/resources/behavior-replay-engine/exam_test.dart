@@ -363,11 +363,23 @@ Future<void> _assertCheckpoint(
     await tester.runAsync(() => _assertDatabase(checkpoint, databaseContract));
     for (final raw in _asList(checkpoint['ui_values'])) {
       final value = (raw?.toString() ?? '');
+      if (value.isEmpty) continue;
+      // KHOP CON, khong khop tuyet doi: mot dong danh sach thuong gop nhieu truong
+      // vao MOT widget Text ("29.300 d · KHAC · 2026-09-09"), nen find.text('KHAC')
+      // khong bao gio thay du chu do hien ro tren man hinh. So theo cach VE thi tieu
+      // chi moi kiem duoc dung thu no dinh kiem.
       await _waitUntil(
         tester,
-        () => find.text(value).evaluate().isNotEmpty,
+        () => find
+            .byWidgetPredicate(
+              (w) =>
+                  w is Text &&
+                  _chuNhinThay(w.data ?? '').contains(_chuNhinThay(value)),
+            )
+            .evaluate()
+            .isNotEmpty,
         timeout,
-        'SQLite co row dung nhung UI khong hien thi cung gia tri "$value".',
+        'SQLite co row dung nhung khong dong chu nao tren UI chua gia tri "$value".',
       );
     }
     return;
@@ -505,7 +517,7 @@ Future<void> _assertCheckpoint(
     final value = (raw?.toString() ?? '');
     await _waitUntil(
       tester,
-      () => find.text(value).evaluate().isNotEmpty,
+      () => _coChu(value),
       timeout,
       'Không thấy nội dung "$value" trên UI.',
     );
@@ -529,7 +541,7 @@ Future<void> _assertCheckpoint(
       tester,
       () => find
           .byWidgetPredicate(
-            (w) => w is Text && (w.data ?? '').startsWith(tienTo),
+            (w) => w is Text && _chuNhinThay(w.data ?? '').startsWith(_chuNhinThay(tienTo)),
           )
           .evaluate()
           .isNotEmpty,
@@ -543,7 +555,7 @@ Future<void> _assertCheckpoint(
     if (tienTo.isEmpty) continue;
     expect(
       find.byWidgetPredicate(
-        (w) => w is Text && (w.data ?? '').startsWith(tienTo),
+        (w) => w is Text && _chuNhinThay(w.data ?? '').startsWith(_chuNhinThay(tienTo)),
       ),
       findsNothing,
       reason: 'Vẫn còn dòng chữ bắt đầu bằng "$tienTo" trên UI.',
@@ -553,8 +565,8 @@ Future<void> _assertCheckpoint(
   for (final raw in _asList(expectValue['hidden_texts'])) {
     final value = (raw?.toString() ?? '');
     expect(
-      find.text(value),
-      findsNothing,
+      _coChu(value),
+      isFalse,
       reason: 'Nội dung "$value" vẫn còn trên UI.',
     );
     soPhepKiem++;
@@ -563,7 +575,7 @@ Future<void> _assertCheckpoint(
   final expectedText = checkpoint['text'] ?? expectValue['text'];
   if (expectedText != null) {
     final value = (expectedText?.toString() ?? '');
-    expect(find.text(value), findsAtLeastNWidgets(1));
+    expect(_coChu(value), isTrue, reason: 'Không thấy nội dung "$value" trên UI.');
     soPhepKiem++;
   }
   final noException = checkpoint['no_exception'] ?? expectValue['no_exception'];
@@ -585,7 +597,14 @@ Future<void> _assertCheckpoint(
 
 /// Mô tả target bằng tiếng Việt cho người đọc log phúc khảo, thay vì in Map thô.
 String _moTaTarget(Map<String, dynamic> target) {
-  for (final khoa in const <String>['label', 'hint', 'text', 'tooltip']) {
+  for (final khoa in const <String>[
+    'semantic_id',
+    'semanticId',
+    'label',
+    'hint',
+    'text',
+    'tooltip',
+  ]) {
     final v = _text(target, khoa);
     if (v.isNotEmpty) return '"$v"';
   }
@@ -1231,7 +1250,9 @@ Future<void> _luuBoCucChuan(
       if (_anhCuoi != null) 'color': _mauChinhTrongVung(khung, tiLe),
     };
   }
-  if (thanhPhan.isEmpty && _moTaNhanDaThu.isEmpty) return;
+  if (thanhPhan.isEmpty && _moTaNhanDaThu.isEmpty && _dinhDanhDaThu.isEmpty) {
+    return;
+  }
   final tep = File(
     p.join(File(outputPath).parent.path, 'captured-layout.json'),
   );
@@ -1251,11 +1272,15 @@ Future<void> _luuBoCucChuan(
       },
       'components': thanhPhan,
       'targets': _moTaNhanDaThu,
+      // Định danh theo khoá cũ của bước (Gói 1 kế hoạch Định danh Semantics); backend
+      // nướng vào target bước, giữ nhãn cạnh bên làm đường lui.
+      'identifiers': _dinhDanhDaThu,
     }),
   );
   stdout.writeln(
     'Đã đo bố cục chuẩn: ${thanhPhan.length} thành phần, '
-    '${_moTaNhanDaThu.length} nhãn có đường dự phòng.',
+    '${_moTaNhanDaThu.length} nhãn có đường dự phòng, '
+    '${_dinhDanhDaThu.length} bước có định danh.',
   );
 }
 
@@ -1396,9 +1421,88 @@ Future<Finder> _waitForTarget(
       final moTa = _moTaDuPhong(nhan);
       if (moTa != null) _moTaNhanDaThu[nhan] = moTa;
     }
+    // Định danh của đúng widget vừa tìm được theo nhãn/chữ — để backend nướng vào bước,
+    // nhờ đó bộ đề cũ nhận định danh sau một lần "Sinh lại testcase", không ghi hình lại.
+    _thuDinhDanh(target, finder);
   }
   final index = _int(target['index'], 0);
   return index <= 0 ? finder.first : finder.at(index);
+}
+
+/// Định danh thu được trong lúc chạy Golden: mỗi phần tử một cặp {khoá cũ: giá trị,
+/// semantic_id: ...}, khoá cũ là label/text/hint/tooltip/text_prefix của bước.
+final List<Map<String, String>> _dinhDanhDaThu = <Map<String, String>>[];
+final Set<String> _dinhDanhDaGhi = <String>{};
+
+void _thuDinhDanh(Map<String, dynamic> target, Finder finder) {
+  // Bước đã có định danh (gõ tay ở đường 2, hoặc plan đã nâng cấp) thì không cần thu.
+  if (_text(target, 'semantic_id').isNotEmpty ||
+      _text(target, 'semanticId').isNotEmpty) {
+    return;
+  }
+  String khoa = '';
+  String giaTri = '';
+  for (final k in const ['label', 'text', 'hint', 'tooltip', 'text_prefix']) {
+    final v = _text(target, k);
+    if (v.isNotEmpty) {
+      khoa = k;
+      giaTri = v;
+      break;
+    }
+  }
+  if (khoa.isEmpty) return;
+  final dau = '$khoa=$giaTri';
+  if (_dinhDanhDaGhi.contains(dau)) return;
+  final id = _docDinhDanhTaiDich(finder);
+  if (id.isEmpty) return;
+  _dinhDanhDaGhi.add(dau);
+  _dinhDanhDaThu.add(<String, String>{khoa: giaTri, 'semantic_id': id});
+}
+
+/// Định danh của widget mà finder trỏ tới — ba nấc rồi leo cha, đo ở sa bàn 4/9/2026:
+///  - chính nó: render object của phần tử sở hữu nút (dòng ListTile: định danh đã gộp
+///    vào nút dòng; Card bọc Semantics: nút cha riêng nhãn rỗng);
+///  - con cháu gần nhất có nút: wrapper Semantics không tự sở hữu nút khi đã gộp vào con;
+///  - tổ tiên gần nhất có nút: Text "Lưu" trong nút bấm không có nút riêng, nút của nó
+///    là nút bấm bao ngoài.
+/// Sau đó chỉ leo lên cha CHƯA CÓ NHÃN (wrapper trần) tối đa vài bậc: nút Xoá nằm trong
+/// dòng, cha nó có nhãn dòng, dừng ngay — kẻo gán nhầm định danh dòng cho nút Xoá.
+String _docDinhDanhTaiDich(Finder finder) {
+  final phanTu = finder.evaluate();
+  if (phanTu.isEmpty) return '';
+  final Element goc = phanTu.first;
+  SemanticsNode? nut = goc.renderObject?.debugSemantics;
+  if (nut == null) {
+    final con = find
+        .descendant(
+          of: finder.first,
+          matching: find.byElementPredicate(
+            (e) => e is RenderObjectElement && e.renderObject.debugSemantics != null,
+          ),
+        )
+        .evaluate();
+    if (con.isNotEmpty) nut = con.first.renderObject?.debugSemantics;
+  }
+  if (nut == null) {
+    goc.visitAncestorElements((Element a) {
+      final n = a.renderObject?.debugSemantics;
+      if (n != null) {
+        nut = n;
+        return false;
+      }
+      return true;
+    });
+  }
+  var n = nut;
+  var buoc = 0;
+  while (n != null) {
+    if (n.identifier.isNotEmpty) return n.identifier;
+    final cha = n.parent;
+    if (cha == null || cha.label.isNotEmpty || buoc >= 4) break;
+    n = cha;
+    buoc++;
+  }
+  return '';
 }
 
 /// Mô tả dự phòng thu được trong lúc chạy Golden, gom theo nhãn.
@@ -1920,7 +2024,8 @@ Finder? _timDuPhong(List<dynamic> danhSach) {
       f = f == null ? icon : find.ancestor(of: icon, matching: f);
     }
     if (chuCon.isNotEmpty) {
-      final chu = find.text(chuCon);
+      var chu = find.text(chuCon);
+      if (chu.evaluate().isEmpty) chu = _timChuGan(chuCon);
       f = f == null ? chu : find.ancestor(of: chu, matching: f);
     }
     if (f == null) continue;
@@ -1972,14 +2077,96 @@ Map<String, dynamic>? _moTaDuPhong(String nhan) {
   return null;
 }
 
+/// Chữ NHÌN THẤY của một chuỗi: gộp mọi khoảng trắng liên tiếp (kể cả xuống dòng,
+/// khoảng trắng Unicode) thành một dấu cách, cắt hai đầu.
+///
+/// Vì sao: nhãn ngữ nghĩa của một dòng danh sách là các nhãn con NỐI BẰNG XUỐNG DÒNG,
+/// nên số dấu xuống dòng phụ thuộc cây widget chứ không phụ thuộc chữ hiện ra. Golden
+/// viết subtitle bằng MỘT Text → "tiêu đề⏎phụ đề"; bài HE230112 viết subtitle bằng Row
+/// hai Text → "tiêu đề⏎số tiền⏎ · loại · ngày". Màn hình vẽ y hệt nhau mà so tuyệt đối
+/// thì trượt 17/112 tiêu chí — đo 4/9/2026, mất 2.9 điểm trên một bài đúng hoàn toàn.
+/// Phép so với giao diện phải khớp thứ người dùng NHÌN THẤY, không khớp cách lồng widget.
+String _chuNhinThay(String s) => s.replaceAll(RegExp(r'\s+'), ' ').trim();
+
+/// Phần tử mà NHÃN nút ngữ nghĩa của nó, sau chuẩn hoá khoảng trắng, khớp chuỗi —
+/// dùng khi bySemanticsLabel (khớp tuyệt đối) không thấy.
+///
+/// Chỉ so nhãn CỦA CHÍNH nút, không cộng nhãn con. Bản đầu (4/9/2026) đọc gộp cả cây
+/// con, đo trên HE230112 vẫn 17 trượt: nút Xoá cuối ListTile là nút con riêng, cộng
+/// nhãn nó vào là lệch khỏi nhãn Golden. Nhãn thu ở Golden và nhãn so ở bài làm phải
+/// là CÙNG một khái niệm — nhãn của một nút.
+///
+/// Hai mức khớp, đo ở sa bàn 4/9/2026 (dòng nào cũng có onTap + nút Xoá như app thật):
+///  - BẰNG: ListTile 1 Text, ListTile + Row 2 Text (HE230112), Card + IconButton trần,
+///    khoảng trắng thừa, bọc Semantics(container) → mỗi kiểu 1 đích, chạm tới onTap.
+///  - Nhãn NHIỀU DÒNG (cụm dòng danh sách) được đứng NGUYÊN VẸN bên trong nhãn nút:
+///    Card/InkWell/GestureDetector hút luôn nhãn nút Xoá bọc Semantics vào dòng, ra
+///    "title⏎sub⏎Xóa khoản chi" — ListTile thì tách nút đó thành con riêng. Cùng một
+///    bài đúng, hai cách vẽ, không được lệch điểm.
+///  - Nhãn MỘT DÒNG (nút, ô nhập) chỉ được BẰNG, không "chứa": "Xóa khoản chi" nằm
+///    trong nhãn dòng mà chạm vào dòng là mở form sửa, không phải xoá.
+/// Đổi thứ tự trường hay dòng khác số tiền → 0 đích ở mọi mức. Chỉ xét
+/// RenderObjectElement như bySemanticsLabel: nhiều Element cùng trỏ một render object.
+Finder _timDocNhu(String chuoi) {
+  final dich = _chuNhinThay(chuoi);
+  if (dich.isEmpty) return find.byWidgetPredicate((_) => false);
+  final laCum = chuoi.trim().contains('\n');
+  return find.byElementPredicate((Element e) {
+    if (e is! RenderObjectElement) return false;
+    final SemanticsNode? nut = e.renderObject.debugSemantics;
+    if (nut == null) return false;
+    final nhan = _chuNhinThay(nut.label);
+    if (nhan == dich) return true;
+    return laCum && ' $nhan '.contains(' $dich ');
+  }, description: 'nhãn đọc như "$dich"');
+}
+
+/// Widget `Semantics` khai đúng nhãn (đã chuẩn hoá) — đường tìm KHÔNG phụ thuộc Flutter
+/// gộp nhãn vào nút cha thế nào (xem chú thích "NHÃN BỊ HÚT VÀO NÚT CHA" trong _finder).
+Finder _timWidgetNhan(String chuoi) {
+  final dich = _chuNhinThay(chuoi);
+  return find.byWidgetPredicate(
+    (w) => w is Semantics && _chuNhinThay(w.properties.label ?? '') == dich,
+  );
+}
+
+/// Widget Text có nội dung bằng chuỗi SAU KHI chuẩn hoá khoảng trắng — nấc giữa
+/// find.text (tuyệt đối) và _timDocNhu (ngữ nghĩa).
+Finder _timChuGan(String chuoi) {
+  final dich = _chuNhinThay(chuoi);
+  return find.byWidgetPredicate(
+    (w) =>
+        w is Text &&
+        _chuNhinThay(w.data ?? w.textSpan?.toPlainText() ?? '') == dich,
+  );
+}
+
+/// "Chữ X có trên màn hình không?" — ba nấc từ rẻ tới đắt, nấc nào thấy thì dừng:
+/// Text khớp tuyệt đối (đường cũ, giữ nguyên), Text khớp sau chuẩn hoá, rồi nút ngữ
+/// nghĩa đọc ra đúng X (dòng danh sách bị tách/gộp Text khác Golden).
+bool _coChu(String value) {
+  if (find.text(value).evaluate().isNotEmpty) return true;
+  final dich = _chuNhinThay(value);
+  if (dich.isEmpty) return false;
+  if (_timChuGan(dich).evaluate().isNotEmpty) return true;
+  return _timDocNhu(dich).evaluate().isNotEmpty;
+}
+
 Finder _finder(Map<String, dynamic> target, {bool duPhong = false}) {
-  for (final keyName in const [
-    'semanticId',
-    'semantic_id',
-    'valueKey',
-    'value_key',
-    'key',
-  ]) {
+  // ĐỊNH DANH — Semantics(identifier:) do sinh viên khai theo hợp đồng đề, không phụ
+  // thuộc cách vẽ. Trước đây năm khoá dưới đều quy về find.byKey, tức "semantic_id"
+  // bị hiểu nhầm là ValueKey; mà ValueKey không bao giờ ra tới DOM nên recorder không
+  // ghi được, còn identifier thì ra tới DOM (flt-semantics-identifier) — đo 4/9/2026.
+  // Không thấy định danh thì rơi xuống nhãn/chữ như cũ: quên định danh không mất thêm
+  // điểm nào so với trước, nó là bảo hiểm cho bài vẽ khác Golden, không phải bẫy mới.
+  for (final keyName in const ['semanticId', 'semantic_id']) {
+    final value = _text(target, keyName);
+    if (value.isNotEmpty) {
+      final finder = find.bySemanticsIdentifier(value);
+      if (finder.evaluate().isNotEmpty) return finder;
+    }
+  }
+  for (final keyName in const ['valueKey', 'value_key', 'key']) {
     final value = _text(target, keyName);
     if (value.isNotEmpty) {
       final finder = find.byKey(ValueKey<String>(value));
@@ -1991,6 +2178,9 @@ Finder _finder(Map<String, dynamic> target, {bool duPhong = false}) {
   if (label.isNotEmpty) {
     final semantics = find.bySemanticsLabel(label);
     if (semantics.evaluate().isNotEmpty) return semantics;
+    // Không khớp tuyệt đối thì khớp theo CHỮ NHÌN THẤY (xem _timDocNhu).
+    final docNhu = _timDocNhu(label);
+    if (docNhu.evaluate().isNotEmpty) return docNhu;
   }
   // NHÃN HAI DÒNG. Dòng danh sách (ListTile) gộp title + subtitle thành một nhãn
   // ngăn bởi xuống dòng; recorder đời cũ tách nhầm thành label + hint (phép tách đó
@@ -1999,6 +2189,19 @@ Finder _finder(Map<String, dynamic> target, {bool duPhong = false}) {
   if (label.isNotEmpty && hint.isNotEmpty) {
     final gop = find.bySemanticsLabel('$label\n$hint');
     if (gop.evaluate().isNotEmpty) return gop;
+    final gopDocNhu = _timDocNhu('$label\n$hint');
+    if (gopDocNhu.evaluate().isNotEmpty) return gopDocNhu;
+  }
+  // NHÃN BỊ HÚT VÀO NÚT CHA. Card/InkWell/GestureDetector hút nhãn của nút Xoá bọc
+  // Semantics vào nhãn dòng ("title⏎sub⏎Xóa khoản chi"), còn chính nút Xoá thành nút
+  // con KHÔNG nhãn — không còn nút ngữ nghĩa nào mang riêng "Xóa khoản chi". ListTile
+  // thì giữ nút đó tách riêng nên hai đường trên đủ. Tìm theo WIDGET Semantics khai nhãn
+  // thì không phụ thuộc Flutter gộp thế nào; chạm vào tâm nó là chạm nút bên trong.
+  // Đo 4/9/2026: ở Card lẫn GestureDetector chạm tới đúng onPressed của nút Xoá, không
+  // mở form sửa. Thiếu nhánh này thì kịch bản DELETE chết ở mọi bài không dùng ListTile.
+  if (label.isNotEmpty) {
+    final widgetNhan = _timWidgetNhan(label);
+    if (widgetNhan.evaluate().isNotEmpty) return widgetNhan;
   }
   // TOOLTIP KHAI THẲNG. Flutter KHÔNG biến tooltip thành nhãn ngữ nghĩa: đo ở sa bàn
   // thì bySemanticsLabel('Thêm mới') ra 0 trong khi byTooltip('Thêm mới') ra 1. Thiếu
@@ -2019,13 +2222,15 @@ Finder _finder(Map<String, dynamic> target, {bool duPhong = false}) {
       // aria-label nên recorder ghi là `label`, còn flutter_test thì ô ĐÃ CÓ CHỮ không
       // hiện hint trong semantics nữa — chỉ decoration còn giữ. Thiếu vế này thì mọi
       // enter_text trên màn Sửa (ô có sẵn nội dung) đều không tìm thấy đích.
+      // So sau chuẩn hoá khoảng trắng: nhãn ô nhập thừa một dấu cách cuối là thứ
+      // người chấm không nhìn thấy, không được thành lý do trượt.
+      final nhan = _chuNhinThay(label);
+      final goiY = _chuNhinThay(hint);
+      final labelText = _chuNhinThay(decoration?.labelText ?? '');
+      final hintText = _chuNhinThay(decoration?.hintText ?? '');
       return decoration != null &&
-          (label.isEmpty ||
-              decoration.labelText == label ||
-              decoration.hintText == label) &&
-          (hint.isEmpty ||
-              decoration.hintText == hint ||
-              decoration.labelText == hint);
+          (label.isEmpty || labelText == nhan || hintText == nhan) &&
+          (hint.isEmpty || hintText == goiY || labelText == goiY);
     });
     if (finder.evaluate().isNotEmpty) return finder;
   }
@@ -2038,15 +2243,24 @@ Finder _finder(Map<String, dynamic> target, {bool duPhong = false}) {
     if (finder.evaluate().isNotEmpty) return finder;
   }
   final text = _text(target, 'text');
-  if (text.isNotEmpty) return find.text(text);
+  if (text.isNotEmpty) {
+    final chinhXac = find.text(text);
+    if (chinhXac.evaluate().isNotEmpty) return chinhXac;
+    final gan = _timChuGan(text);
+    if (gan.evaluate().isNotEmpty) return gan;
+    // Có thể rỗng — _waitUntil gọi lại _finder mỗi nhịp nên vẫn poll được.
+    return _timDocNhu(text);
+  }
   // TIỀN TỐ VĂN BẢN. Hợp đồng nhãn của đề khai `text_prefix` cho những dòng mà phần
   // đuôi thay đổi theo dữ liệu — ví dụ "Tổng tháng: 608.000 ₫". find.text so khớp
   // TUYỆT ĐỐI nên không dùng được ở đây; thiếu nhánh này thì đúng những mục hợp đồng
   // ấy không có cách nào kiểm.
   final textPrefix = _text(target, 'text_prefix');
   if (textPrefix.isNotEmpty) {
+    final tienTo = _chuNhinThay(textPrefix);
     return find.byWidgetPredicate(
-      (widget) => widget is Text && (widget.data ?? '').startsWith(textPrefix),
+      (widget) =>
+          widget is Text && _chuNhinThay(widget.data ?? '').startsWith(tienTo),
     );
   }
   // CÓ khóa nhận diện nhưng CHƯA khớp widget nào ở nhịp poll này (ví dụ label khai
