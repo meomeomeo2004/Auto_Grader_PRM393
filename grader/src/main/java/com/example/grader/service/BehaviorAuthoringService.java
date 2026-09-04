@@ -8,6 +8,8 @@ import jakarta.transaction.Transactional;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.*;
@@ -31,6 +33,9 @@ public class BehaviorAuthoringService {
             // Vị trí và màu của MỘT thành phần, mỗi mặt một tiêu chí riêng. Giá trị chuẩn
             // do engine đo trên Golden lúc capture oracle rồi nướng vào đây, không gõ tay.
             "component_position",
+            // Quan hệ bố cục giữa HAI thành phần. Không so pixel/screenshot: engine chỉ
+            // đo hình chữ nhật logic để xác nhận trên/dưới, cùng hàng/cột, chứa nhau...
+            "layout_relation",
             "component_color",
             // Màu chủ đạo của app: đọc thẳng ColorScheme từ cây widget, KHÔNG lấy mẫu
             // pixel. Bù đúng điểm mù của component_color — Material 3 cố ý làm các vai
@@ -38,9 +43,13 @@ public class BehaviorAuthoringService {
             // viền hoặc chữ hầu như không mang thông tin về bảng màu.
             "theme_color",
             // So bố cục màn hình với ảnh chuẩn chụp từ Golden trong cùng container.
-            "screen_match");
+            "screen_match",
+            // Trạng thái Router/URL do ứng dụng phản ánh ra SystemNavigator.
+            "route_state");
     private static final Set<String> ACTIONS = Set.of(
-            "boot", "tap", "enter_text", "clear_text", "scroll", "back", "restart", "wait_until");
+            "boot", "boot_with_uri", "tap", "enter_text", "clear_text", "scroll", "back",
+            "open_uri", "browser_back", "browser_forward", "reload", "restart",
+            "wait_until", "wait_for_route");
     private static final int MAX_EVENTS = 2_000;
 
     private final GoldenAppRepository goldenApps;
@@ -319,9 +328,20 @@ public class BehaviorAuthoringService {
         if ("action".equals(kind)) {
             String action = required(event, "action").toLowerCase(Locale.ROOT);
             if (!ACTIONS.contains(action)) throw new IllegalArgumentException("Action không hỗ trợ: " + action);
-            if (Set.of("tap", "enter_text", "clear_text", "scroll").contains(action)
+            if ("boot_with_uri".equals(action) && !trace.isEmpty()) {
+                throw new IllegalArgumentException("boot_with_uri phải là event đầu tiên của scenario");
+            }
+            if (Set.of("tap", "enter_text", "clear_text", "scroll", "wait_until").contains(action)
                     && map(event.get("target")).isEmpty()) {
                 throw new IllegalArgumentException("Action " + action + " phải có target ngữ nghĩa");
+            }
+            if (Set.of("boot_with_uri", "open_uri", "wait_for_route").contains(action)) {
+                String uri = optional(event, "uri", "value");
+                if (uri == null || uri.isBlank()) {
+                    throw new IllegalArgumentException("Action " + action + " phải có URI/path");
+                }
+                validateRouteUri(uri);
+                event.put("uri", uri.trim());
             }
             Map<String, Object> target = map(event.get("target"));
             event.putIfAbsent("stage", "ACTION");
@@ -351,6 +371,10 @@ public class BehaviorAuthoringService {
             event.putIfAbsent("stage", "ASSERT");
             event.putIfAbsent("action", "observe_ui");
             event.putIfAbsent("browser", "flutter_tester");
+        } else if ("layout_relation".equals(kind)) {
+            validateLayoutRelation(event);
+        } else if ("route_state".equals(kind)) {
+            validateRouteState(event);
         } else if ("component_position".equals(kind) || "component_color".equals(kind)) {
             // Cùng ràng buộc với component_present: không có target thì không biết đo cái gì.
             if (map(event.get("target")).isEmpty()) {
@@ -377,12 +401,53 @@ public class BehaviorAuthoringService {
             event.putIfAbsent("browser", "flutter_tester");
         }
         event.put("kind", kind);
+        // Flutter Web có thể rebuild editing DOM giữa hai ký tự và phát một bản chốt
+        // trung gian dù người dùng chưa rời ô. Hai enter_text LIÊN TIẾP trỏ cùng control
+        // vì thế là cùng một thao tác logic: giữ locator giàu thông tin nhất và chỉ cập
+        // nhật value cuối. Nếu giáo viên thật sự rời rồi quay lại ô sẽ có tap/action ở
+        // giữa, nên hai lần nhập đó vẫn được giữ tách biệt.
+        if ("action".equals(kind) && "enter_text".equals(text(event, "action", "")) && !trace.isEmpty()) {
+            Map<String, Object> previous = trace.get(trace.size() - 1);
+            if ("action".equals(text(previous, "kind", ""))
+                    && "enter_text".equals(text(previous, "action", ""))
+                    && sameLogicalInputTarget(map(previous.get("target")), map(event.get("target")))) {
+                Map<String, Object> richerTarget = new LinkedHashMap<>(map(previous.get("target")));
+                richerTarget.putAll(map(event.get("target")));
+                event.put("target", richerTarget);
+                event.put("sequence", previous.getOrDefault("sequence", trace.size()));
+                event.put("recorded_at", Instant.now().toString());
+                trace.set(trace.size() - 1, event);
+                recording.setRawTraceJson(json(trace));
+                recordings.save(recording);
+                return Map.of(
+                        "recording_id", recordingId,
+                        "event_count", trace.size(),
+                        "event", event,
+                        "compacted", true);
+            }
+        }
         event.put("sequence", trace.size() + 1);
         event.putIfAbsent("recorded_at", Instant.now().toString());
         trace.add(event);
         recording.setRawTraceJson(json(trace));
         recordings.save(recording);
         return Map.of("recording_id", recordingId, "event_count", trace.size(), "event", event);
+    }
+
+    private boolean sameLogicalInputTarget(Map<String, Object> first, Map<String, Object> second) {
+        if (first.isEmpty() || second.isEmpty()) return false;
+        for (String key : List.of("semanticId", "semantic_id", "valueKey", "value_key", "key")) {
+            String left = optional(first, key);
+            String right = optional(second, key);
+            if (left != null && right != null) return left.equals(right);
+        }
+        String firstLabel = optional(first, "label");
+        String secondLabel = optional(second, "label");
+        if (firstLabel != null && secondLabel != null) return firstLabel.equals(secondLabel);
+        String firstHint = optional(first, "hint");
+        String secondHint = optional(second, "hint");
+        return firstLabel == null && secondLabel == null
+                && firstHint != null && firstHint.equals(secondHint);
     }
 
     @Transactional
@@ -492,7 +557,8 @@ public class BehaviorAuthoringService {
                 Map<String, Object> step = new LinkedHashMap<>();
                 step.put("id", "step_" + (++actionNo));
                 step.put("action", action);
-                for (String field : List.of("stage", "attribute", "attributeValue", "valueType", "browser")) {
+                for (String field : List.of("stage", "attribute", "attributeValue", "valueType", "browser",
+                        "uri", "visible")) {
                     if (event.containsKey(field)) step.put(field, event.get(field));
                 }
                 if (event.containsKey("target")) step.put("target", event.get("target"));
@@ -510,9 +576,11 @@ public class BehaviorAuthoringService {
             } else if ("checkpoint".equals(kind)
                     || "component_present".equals(kind)
                     || "component_position".equals(kind)
+                    || "layout_relation".equals(kind)
                     || "component_color".equals(kind)
                     || "theme_color".equals(kind)
                     || "screen_match".equals(kind)
+                    || "route_state".equals(kind)
                     || (bool(event.get("checkpoint"), false)
                     && Set.of("ui_observation", "database_observation", "navigation").contains(kind))) {
                 Map<String, Object> checkpoint = new LinkedHashMap<>(event);
@@ -786,8 +854,9 @@ public class BehaviorAuthoringService {
         for (Map<String, Object> checkpoint : checkpoints) {
             String kind = text(checkpoint, "kind", "");
             boolean laViTri = "component_position".equals(kind);
+            boolean laQuanHe = "layout_relation".equals(kind);
             boolean laMau = "component_color".equals(kind) || "theme_color".equals(kind);
-            if (!laViTri && !laMau) continue;
+            if (!laViTri && !laQuanHe && !laMau) continue;
             Map<String, Object> doDuoc = map(components.get(text(checkpoint, "id", "")));
             if (doDuoc.isEmpty()) continue;
             Map<String, Object> mongDoi = new LinkedHashMap<>(map(checkpoint.get("expect")));
@@ -797,6 +866,10 @@ public class BehaviorAuthoringService {
                 mongDoi.put("center_y", doDuoc.get("center_y"));
                 mongDoi.put("width", doDuoc.get("width"));
                 mongDoi.put("height", doDuoc.get("height"));
+            } else if (laQuanHe) {
+                String quanHe = text(doDuoc, "relation", "");
+                if (quanHe.isBlank()) continue;
+                mongDoi.put("relation", quanHe);
             } else {
                 String mau = text(doDuoc, "color", "");
                 // Thành phần trong suốt hoàn toàn thì không có màu để so — bỏ qua, để tiêu chí
@@ -1013,10 +1086,15 @@ public class BehaviorAuthoringService {
         }
         List<Map<String, Object>> steps = readObjectList(scenario.getStepsJson());
         if (steps.isEmpty()) throw new IllegalArgumentException("Scenario " + scenario.getScenarioCode() + " chưa có bước");
-        for (Map<String, Object> step : steps) {
+        for (int index = 0; index < steps.size(); index++) {
+            Map<String, Object> step = steps.get(index);
             String action = text(step, "action", "");
             if (!ACTIONS.contains(action)) {
                 throw new IllegalArgumentException("Scenario " + scenario.getScenarioCode() + " có action không hỗ trợ: " + action);
+            }
+            if ("boot_with_uri".equals(action) && index != 0) {
+                throw new IllegalArgumentException(
+                        "Scenario " + scenario.getScenarioCode() + " phải đặt boot_with_uri ở bước đầu tiên");
             }
         }
         List<Map<String, Object>> viewports = readObjectList(scenario.getViewportsJson());
@@ -1087,6 +1165,69 @@ public class BehaviorAuthoringService {
         event.putIfAbsent("stage", "ASSERT");
         event.putIfAbsent("action", "observe_ui");
         event.putIfAbsent("browser", "flutter_tester");
+    }
+
+    private void validateRouteState(Map<String, Object> event) {
+        Map<String, Object> expect = map(event.get("expect"));
+        boolean hasExpectation = List.of(
+                        "uri", "path", "fragment", "can_pop", "can_forward", "history_length", "history_index")
+                .stream().anyMatch(key -> event.containsKey(key) || expect.containsKey(key));
+        hasExpectation = hasExpectation || event.containsKey("query") || expect.containsKey("query");
+        if (!hasExpectation) {
+            throw new IllegalArgumentException(
+                    "Checkpoint route phải khai uri/path/query/fragment/can_pop hoặc history");
+        }
+        String uri = optional(expect, "uri");
+        if (uri == null) uri = optional(event, "uri");
+        if (uri != null) validateRouteUri(uri);
+        event.putIfAbsent("checkpoint", true);
+        event.putIfAbsent("scope", "navigation");
+        event.putIfAbsent("stage", "ASSERT");
+        event.putIfAbsent("action", "observe_route");
+        event.putIfAbsent("browser", "flutter_tester");
+    }
+
+    private void validateLayoutRelation(Map<String, Object> event) {
+        if (map(event.get("target")).isEmpty() || map(event.get("relative_to")).isEmpty()) {
+            throw new IllegalArgumentException(
+                    "Tiêu chí quan hệ bố cục phải có target và relative_to");
+        }
+        String relation = text(event, "relation", "auto").toLowerCase(Locale.ROOT);
+        if (!Set.of("auto", "above", "below", "left_of", "right_of", "same_row",
+                "same_column", "inside", "contains", "overlap", "not_overlap",
+                "wider_than", "taller_than").contains(relation)) {
+            throw new IllegalArgumentException("Quan hệ bố cục không hỗ trợ: " + relation);
+        }
+        double tolerance = number(event.get("tolerance_pct"), 5);
+        if (tolerance < 0 || tolerance > 50) {
+            throw new IllegalArgumentException("Sai số quan hệ bố cục phải từ 0 đến 50%");
+        }
+        event.put("relation", relation);
+        event.putIfAbsent("tolerance_pct", 5);
+        event.putIfAbsent("checkpoint", true);
+        event.putIfAbsent("scope", "ui");
+        event.putIfAbsent("stage", "ASSERT");
+        event.putIfAbsent("action", "observe_ui");
+        event.putIfAbsent("browser", "flutter_tester");
+    }
+
+    /**
+     * Route dùng trong bộ chấm có thể là path nội bộ hoặc URI http(s). Không cho scheme
+     * khác vì widget-test không được phép mở intent/file bên ngoài sandbox.
+     */
+    private void validateRouteUri(String raw) {
+        if (raw.chars().anyMatch(Character::isISOControl) || raw.chars().anyMatch(Character::isWhitespace)) {
+            throw new IllegalArgumentException("URI/path không được chứa khoảng trắng hoặc ký tự điều khiển");
+        }
+        try {
+            URI uri = new URI(raw);
+            String scheme = uri.getScheme();
+            if (scheme != null && !scheme.equalsIgnoreCase("http") && !scheme.equalsIgnoreCase("https")) {
+                throw new IllegalArgumentException("URI chỉ nhận path nội bộ, http hoặc https");
+            }
+        } catch (URISyntaxException e) {
+            throw new IllegalArgumentException("URI/path không hợp lệ: " + raw, e);
+        }
     }
 
     private Map<String, Object> goldenAppView(GoldenApp app) {

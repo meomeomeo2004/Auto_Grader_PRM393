@@ -372,8 +372,10 @@ public class BehaviorSuiteMaterializer {
      * và chỉ chạy trên viewport đầu: thành phần giao diện và so ảnh bố cục.
      */
     private static final java.util.Set<String> ABSOLUTE_WEIGHT_KINDS =
-            java.util.Set.of("component_present", "component_position", "component_color",
+            java.util.Set.of("component_present", "component_position", "layout_relation", "component_color",
                     "theme_color", "screen_match");
+    private static final java.util.Set<String> SINGLE_VIEWPORT_KINDS =
+            java.util.Set.of("route_state");
 
     private List<Map<String, Object>> expandCases(Map<String, Object> plan, String suiteCode) {
         List<Map<String, Object>> out = new ArrayList<>();
@@ -413,7 +415,8 @@ public class BehaviorSuiteMaterializer {
                 boolean componentCheckpoint = ABSOLUTE_WEIGHT_KINDS.contains(text(checkpoint, "kind"));
                 // Thành phần giao diện không đổi theo bề ngang màn hình (đó là việc của tầng
                 // bố cục) → chỉ chạy trên viewport đầu, khỏi nhân bản testcase lẫn trọng số.
-                List<Object> checkpointViewports = databaseCheckpoint || componentCheckpoint
+                boolean singleViewport = SINGLE_VIEWPORT_KINDS.contains(text(checkpoint, "kind"));
+                List<Object> checkpointViewports = databaseCheckpoint || componentCheckpoint || singleViewport
                         ? List.of(first(scenarioViewports))
                         : scenarioViewports;
                 double checkpointWeight = scenarioWeight

@@ -78,6 +78,12 @@ class GoldenRuntimeServiceTest {
         assertThat(html).contains("GOLDEN_RECORDER_FLUSHED");
         assertThat(html).contains("snapshot_ui");
         assertThat(html).contains("flush_input");
+        assertThat(html).contains("GOLDEN_RECORDER_ROUTE");
+        assertThat(html).contains("perform_route_action");
+        assertThat(html).contains("history.pushState");
+        assertThat(html).contains("history.back()");
+        assertThat(html).contains("new URL(raw, location.origin)");
+        assertThat(html).contains("parsed.search + parsed.hash");
         assertThat(html).contains("compositionend");
         assertThat(html).doesNotContain("setTimeout(chotEnterText, 700)");
         assertThat(html).contains("aria-label");
@@ -86,6 +92,9 @@ class GoldenRuntimeServiceTest {
         assertThat(html).contains("CONTAINER_ROLES");
         assertThat(html).contains("Khong ghi thao tac de tranh chon nham element cha");
         assertThat(html).contains("uniqueLocator('semanticId', semanticId, elements)");
+        assertThat(html).contains("function spatialSemanticNode(event, mode, elements)");
+        assertThat(html).contains("Nhieu semantic control trung khop tai cung vi tri.");
+        assertThat(html).contains("if (ta.label && tb.label) return ta.label === tb.label");
         assertThat(html).doesNotContain("document.elementFromPoint");
     }
 

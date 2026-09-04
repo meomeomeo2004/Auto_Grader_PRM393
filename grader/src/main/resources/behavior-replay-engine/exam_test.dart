@@ -7,7 +7,8 @@ import 'dart:ui' show Size;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
-import 'package:flutter/services.dart' show FontLoader;
+import 'package:flutter/services.dart'
+    show FontLoader, MethodCall, SystemChannels;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -18,6 +19,88 @@ const _observationMarker = '###GRADER_OBS###';
 const _checkpointMarker = '###RAR_CHECKPOINT###';
 const _captureMarker = '###RAR_CAPTURE###';
 const _stageMarker = '###GRADER_STAGE###';
+
+/// Mô hình history tối thiểu của platform web trong widget-test.
+///
+/// Router API báo URL ra `SystemChannels.navigation`; các action open/back/forward
+/// lại đưa URL vào app qua `handlePushRoute`. Nhờ đứng đúng hai đầu public của Flutter,
+/// bộ chấm không phụ thuộc GoRouter, AutoRoute hay Navigator do sinh viên chọn.
+class _RouteTracker {
+  _RouteTracker(String initialUri)
+    : current = Uri.parse(initialUri),
+      history = <Uri>[Uri.parse(initialUri)];
+
+  Uri current;
+  final List<Uri> history;
+  int index = 0;
+  int revision = 0;
+  bool multiEntry = true;
+
+  void install(WidgetTester tester) {
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.navigation,
+      (MethodCall call) async {
+        if (call.method == 'selectSingleEntryHistory') {
+          multiEntry = false;
+          return null;
+        }
+        if (call.method == 'selectMultiEntryHistory') {
+          multiEntry = true;
+          return null;
+        }
+        if (call.method == 'routeInformationUpdated' ||
+            call.method == 'routeUpdated') {
+          final args = _asMap(call.arguments);
+          final raw = _text(args, 'uri', _text(args, 'location'));
+          if (raw.isNotEmpty) {
+            report(Uri.parse(raw), replace: _bool(args['replace'], false));
+          }
+        }
+        return null;
+      },
+    );
+  }
+
+  void uninstall(WidgetTester tester) {
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.navigation,
+      null,
+    );
+  }
+
+  void report(Uri uri, {bool replace = false}) {
+    revision++;
+    current = uri;
+    if (!multiEntry || replace) {
+      history[index] = uri;
+      return;
+    }
+    if (history[index] == uri) return;
+    if (index + 1 < history.length)
+      history.removeRange(index + 1, history.length);
+    history.add(uri);
+    index = history.length - 1;
+  }
+
+  Uri? goBack() {
+    if (index <= 0) return null;
+    index--;
+    current = history[index];
+    revision++;
+    return current;
+  }
+
+  Uri? goForward() {
+    if (index + 1 >= history.length) return null;
+    index++;
+    current = history[index];
+    revision++;
+    return current;
+  }
+
+  bool get canBack => index > 0;
+  bool get canForward => index + 1 < history.length;
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -59,6 +142,10 @@ Future<void> _runBehaviorScenario(
   _daChupAnhCuoi = false;
   _mauNenAnh = null;
 
+  final steps = _asList(testCase['steps']).map(_asMap).toList();
+  final initialUri = _initialRouteUri(steps);
+  final routeTracker = _RouteTracker(initialUri)..install(tester);
+
   try {
     sqfliteFfiInit();
     // Flutter widget tests run in a headless sandbox. The regular FFI factory
@@ -67,9 +154,12 @@ Future<void> _runBehaviorScenario(
     // isolate so Golden and student replays have deterministic timeouts.
     databaseFactory = databaseFactoryFfiNoIsolate;
     _applyViewport(tester, _asMap(testCase['viewport']));
+    tester.platformDispatcher.defaultRouteNameTestValue = initialUri;
     addTearDown(() {
       tester.view.resetPhysicalSize();
       tester.view.resetDevicePixelRatio();
+      tester.platformDispatcher.clearDefaultRouteNameTestValue();
+      routeTracker.uninstall(tester);
     });
     if (_bool(_asMap(testCase['initial_state'])['reset_storage'], true)) {
       await tester.runAsync(() => _resetDatabase(databaseContract));
@@ -78,10 +168,9 @@ Future<void> _runBehaviorScenario(
     stdout.writeln('${_stageMarker}STUDENT_APP_BOOT');
     await _bootStudentApp(tester, timeout);
 
-    for (final raw in _asList(testCase['steps'])) {
-      final step = _asMap(raw);
+    for (final step in steps) {
       stdout.writeln('${_stageMarker}STUDENT_UI_ACTION');
-      await _runStep(tester, step, timeout);
+      await _runStep(tester, step, timeout, routeTracker);
       await _allowExternalAsync(tester);
       await _boundedPump(tester, timeout);
       _throwPendingException(tester, _text(step, 'id', 'action'));
@@ -128,6 +217,7 @@ Future<void> _runBehaviorScenario(
           checkpoint,
           databaseContract,
           timeout,
+          routeTracker: routeTracker,
           executionCode: _text(
             checkpointCase,
             'execution_code',
@@ -196,6 +286,69 @@ void _applyViewport(WidgetTester tester, Map<String, dynamic> viewport) {
   tester.view.physicalSize = Size(width * ratio, height * ratio);
 }
 
+String _initialRouteUri(List<Map<String, dynamic>> steps) {
+  if (steps.isNotEmpty && _text(steps.first, 'action') == 'boot_with_uri') {
+    return _stepUri(steps.first);
+  }
+  return '/';
+}
+
+String _stepUri(Map<String, dynamic> step) {
+  final value = _text(step, 'uri', step['value']?.toString() ?? '');
+  if (value.isEmpty)
+    throw ArgumentError('Action ${step['action']} thiếu URI/path.');
+  return value;
+}
+
+Future<void> _deliverRoute(
+  WidgetTester tester,
+  _RouteTracker tracker,
+  String uri,
+  Duration timeout, {
+  bool alreadyTracked = false,
+}) async {
+  final before = tracker.revision;
+  final handled = await tester.binding.handlePushRoute(uri);
+  await _boundedPump(tester, timeout);
+  if (!handled) {
+    throw StateError(
+      'Ứng dụng không nhận RouteInformation "$uri". Hãy cấu hình MaterialApp.router, '
+      'onGenerateRoute hoặc didPushRouteInformation theo yêu cầu đề.',
+    );
+  }
+  // Router chuẩn thường phản ánh URL trở lại SystemNavigator. Navigator kiểu cũ có
+  // thể chỉ nhận route mà không báo ngược; vẫn ghi route đầu vào để checkpoint không
+  // phụ thuộc package routing cụ thể.
+  if (!alreadyTracked && tracker.revision == before)
+    tracker.report(Uri.parse(uri));
+}
+
+bool _routeMatches(Uri actual, String expected) {
+  final wanted = Uri.parse(expected);
+  if (wanted.hasScheme) return actual.toString() == wanted.toString();
+  if (expected.startsWith('#')) return actual.fragment == wanted.fragment;
+  if (wanted.hasQuery || wanted.hasFragment) {
+    return actual.path == wanted.path &&
+        _sameQuery(actual.queryParametersAll, wanted.queryParametersAll) &&
+        actual.fragment == wanted.fragment;
+  }
+  return actual.path == wanted.path;
+}
+
+bool _sameQuery(Map<String, List<String>> actual, Map<String, List<String>> wanted) {
+  if (actual.length != wanted.length) return false;
+  for (final entry in wanted.entries) {
+    final actualValues = actual[entry.key];
+    if (actualValues == null || actualValues.length != entry.value.length) {
+      return false;
+    }
+    for (var index = 0; index < entry.value.length; index++) {
+      if (actualValues[index] != entry.value[index]) return false;
+    }
+  }
+  return true;
+}
+
 void _printCheckpoint(
   Map<String, dynamic> testCase,
   bool passed,
@@ -229,6 +382,7 @@ Future<void> _runStep(
   WidgetTester tester,
   Map<String, dynamic> step,
   Duration defaultTimeout,
+  _RouteTracker routeTracker,
 ) async {
   final action = _text(step, 'action');
   final timeout = Duration(
@@ -236,6 +390,7 @@ Future<void> _runStep(
   );
   switch (action) {
     case 'boot':
+    case 'boot_with_uri':
       return;
     case 'tap':
       final finder = await _waitForTarget(
@@ -276,6 +431,48 @@ Future<void> _runStep(
     case 'back':
       await tester.pageBack();
       return;
+    case 'open_uri':
+      await _deliverRoute(tester, routeTracker, _stepUri(step), timeout);
+      return;
+    case 'browser_back':
+      final previous = routeTracker.goBack();
+      if (previous == null) {
+        throw StateError('Browser history không còn route phía sau để back.');
+      }
+      await _deliverRoute(
+        tester,
+        routeTracker,
+        previous.toString(),
+        timeout,
+        alreadyTracked: true,
+      );
+      return;
+    case 'browser_forward':
+      final next = routeTracker.goForward();
+      if (next == null) {
+        throw StateError(
+          'Browser history không còn route phía trước để forward.',
+        );
+      }
+      await _deliverRoute(
+        tester,
+        routeTracker,
+        next.toString(),
+        timeout,
+        alreadyTracked: true,
+      );
+      return;
+    case 'reload':
+      // Widget-test không có process Chrome để F5. Phát lại RouteInformation hiện tại
+      // là phép kiểm portable tương ứng: router phải phục hồi đúng màn từ URL hiện có.
+      await _deliverRoute(
+        tester,
+        routeTracker,
+        routeTracker.current.toString(),
+        timeout,
+        alreadyTracked: true,
+      );
+      return;
     case 'wait_until':
       final target = _asMap(step['target']);
       final visible = _bool(step['visible'], true);
@@ -284,6 +481,15 @@ Future<void> _runStep(
         () => _finder(target).evaluate().isNotEmpty == visible,
         timeout,
         'wait_until không đạt trạng thái mong đợi',
+      );
+      return;
+    case 'wait_for_route':
+      final expected = _stepUri(step);
+      await _waitUntil(
+        tester,
+        () => _routeMatches(routeTracker.current, expected),
+        timeout,
+        'Route không đạt "$expected"; hiện tại là "${routeTracker.current}".',
       );
       return;
     case 'restart':
@@ -301,6 +507,7 @@ Future<void> _assertCheckpoint(
   Map<String, dynamic> databaseContract,
   Duration timeout, {
   String executionCode = '',
+  required _RouteTracker routeTracker,
 }) async {
   final kind = _text(checkpoint, 'kind');
   // SO BO CUC VOI ANH CHUAN. Anh chuan duoc chup tu chinh Golden Solution trong
@@ -311,6 +518,18 @@ Future<void> _assertCheckpoint(
       return; // dang capture chinh anh chuan, chua co gi de so
     }
     await _assertScreenMatch(tester, checkpoint, executionCode);
+    return;
+  }
+  if (kind == 'route_state') {
+    _assertRouteState(tester, checkpoint, routeTracker);
+    return;
+  }
+  if (kind == 'layout_relation') {
+    if ((Platform.environment['GRADER_CAPTURE_OUTPUT_PATH'] ?? '').isNotEmpty &&
+        _text(checkpoint, 'relation', 'auto') == 'auto') {
+      return;
+    }
+    await _assertLayoutRelation(tester, checkpoint, timeout);
     return;
   }
   if (kind == 'entity_consistency' ||
@@ -1057,6 +1276,7 @@ Future<void> _luuBoCucChuan(
   const loaiGiaoDien = {
     'component_present',
     'component_position',
+    'layout_relation',
     'component_color',
   };
   // LUÔN chụp ảnh khi capture oracle, kể cả khi đề chưa có tiêu chí màu nào: capture
@@ -1079,6 +1299,19 @@ Future<void> _luuBoCucChuan(
       continue;
     }
     if (!loaiGiaoDien.contains(kind)) continue;
+    if (kind == 'layout_relation') {
+      final first = _khungThanhPhan(tester, _asMap(checkpoint['target']));
+      final second = _khungThanhPhan(tester, _asMap(checkpoint['relative_to']));
+      if (first == null || second == null) continue;
+      final configured = _text(checkpoint, 'relation', 'auto');
+      thanhPhan[khoa] = <String, dynamic>{
+        'test_id': _text(c, 'test_id'),
+        'relation': configured == 'auto'
+            ? _deriveLayoutRelation(first, second, man)
+            : configured,
+      };
+      continue;
+    }
     final khung = _khungThanhPhan(tester, _asMap(checkpoint['target']));
     if (khung == null) continue;
     thanhPhan[khoa] = <String, dynamic>{
@@ -1363,6 +1596,212 @@ bool _locatorDungDuoc(
   return count == 1;
 }
 
+void _assertRouteState(
+  WidgetTester tester,
+  Map<String, dynamic> checkpoint,
+  _RouteTracker tracker,
+) {
+  final expected = <String, dynamic>{
+    ...checkpoint,
+    ..._asMap(checkpoint['expect']),
+  };
+  var checked = 0;
+  if (expected['uri'] != null) {
+    final wanted = expected['uri'].toString();
+    expect(
+      _routeMatches(tracker.current, wanted),
+      isTrue,
+      reason: 'Route hiện tại "${tracker.current}" không khớp URI "$wanted".',
+    );
+    checked++;
+  }
+  if (expected['path'] != null) {
+    expect(
+      tracker.current.path,
+      expected['path'].toString(),
+      reason: 'Path hiện tại không đúng.',
+    );
+    checked++;
+  }
+  if (expected['fragment'] != null) {
+    expect(
+      tracker.current.fragment,
+      expected['fragment'].toString(),
+      reason: 'Fragment hiện tại không đúng.',
+    );
+    checked++;
+  }
+  if (expected['query'] != null) {
+    final wanted = _asMap(
+      expected['query'],
+    ).map((key, value) => MapEntry(key, value?.toString() ?? ''));
+    expect(
+      tracker.current.queryParameters,
+      wanted,
+      reason: 'Query parameters của route không đúng.',
+    );
+    checked++;
+  }
+  if (expected['can_pop'] != null) {
+    final navigatorCanPop = find.byType(Navigator).evaluate().any((element) {
+      final state = element is StatefulElement ? element.state : null;
+      return state is NavigatorState && state.canPop();
+    });
+    expect(
+      tracker.canBack || navigatorCanPop,
+      _bool(expected['can_pop'], false),
+      reason: 'Trạng thái canPop của route không đúng.',
+    );
+    checked++;
+  }
+  if (expected['history_length'] != null) {
+    expect(
+      tracker.history.length,
+      _int(expected['history_length'], 0),
+      reason: 'Độ dài browser history không đúng.',
+    );
+    checked++;
+  }
+  if (expected['history_index'] != null) {
+    expect(
+      tracker.index,
+      _int(expected['history_index'], 0),
+      reason: 'Vị trí hiện tại trong browser history không đúng.',
+    );
+    checked++;
+  }
+  if (expected['can_forward'] != null) {
+    expect(
+      tracker.canForward,
+      _bool(expected['can_forward'], false),
+      reason: 'Trạng thái có thể browser-forward không đúng.',
+    );
+    checked++;
+  }
+  if (checked == 0) {
+    throw StateError(
+      'Checkpoint route_state không có giá trị nào để kiểm tra.',
+    );
+  }
+}
+
+Future<void> _assertLayoutRelation(
+  WidgetTester tester,
+  Map<String, dynamic> checkpoint,
+  Duration timeout,
+) async {
+  final firstTarget = _asMap(checkpoint['target']);
+  final secondTarget = _asMap(checkpoint['relative_to']);
+  if (firstTarget.isEmpty || secondTarget.isEmpty) {
+    throw ArgumentError(
+      'Checkpoint layout_relation thiếu target hoặc relative_to.',
+    );
+  }
+  await _waitUntil(
+    tester,
+    () =>
+        _finder(firstTarget).evaluate().isNotEmpty &&
+        _finder(secondTarget).evaluate().isNotEmpty,
+    timeout,
+    'Không tìm đủ hai thành phần để chấm quan hệ bố cục.',
+  );
+  final first = _khungThanhPhan(tester, firstTarget);
+  final second = _khungThanhPhan(tester, secondTarget);
+  if (first == null || second == null) {
+    throw StateError('Không đo được khung của hai thành phần bố cục.');
+  }
+  var relation = _text(checkpoint, 'relation', 'auto');
+  if (relation == 'auto')
+    relation = _text(_asMap(checkpoint['expect']), 'relation');
+  if (relation.isEmpty || relation == 'auto') {
+    throw StateError(
+      'Quan hệ bố cục tự động chưa có oracle — hãy capture lại Golden rồi publish lại.',
+    );
+  }
+  final screen = _coManHinh(tester);
+  final tolerance = _double(checkpoint['tolerance_pct'], 5) / 100;
+  final tolX = screen.width * tolerance;
+  final tolY = screen.height * tolerance;
+  final intersection = first.intersect(second);
+  final overlapArea = intersection.isEmpty
+      ? 0.0
+      : intersection.width * intersection.height;
+  final smallerArea = mathMin(
+    first.width * first.height,
+    second.width * second.height,
+  );
+  final overlapRatio = smallerArea <= 0 ? 0.0 : overlapArea / smallerArea;
+
+  final passed = switch (relation) {
+    'above' => first.bottom <= second.top + tolY,
+    'below' => first.top >= second.bottom - tolY,
+    'left_of' => first.right <= second.left + tolX,
+    'right_of' => first.left >= second.right - tolX,
+    'same_row' => (first.center.dy - second.center.dy).abs() <= tolY,
+    'same_column' => (first.center.dx - second.center.dx).abs() <= tolX,
+    'inside' =>
+      second.inflate(mathMax(tolX, tolY)).contains(first.topLeft) &&
+          second.inflate(mathMax(tolX, tolY)).contains(first.bottomRight),
+    'contains' =>
+      first.inflate(mathMax(tolX, tolY)).contains(second.topLeft) &&
+          first.inflate(mathMax(tolX, tolY)).contains(second.bottomRight),
+    'overlap' =>
+      overlapRatio >= _double(checkpoint['min_overlap_pct'], 10) / 100,
+    'not_overlap' =>
+      overlapRatio <= _double(checkpoint['max_overlap_pct'], 5) / 100,
+    'wider_than' => first.width + tolX >= second.width,
+    'taller_than' => first.height + tolY >= second.height,
+    _ => throw ArgumentError('Quan hệ bố cục không hỗ trợ: $relation'),
+  };
+  if (!passed) {
+    throw StateError(
+      '${_moTaTarget(firstTarget)} không đạt quan hệ "$relation" với '
+      '${_moTaTarget(secondTarget)} (sai số ${(tolerance * 100).toStringAsFixed(1)}%).',
+    );
+  }
+}
+
+double mathMin(double a, double b) => a < b ? a : b;
+double mathMax(double a, double b) => a > b ? a : b;
+
+String _deriveLayoutRelation(Rect first, Rect second, Size screen) {
+  final tolX = screen.width * 0.05;
+  final tolY = screen.height * 0.05;
+  if (second.inflate(mathMax(tolX, tolY)).contains(first.topLeft) &&
+      second.inflate(mathMax(tolX, tolY)).contains(first.bottomRight)) {
+    return 'inside';
+  }
+  if (first.inflate(mathMax(tolX, tolY)).contains(second.topLeft) &&
+      first.inflate(mathMax(tolX, tolY)).contains(second.bottomRight)) {
+    return 'contains';
+  }
+  if (first.bottom <= second.top &&
+      first.right >= second.left &&
+      first.left <= second.right) {
+    return 'above';
+  }
+  if (first.top >= second.bottom &&
+      first.right >= second.left &&
+      first.left <= second.right) {
+    return 'below';
+  }
+  if (first.right <= second.left &&
+      first.bottom >= second.top &&
+      first.top <= second.bottom) {
+    return 'left_of';
+  }
+  if (first.left >= second.right &&
+      first.bottom >= second.top &&
+      first.top <= second.bottom) {
+    return 'right_of';
+  }
+  if ((first.center.dy - second.center.dy).abs() <= tolY) return 'same_row';
+  if ((first.center.dx - second.center.dx).abs() <= tolX) return 'same_column';
+  return first.overlaps(second)
+      ? 'overlap'
+      : (first.center.dy < second.center.dy ? 'above' : 'below');
+}
+
 Finder _finder(Map<String, dynamic> target, {bool duPhong = false}) {
   // Semantics.identifier la dinh danh on dinh cua semantics tree va duoc Flutter Web
   // phoi thanh flt-semantics-identifier. Thu semantics finder truoc; fallback ValueKey
@@ -1371,7 +1810,8 @@ Finder _finder(Map<String, dynamic> target, {bool duPhong = false}) {
     final value = _text(target, keyName);
     if (value.isNotEmpty) {
       final semantics = find.bySemanticsIdentifier(value);
-      if (_locatorDungDuoc(semantics, target, action: duPhong)) return semantics;
+      if (_locatorDungDuoc(semantics, target, action: duPhong))
+        return semantics;
       final finder = find.byKey(ValueKey<String>(value));
       if (_locatorDungDuoc(finder, target, action: duPhong)) return finder;
     }

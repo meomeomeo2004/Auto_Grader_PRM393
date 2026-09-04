@@ -79,11 +79,11 @@ class BehaviorAuthoringServiceTest {
         String recordingId = String.valueOf(recording.get("id"));
         service.appendEvent(recordingId, Map.of(
                 "kind", "action", "action", "enter_text",
-                "target", Map.of("semanticId", "field.email"),
+                "target", Map.of("label", "Email", "hint", "example@gmail.com"),
                 "value", "invalid"));
         service.appendEvent(recordingId, Map.of(
                 "kind", "action", "action", "enter_text",
-                "target", Map.of("semanticId", "field.email"),
+                "target", Map.of("label", "Email"),
                 "value", "final@example.com"));
         service.appendEvent(recordingId, Map.of(
                 "kind", "action", "action", "tap",
@@ -95,11 +95,12 @@ class BehaviorAuthoringServiceTest {
 
         Map<String, Object> scenario = service.abstractRecording(recordingId, Map.of(
                 "scenario_code", "ADD_FINAL_USER"));
-        // Không còn biến hoá: giá trị người ra đề gõ (kể cả bản nháp "invalid" lẫn bản cuối
-        // "final@example.com") được replay y nguyên, theo đúng thứ tự đã gõ.
+        // Hai enter_text liên tiếp vào cùng semantic control là một lần nhập logic:
+        // DOM Flutter có thể rebuild giữa chừng nhưng testcase chỉ replay giá trị cuối.
         List<?> steps = (List<?>) scenario.get("steps");
-        assertEquals("invalid", ((Map<?, ?>) steps.get(0)).get("value"));
-        assertEquals("final@example.com", ((Map<?, ?>) steps.get(1)).get("value"));
+        assertEquals(2, steps.size());
+        assertEquals("final@example.com", ((Map<?, ?>) steps.get(0)).get("value"));
+        assertEquals("tap", ((Map<?, ?>) steps.get(1)).get("action"));
 
         // Row phải dùng ĐÚNG giá trị thật (không phải "${var}"): applyDerivedDatabaseCheckpoints
         // giờ nâng checkpoint thành entity_consistency bằng cách so khớp literal giữa row DB và
@@ -471,5 +472,72 @@ class BehaviorAuthoringServiceTest {
                         "id", "step_1", "action", "tap", "target", Map.of("text", "Save")))));
         assertEquals("STALE", oracleRepository
                 .findFirstByScenarioIdOrderByCreatedAtDesc(scenarioId).orElseThrow().getStatus().name());
+    }
+
+    @Test
+    void recordsRouteActionsRouteStateAndRelativeLayoutWithoutCoordinates() {
+        Map<String, Object> golden = service.registerGoldenApp(Map.of(
+                "name", "Golden routing", "runtime_url", "http://localhost:9010", "ready", true));
+        Map<String, Object> suite = service.createSuite(Map.of(
+                "suite_code", "ROUTE_LAYOUT", "name", "Route and layout",
+                "golden_app_id", golden.get("id")));
+        Map<String, Object> recording = service.startRecording(String.valueOf(suite.get("id")), Map.of());
+        String recordingId = String.valueOf(recording.get("id"));
+
+        service.appendEvent(recordingId, Map.of(
+                "kind", "action", "action", "boot_with_uri", "uri", "/movies/42?tab=cast"));
+        service.appendEvent(recordingId, Map.of(
+                "kind", "action", "action", "browser_back"));
+        service.appendEvent(recordingId, Map.of(
+                "kind", "action", "action", "browser_forward"));
+        service.appendEvent(recordingId, Map.of(
+                "kind", "route_state", "expect", Map.of(
+                        "path", "/movies/42", "query", Map.of("tab", "cast"), "can_pop", true)));
+        service.appendEvent(recordingId, Map.of(
+                "kind", "layout_relation",
+                "target", Map.of("semanticId", "field.email"),
+                "relative_to", Map.of("semanticId", "action.save"),
+                "relation", "above", "tolerance_pct", 4));
+        service.stopRecording(recordingId, Map.of());
+
+        Map<String, Object> scenario = service.abstractRecording(recordingId, Map.of(
+                "scenario_code", "DETAIL_ROUTE"));
+        List<?> steps = (List<?>) scenario.get("steps");
+        assertEquals("boot_with_uri", ((Map<?, ?>) steps.get(0)).get("action"));
+        assertEquals("/movies/42?tab=cast", ((Map<?, ?>) steps.get(0)).get("uri"));
+        List<?> checkpoints = (List<?>) scenario.get("checkpoints");
+        assertEquals(List.of("route_state", "layout_relation"), checkpoints.stream()
+                .map(Map.class::cast).map(item -> item.get("kind")).toList());
+
+        Map<?, ?> layout = checkpoints.stream().map(Map.class::cast)
+                .filter(item -> "layout_relation".equals(item.get("kind"))).findFirst().orElseThrow();
+        assertEquals(1, service.applyCapturedLayout(String.valueOf(scenario.get("id")), Map.of(
+                String.valueOf(layout.get("id")), Map.of("relation", "same_row"))));
+        Map<String, Object> refreshedSuite = service.getSuite(String.valueOf(suite.get("id")));
+        Map<String, Object> refreshed = (Map<String, Object>) ((List<?>) refreshedSuite.get("scenarios")).get(0);
+        Map<?, ?> bakedLayout = ((List<?>) refreshed.get("checkpoints")).stream().map(Map.class::cast)
+                .filter(item -> "layout_relation".equals(item.get("kind"))).findFirst().orElseThrow();
+        assertEquals("same_row", ((Map<?, ?>) bakedLayout.get("expect")).get("relation"));
+    }
+
+    @Test
+    void rejectsUnsafeOrIncompleteRouteAndLayoutEvents() {
+        Map<String, Object> golden = service.registerGoldenApp(Map.of(
+                "name", "Golden invalid routing", "runtime_url", "http://localhost:9010", "ready", true));
+        Map<String, Object> suite = service.createSuite(Map.of(
+                "suite_code", "INVALID_ROUTE_LAYOUT", "name", "Invalid route and layout",
+                "golden_app_id", golden.get("id")));
+        Map<String, Object> recording = service.startRecording(String.valueOf(suite.get("id")), Map.of());
+        String recordingId = String.valueOf(recording.get("id"));
+
+        assertThrows(IllegalArgumentException.class, () -> service.appendEvent(recordingId, Map.of(
+                "kind", "action", "action", "open_uri", "uri", "file:///secret")));
+        assertThrows(IllegalArgumentException.class, () -> service.appendEvent(recordingId, Map.of(
+                "kind", "route_state", "expect", Map.of())));
+        assertThrows(IllegalArgumentException.class, () -> service.appendEvent(recordingId, Map.of(
+                "kind", "layout_relation", "target", Map.of("text", "A"), "relation", "above")));
+        service.appendEvent(recordingId, Map.of("kind", "action", "action", "boot"));
+        assertThrows(IllegalArgumentException.class, () -> service.appendEvent(recordingId, Map.of(
+                "kind", "action", "action", "boot_with_uri", "uri", "/too-late")));
     }
 }

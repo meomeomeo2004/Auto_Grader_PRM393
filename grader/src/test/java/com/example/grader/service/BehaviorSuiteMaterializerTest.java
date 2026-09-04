@@ -123,11 +123,9 @@ class BehaviorSuiteMaterializerTest {
     }
 
     @Test
-    void componentCheckpointKeepsAbsoluteWeightAndUiGroup() throws Exception {
-        // Tiêu chí giao diện (bảng tick): trọng số TUYỆT ĐỐI, không pha vào phần chia của
-        // scenario, chỉ chạy trên viewport đầu, và matrix mang nhóm UI để điểm lẻ nổi lên
-        // ở cấp nhóm. Nếu nó lọt vào denominator thì thêm một thành phần giao diện sẽ làm
-        // loãng điểm của chính các checkpoint chức năng cùng luồng — đúng lỗi cần chặn.
+    void componentCheckpointUsesScenarioBudgetAndKeepsUiGroup() throws Exception {
+        // Mọi checkpoint chia cùng ngân sách scenario theo tỷ lệ; tiêu chí thành phần chỉ
+        // chạy trên viewport đầu và vẫn mang nhóm UI riêng trong matrix.
         BehaviorAuthoringService authoring = mock(BehaviorAuthoringService.class);
         BehaviorArtifactService artifacts = mock(BehaviorArtifactService.class);
         ExamRepository exams = mock(ExamRepository.class);
@@ -187,11 +185,11 @@ class BehaviorSuiteMaterializerTest {
         JsonNode matrix = new ObjectMapper().readTree(output.resolve("skills_matrix.json").toFile());
         // 2 viewport × UI_VISIBLE + 1 DB_ROW + 1 UI_COMP (chỉ viewport đầu) = 4 dòng.
         assertEquals(4, matrix.size());
-        // Phần chia chức năng KHÔNG đổi so với khi chưa có tiêu chí giao diện.
-        assertEquals(3.0, matrix.get("RAR_USER_ADD_USER_UI_VISIBLE_PHONE").get("weight").asDouble(), 0.0001);
-        assertEquals(2.0, matrix.get("RAR_USER_ADD_USER_DB_ROW").get("weight").asDouble(), 0.0001);
+        assertEquals(1.333333, matrix.get("RAR_USER_ADD_USER_UI_VISIBLE_PHONE").get("weight").asDouble(), 0.0001);
+        assertEquals(0.888889, matrix.get("RAR_USER_ADD_USER_DB_ROW").get("weight").asDouble(), 0.0001);
         JsonNode comp = matrix.get("RAR_USER_ADD_USER_UI_COMP");
-        assertEquals(5.0, comp.get("weight").asDouble(), 0.0001, "trọng số tuyệt đối, không bị chia");
+        assertEquals(4.444444, comp.get("weight").asDouble(), 0.0001,
+                "trọng số checkpoint phải được quy đổi trong ngân sách 8 điểm của scenario");
         assertEquals("UI", comp.get("testcase_group").asText());
         assertEquals("ui", comp.get("layer").asText());
         assertEquals("UI_LAYOUT", comp.get("skill_code").asText());

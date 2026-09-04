@@ -30,7 +30,7 @@ import java.util.zip.ZipFile;
 public class GoldenRuntimeService {
     private static final long MAX_EXPANDED_BYTES = 1_000L * 1024 * 1024;
     private static final int MAX_ZIP_ENTRIES = 20_000;
-    private static final String RECORDER_BRIDGE_VERSION = "semantic-v16";   // v16: chỉ nhận semantic control duy nhất, không leo nhầm lên Form/khung cha
+    private static final String RECORDER_BRIDGE_VERSION = "input-identity-v20";
 
     @Value("${grader.base-image:grading-base:latest}")
     private String baseImage;
@@ -299,7 +299,7 @@ public class GoldenRuntimeService {
                 Future<void> main() async {
                   WidgetsFlutterBinding.ensureInitialized();
                   // Dấu phiên bản để phân định bản build đang CHẠY với bản bị cache.
-                  debugPrint('recorder-entry semantic-v16');
+                  debugPrint('recorder-entry input-identity-v20');
                   // Giữ handle sống suốt phiên để cây ngữ nghĩa luôn được dựng.
                   SemanticsBinding.instance.ensureSemantics();
                   // SQLite THẬT trên web + nạp hidden.db TRƯỚC khi app khởi động — đúng cách
@@ -337,6 +337,31 @@ public class GoldenRuntimeService {
                   const timers = new WeakMap();
                   const scrollOffsets = new WeakMap();
                   const send = payload => window.parent.postMessage({type: TYPE, payload}, '*');
+                  const runtimeBase = new URL(document.querySelector('base')?.getAttribute('href') || '/', location.origin);
+                  const logicalRoute = () => {
+                    const path = location.pathname.startsWith(runtimeBase.pathname)
+                      ? '/' + location.pathname.slice(runtimeBase.pathname.length).replace(/^\\/+/, '')
+                      : location.pathname;
+                    return path + location.search + location.hash;
+                  };
+                  const browserRoute = uri => {
+                    const raw = String(uri || '/');
+                    // pushState cấm đổi origin. Với deep link tuyệt đối, chỉ đưa
+                    // pathname/query/fragment vào runtime hiện tại; plan vẫn giữ nguyên
+                    // URI gốc để widget-test kiểm tra Router của bài sinh viên.
+                    try {
+                      const parsed = new URL(raw, location.origin);
+                      const clean = parsed.pathname.replace(/^\\/+/, '');
+                      return runtimeBase.pathname + clean + parsed.search + parsed.hash;
+                    } catch (_) {
+                      const clean = raw.replace(/^\\/+/, '');
+                      return runtimeBase.pathname + clean;
+                    }
+                  };
+                  const sendRoute = () => window.parent.postMessage({
+                    type: 'GOLDEN_RECORDER_ROUTE',
+                    payload: {uri: logicalRoute()}
+                  }, '*');
                   const textOf = el => ((el && (el.innerText || el.textContent)) || '').replace(/\\s+/g, ' ').trim();
                   // Dem so phan tu la CO CHU RIENG ben trong node. Mot nut that chi co 0 hoac 1.
                   // Neu tu 2 tro len thi node la KHUNG CHUA nhieu nhan khac nhau, khong phai nut.
@@ -472,6 +497,67 @@ public class GoldenRuntimeService {
                     }
                     return null;
                   }
+                  // Flutter Web renders the editable HTML input in a separate editing
+                  // layer. Its composedPath therefore does not always contain the
+                  // flt-semantics node that owns the TextField/Button. Match that layer
+                  // back to exactly one interactive semantic rectangle instead of ever
+                  // falling back to a Form/group ancestor.
+                  function spatialSemanticNode(event, mode, elements) {
+                    const target = event.target instanceof Element ? event.target : null;
+                    const targetRect = target && target.getBoundingClientRect
+                      ? target.getBoundingClientRect() : null;
+                    const hasPoint = Number.isFinite(event.clientX) && Number.isFinite(event.clientY)
+                      && (event.clientX !== 0 || event.clientY !== 0);
+                    const pointX = hasPoint ? event.clientX
+                      : targetRect ? targetRect.left + targetRect.width / 2 : NaN;
+                    const pointY = hasPoint ? event.clientY
+                      : targetRect ? targetRect.top + targetRect.height / 2 : NaN;
+                    const candidates = [];
+                    for (const node of elements) {
+                      const role = roleOf(node);
+                      const isInput = node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
+                        || INPUT_ROLES.has(role);
+                      if (mode === 'input' && !isInput) continue;
+                      if (mode === 'tap' && !INTERACTIVE_ROLES.has(role)) continue;
+                      const rect = node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+                      if (!rect || rect.width <= 0 || rect.height <= 0) continue;
+                      const containsPoint = Number.isFinite(pointX) && Number.isFinite(pointY)
+                        && pointX >= rect.left && pointX <= rect.right
+                        && pointY >= rect.top && pointY <= rect.bottom;
+                      const overlapWidth = targetRect
+                        ? Math.max(0, Math.min(rect.right, targetRect.right) - Math.max(rect.left, targetRect.left)) : 0;
+                      const overlapHeight = targetRect
+                        ? Math.max(0, Math.min(rect.bottom, targetRect.bottom) - Math.max(rect.top, targetRect.top)) : 0;
+                      const overlapArea = overlapWidth * overlapHeight;
+                      const minArea = targetRect
+                        ? Math.min(rect.width * rect.height, Math.max(1, targetRect.width * targetRect.height)) : 1;
+                      const overlapRatio = overlapArea / minArea;
+                      if (!containsPoint && overlapRatio < 0.6) continue;
+                      const found = locatorFor(node, mode, elements);
+                      if (!found) continue;
+                      // Prefer the rectangle under the real pointer, then the closest
+                      // sized/most specific interactive rectangle. A deterministic
+                      // locator remains mandatory, so a visual parent cannot leak in.
+                      const sizeDelta = targetRect
+                        ? Math.abs(rect.width - targetRect.width) + Math.abs(rect.height - targetRect.height) : 0;
+                      candidates.push({found, containsPoint, overlapRatio, area: rect.width * rect.height, sizeDelta});
+                    }
+                    candidates.sort((a, b) => Number(b.containsPoint) - Number(a.containsPoint)
+                      || b.overlapRatio - a.overlapRatio || a.sizeDelta - b.sizeDelta || a.area - b.area
+                      || String(a.found.attributeValue).localeCompare(String(b.found.attributeValue)));
+                    if (!candidates.length) return null;
+                    const best = candidates[0];
+                    const equallyGood = candidates.filter(item => item !== best
+                      && item.containsPoint === best.containsPoint
+                      && Math.abs(item.overlapRatio - best.overlapRatio) < 0.01
+                      && Math.abs(item.sizeDelta - best.sizeDelta) < 1
+                      && item.found.attributeValue !== best.found.attributeValue);
+                    if (equallyGood.length) {
+                      lastReject = 'Nhieu semantic control trung khop tai cung vi tri.';
+                      return null;
+                    }
+                    return best.found;
+                  }
                   // ĐÃ GỠ khối roleOf/targetOf/boolAttr + bản semanticState(el) đi kèm: merge
                   // 67fb085 kéo về hai bản semanticState trong cùng một scope (hai nhánh làm
                   // song song cùng một việc). JS lấy bản khai sau, tức bản semanticState(node)
@@ -493,6 +579,8 @@ public class GoldenRuntimeService {
                       const found = locatorFor(node, mode, elements);
                       if (found) return found;
                     }
+                    const spatial = spatialSemanticNode(event, mode, elements);
+                    if (spatial) return spatial;
                     if (!lastReject) lastReject = mode === 'input'
                       ? 'O nhap khong co semantic locator rieng.'
                       : 'Khong tim thay semantic control tuong tac duy nhat tai vi tri bam.';
@@ -530,8 +618,21 @@ public class GoldenRuntimeService {
                   let goDangCho = null; // {found, el, giaTri}
                   let oDangFocus = null;
                   let dangGhepBoGo = false;
-                  const cungLocator = (a, b) => Boolean(a && b
-                    && a.attribute === b.attribute && a.attributeValue === b.attributeValue);
+                  // Cùng một TextFormField có thể được Flutter Web công bố lúc đầu bằng
+                  // "label + hint", rồi dựng lại node chỉ còn "label" trong khi đang gõ.
+                  // So theo định danh logic ưu tiên thay vì so nguyên chuỗi aria-label để
+                  // khoảng dừng hoặc một lần rebuild DOM không chốt nhầm giá trị trung gian.
+                  const cungLocator = (a, b) => {
+                    if (!a || !b) return false;
+                    const ta = a.target || {};
+                    const tb = b.target || {};
+                    for (const key of ['semanticId', 'valueKey', 'key']) {
+                      if (ta[key] && tb[key]) return ta[key] === tb[key];
+                    }
+                    if (ta.label && tb.label) return ta.label === tb.label;
+                    if (!ta.label && !tb.label && ta.hint && tb.hint) return ta.hint === tb.hint;
+                    return a.attribute === b.attribute && a.attributeValue === b.attributeValue;
+                  };
                   // Nguon gia tri BEN nhat: node semantics (aria-label) — Flutter dong bo
                   // FULL noi dung o vao day moi khung hinh va KHONG trao node nay khi go
                   // (chi trao phan tu editing). Doc tu day thi ky tu cuoi cung khong mat.
@@ -682,6 +783,26 @@ public class GoldenRuntimeService {
                   }
                   window.addEventListener('message', event => {
                     if (!event.data || event.data.type !== COMMAND) return;
+                    if (event.data.action === 'perform_route_action') {
+                      chotEnterText();
+                      const routeAction = event.data.route_action || '';
+                      const uri = event.data.uri || '/';
+                      if (routeAction === 'boot_with_uri') {
+                        history.replaceState(history.state, '', browserRoute(uri));
+                        location.reload();
+                        return;
+                      }
+                      if (routeAction === 'open_uri') {
+                        history.pushState({}, '', browserRoute(uri));
+                        // Flutter Web RouteInformationProvider nhận thay đổi history qua
+                        // popstate. pushState tự nó không phát event nên phải phát rõ ràng.
+                        window.dispatchEvent(new PopStateEvent('popstate', {state: history.state}));
+                        sendRoute();
+                      }
+                      if (routeAction === 'browser_back') history.back();
+                      if (routeAction === 'browser_forward') history.forward();
+                      if (routeAction === 'reload') location.reload();
+                    }
                     if (event.data.action === 'snapshot_ui') {
                       chotEnterText();
                       inventory();
@@ -704,6 +825,8 @@ public class GoldenRuntimeService {
                       }));
                     }
                   });
+                  window.addEventListener('popstate', () => setTimeout(sendRoute, 0));
+                  window.addEventListener('hashchange', () => setTimeout(sendRoute, 0));
                   const enable = () => {
                     const placeholder = document.querySelector('flt-semantics-placeholder[aria-label="Enable accessibility"]');
                     if (placeholder) placeholder.click();
@@ -711,6 +834,7 @@ public class GoldenRuntimeService {
                   window.addEventListener('flutter-first-frame', () => setTimeout(enable, 100));
                   setTimeout(enable, 1000);
                   window.parent.postMessage({type: 'GOLDEN_RECORDER_READY'}, '*');
+                  sendRoute();
                 })();
                 </script>
                 """;

@@ -53,8 +53,64 @@ const DEFAULT_ALLOWED_PACKAGES = [
   "path_provider", "sembast_web", "image_picker", "intl",
 ];
 
-const ACTIONS = ["boot", "tap", "enter_text", "clear_text", "scroll", "back", "restart", "wait_until"];
+const ACTIONS = [
+  "boot", "boot_with_uri", "tap", "enter_text", "clear_text", "scroll", "back",
+  "open_uri", "browser_back", "browser_forward", "reload", "restart",
+  "wait_until", "wait_for_route",
+];
 const LOCATORS = ["semanticId", "valueKey", "label", "hint", "text"];
+const ACTION_LABELS: Record<string, string> = {
+  boot: "Khởi động app",
+  boot_with_uri: "Khởi động tại đường dẫn",
+  tap: "Bấm",
+  enter_text: "Nhập nội dung",
+  clear_text: "Xóa nội dung",
+  scroll: "Cuộn",
+  back: "Quay lại",
+  open_uri: "Mở đường dẫn",
+  browser_back: "Trình duyệt quay lại",
+  browser_forward: "Trình duyệt tiến tới",
+  reload: "Tải lại",
+  restart: "Khởi động lại",
+  wait_until: "Chờ điều kiện",
+  wait_for_route: "Chờ đường dẫn",
+  observe_ui: "Kiểm tra UI",
+  observe_database: "Kiểm tra database",
+  observe_route: "Kiểm tra đường dẫn",
+  observe_layout: "Kiểm tra bố cục",
+};
+const LOCATOR_LABELS: Record<string, string> = {
+  semanticId: "Semantic ID",
+  valueKey: "Value key",
+  label: "Nhãn",
+  hint: "Gợi ý",
+  text: "Nội dung",
+};
+
+function asJsonMap(value: unknown): JsonMap {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as JsonMap : {};
+}
+
+function readableValue(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value);
+}
+
+function summarizeExpectation(value: unknown): string {
+  const expect = asJsonMap(value);
+  const visible = Array.isArray(expect.visible_texts) ? expect.visible_texts.map(readableValue).filter(Boolean) : [];
+  const hidden = Array.isArray(expect.hidden_texts) ? expect.hidden_texts.map(readableValue).filter(Boolean) : [];
+  const semanticNodes = Array.isArray(expect.semantic_nodes) ? expect.semantic_nodes.length : 0;
+  const parts: string[] = [];
+  if (visible.length) parts.push(`Hiện: ${visible.join(", ")}`);
+  if (hidden.length) parts.push(`Không hiện: ${hidden.join(", ")}`);
+  if (semanticNodes) parts.push(`${semanticNodes} thành phần semantic`);
+  if (expect.no_exception === true) parts.push("Không có exception");
+  if (typeof expect.route === "string") parts.push(`Route: ${expect.route}`);
+  return parts.join(" · ") || (Object.keys(expect).length ? "Có dữ liệu kỳ vọng" : "");
+}
 const SEMANTIC_ROLES = [
   ["generic", "Không kiểm tra loại"],
   ["text_field", "Ô nhập liệu"],
@@ -185,7 +241,7 @@ function BehaviorAuthoringEditor() {
   const [chiaDiemChot, setChiaDiemChot] = useState<Record<string, number>>({});
   const [chiaDiemCha, setChiaDiemCha] = useState<Record<string, string>>({});
   const [hiddenCheckpointText, setHiddenCheckpointText] = useState("");
-  const [checkpointMode, setCheckpointMode] = useState<"ui" | "database">("ui");
+  const [checkpointMode, setCheckpointMode] = useState<"ui" | "database" | "route" | "layout">("ui");
   const [uiCheckpointType, setUiCheckpointType] = useState<"text" | "component" | "no_exception">("text");
   const [checkpointLocator, setCheckpointLocator] = useState("semanticId");
   const [checkpointLocatorValue, setCheckpointLocatorValue] = useState("");
@@ -198,6 +254,15 @@ function BehaviorAuthoringEditor() {
   const [databaseOperation, setDatabaseOperation] = useState("READ");
   const [databaseRow, setDatabaseRow] = useState("{}");
   const [databaseCount, setDatabaseCount] = useState("");
+  const [currentRoute, setCurrentRoute] = useState("/");
+  const [routeExpected, setRouteExpected] = useState("/");
+  const [routeCanPop, setRouteCanPop] = useState("ignore");
+  const [layoutFirstLocator, setLayoutFirstLocator] = useState("semanticId");
+  const [layoutFirstValue, setLayoutFirstValue] = useState("");
+  const [layoutSecondLocator, setLayoutSecondLocator] = useState("semanticId");
+  const [layoutSecondValue, setLayoutSecondValue] = useState("");
+  const [layoutRelation, setLayoutRelation] = useState("auto");
+  const [layoutTolerance, setLayoutTolerance] = useState(5);
   // KHÔNG điền sẵn: mã/tên luồng là danh tính của tiêu chí trong bảng điểm,
   // để mặc định thì mọi bộ chấm đều đầy "MAIN_FLOW/Luồng chính" vô nghĩa.
   const [scenarioCode, setScenarioCode] = useState("");
@@ -263,6 +328,8 @@ function BehaviorAuthoringEditor() {
       || "",
   ).trim();
   const databaseNameChanged = Boolean(suite && databaseName.trim() !== savedDatabaseName);
+  const manualActionNeedsTarget = ["tap", "enter_text", "clear_text", "scroll", "wait_until"].includes(action);
+  const manualActionNeedsUri = ["boot_with_uri", "open_uri", "wait_for_route"].includes(action);
   const savedAllowedPackages = Array.isArray(suite?.runtime_config?.allowed_packages)
     ? (suite.runtime_config.allowed_packages as unknown[]).map(String)
     : [];
@@ -570,7 +637,16 @@ function BehaviorAuthoringEditor() {
       setError("Phiên record không còn nhận thao tác — hãy tải lại trang để nối lại phiên.");
       return;
     }
-    const targetNeeded = ["tap", "enter_text", "clear_text", "scroll"].includes(action);
+    const targetNeeded = ["tap", "enter_text", "clear_text", "scroll", "wait_until"].includes(action);
+    const uriNeeded = ["boot_with_uri", "open_uri", "wait_for_route"].includes(action);
+    if (!payload && targetNeeded && !locatorValue.trim()) {
+      setError(`Action ${action} cần giá trị nhận diện semantic.`);
+      return;
+    }
+    if (!payload && uriNeeded && !inputValue.trim()) {
+      setError(`Action ${action} cần URI/path, ví dụ /movies/42?tab=cast.`);
+      return;
+    }
     const event = payload || {
       kind: "action",
       stage: "ACTION",
@@ -579,7 +655,8 @@ function BehaviorAuthoringEditor() {
       attribute: targetNeeded ? locator : "none",
       attributeValue: targetNeeded ? locatorValue.trim() : "",
       valueType: "string",
-      value: action === "enter_text" ? inputValue : "",
+      value: action === "enter_text" || uriNeeded ? inputValue.trim() : "",
+      ...(uriNeeded ? { uri: inputValue.trim() } : {}),
       browser: "flutter_tester",
     };
     if (payload) {
@@ -592,7 +669,69 @@ function BehaviorAuthoringEditor() {
       await awaitRecorderEvents();
       await enqueueRecorderEvent(event, recordingId, suite.id);
       await awaitRecorderEvents();
+      if (["boot_with_uri", "open_uri", "browser_back", "browser_forward", "reload"].includes(action)) {
+        goldenFrame.current?.contentWindow?.postMessage(
+          { type: "GOLDEN_RECORDER_COMMAND", action: "perform_route_action", route_action: action, uri: inputValue.trim() },
+          runtimeOrigin || "*",
+        );
+      }
       setLocatorValue(""); setInputValue("");
+    });
+  };
+
+  const appendRouteCheckpoint = () => {
+    const recordingId = activeRecordingId.current;
+    if (!recordingId || !suite || recording?.status !== "ACTIVE" || !acceptsRecorderEvents.current) {
+      setError("Phiên record không còn nhận checkpoint route.");
+      return;
+    }
+    if (!routeExpected.trim() && routeCanPop === "ignore") {
+      setError("Cần nhập URI/path hoặc chọn trạng thái canPop.");
+      return;
+    }
+    run("record-route-checkpoint", async () => {
+      await requestRecorderFlush();
+      await awaitRecorderEvents();
+      const expect: JsonMap = {};
+      if (routeExpected.trim()) expect.uri = routeExpected.trim();
+      if (routeCanPop !== "ignore") expect.can_pop = routeCanPop === "true";
+      await api(`/behavior-authoring/recordings/${recordingId}/events`, {
+        method: "POST",
+        body: JSON.stringify({
+          kind: "route_state", checkpoint: true, stage: "ASSERT", action: "observe_route",
+          browser: "flutter_tester", expect,
+        }),
+      });
+      await refresh(suite.id);
+    });
+  };
+
+  const appendLayoutCheckpoint = () => {
+    const recordingId = activeRecordingId.current;
+    if (!recordingId || !suite || recording?.status !== "ACTIVE" || !acceptsRecorderEvents.current) {
+      setError("Phiên record không còn nhận checkpoint bố cục.");
+      return;
+    }
+    if (!layoutFirstValue.trim() || !layoutSecondValue.trim()) {
+      setError("Cần chọn/nhập đủ hai thành phần để so quan hệ bố cục.");
+      return;
+    }
+    run("record-layout-checkpoint", async () => {
+      await requestRecorderFlush();
+      await awaitRecorderEvents();
+      await api(`/behavior-authoring/recordings/${recordingId}/events`, {
+        method: "POST",
+        body: JSON.stringify({
+          kind: "layout_relation", checkpoint: true, stage: "ASSERT", action: "observe_ui",
+          browser: "flutter_tester",
+          target: { [layoutFirstLocator]: layoutFirstValue.trim() },
+          relative_to: { [layoutSecondLocator]: layoutSecondValue.trim() },
+          relation: layoutRelation,
+          tolerance_pct: Math.min(50, Math.max(0, Number(layoutTolerance))),
+        }),
+      });
+      await refresh(suite.id);
+      setLayoutFirstValue(""); setLayoutSecondValue("");
     });
   };
 
@@ -1118,12 +1257,23 @@ function BehaviorAuthoringEditor() {
         if (typeof message === "string") setError(message);
         return;
       }
+      if (event.data.type === "GOLDEN_RECORDER_ROUTE") {
+        const uri = event.data.payload?.uri;
+        if (typeof uri === "string" && uri) {
+          setCurrentRoute(uri);
+          setRouteExpected(uri);
+        }
+        return;
+      }
       if (!acceptsRecorderEvents.current || !activeRecordingId.current || event.data.type !== "GOLDEN_RECORDER_EVENT") return;
       if (!event.data.payload || typeof event.data.payload !== "object" || Array.isArray(event.data.payload)) return;
       appendAction(event.data.payload as JsonMap);
     };
     window.addEventListener("message", receive);
     return () => window.removeEventListener("message", receive);
+    // appendAction intentionally reads the latest recording/locator state. Rebinding the
+    // window listener for every keystroke would create a short interval with no recorder.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recording, runtimeOrigin]);
 
   return (
@@ -1320,13 +1470,25 @@ function BehaviorAuthoringEditor() {
               <div className="mt-2 grid gap-2 sm:grid-cols-2"><label className="text-xs font-semibold text-slate-500">Rộng màn (dp)<input type="number" min={240} value={viewportWidth} onChange={(e) => setViewportWidth(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label><label className="text-xs font-semibold text-slate-500">Cao màn (dp)<input type="number" min={320} value={viewportHeight} onChange={(e) => setViewportHeight(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label></div>
               <p className="mt-2 text-xs font-semibold text-slate-600 dark:text-slate-300">Khung máy Android, tính bằng dp — cỡ mà Android Studio hiển thị cho máy ảo (Pixel: 412×915). Mọi phép chấm bố cục đều đo bằng dp nên không cần khai mật độ điểm ảnh.</p>
               {!recording ? <><button onClick={startRecording} disabled={!recordingInputsReady || Boolean(busy)} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-rose-600 px-4 py-2.5 font-bold text-white disabled:opacity-40"><Radio size={18} /> Bắt đầu record</button>{!recordingInputsReady && <p className="mt-2 text-xs text-amber-600">Cần đủ Database phát sinh viên, Database ẩn và Golden Solution.</p>}</> : <>
-                <div className="mt-5 rounded-xl border border-slate-200 p-4 dark:border-slate-700"><h3 className="font-bold">Thêm action</h3><div className="mt-3 grid gap-2 sm:grid-cols-2"><select value={action} onChange={(e) => setAction(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{ACTIONS.map((item) => <option key={item} value={item}>{item}</option>)}</select><select value={locator} onChange={(e) => setLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{item}</option>)}</select><input value={locatorValue} onChange={(e) => setLocatorValue(e.target.value)} placeholder="Giá trị nhận diện" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><input value={inputValue} onChange={(e) => setInputValue(e.target.value)} placeholder="Dữ liệu nhập (nếu có)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /></div><button onClick={() => appendAction()} className="mt-3 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-bold text-white"><Plus size={16} /> Thêm action</button></div>
+                <div className="mt-5 rounded-xl border border-slate-200 p-4 dark:border-slate-700">
+                  <h3 className="font-bold">Thêm action</h3>
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                    <select value={action} onChange={(e) => setAction(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{ACTIONS.map((item) => <option key={item} value={item}>{item}</option>)}</select>
+                    {manualActionNeedsTarget && <select value={locator} onChange={(e) => setLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{item}</option>)}</select>}
+                    {manualActionNeedsTarget && <input value={locatorValue} onChange={(e) => setLocatorValue(e.target.value)} placeholder="Giá trị nhận diện semantic" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />}
+                    {(action === "enter_text" || manualActionNeedsUri) && <input value={inputValue} onChange={(e) => setInputValue(e.target.value)} placeholder={manualActionNeedsUri ? "URI/path, ví dụ /movies/42?tab=cast" : "Dữ liệu nhập"} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />}
+                  </div>
+                  <button onClick={() => appendAction()} className="mt-3 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-bold text-white"><Plus size={16} /> Thêm action</button>
+                  <p className="mt-2 text-xs text-slate-500">Route hiện tại của Golden: <code>{currentRoute}</code>. Reload trong runner phát lại RouteInformation hiện tại để kiểm khả năng phục hồi route; deep link native vẫn cần lane Android riêng.</p>
+                </div>
                 <div className="mt-3 rounded-xl border border-slate-200 p-4 dark:border-slate-700">
                   <div className="flex items-center justify-between gap-3">
-                    <div><h3 className="font-bold">Thêm checkpoint</h3><p className="text-xs text-slate-500">Mỗi checkpoint trở thành một đầu điểm độc lập. Điểm và ràng buộc chia ở bảng "Chia điểm" trên thẻ hàm, sau khi sinh testcase.</p></div>
+                    <div><h3 className="font-bold">Thêm checkpoint</h3><p className="text-xs text-slate-500">Mỗi checkpoint trở thành một đầu điểm độc lập. Điểm và ràng buộc chia ở bảng &quot;Chia điểm&quot; trên thẻ hàm, sau khi sinh testcase.</p></div>
                     <div className="flex rounded-lg bg-slate-100 p-1 text-xs font-bold dark:bg-slate-800">
                       <button onClick={() => setCheckpointMode("ui")} className={`rounded-md px-3 py-1.5 ${checkpointMode === "ui" ? "bg-white text-indigo-600 shadow dark:bg-slate-700" : "text-slate-500"}`}>UI</button>
                       <button onClick={() => setCheckpointMode("database")} className={`rounded-md px-3 py-1.5 ${checkpointMode === "database" ? "bg-white text-indigo-600 shadow dark:bg-slate-700" : "text-slate-500"}`}>Database</button>
+                      <button onClick={() => setCheckpointMode("route")} className={`rounded-md px-3 py-1.5 ${checkpointMode === "route" ? "bg-white text-indigo-600 shadow dark:bg-slate-700" : "text-slate-500"}`}>Route</button>
+                      <button onClick={() => setCheckpointMode("layout")} className={`rounded-md px-3 py-1.5 ${checkpointMode === "layout" ? "bg-white text-indigo-600 shadow dark:bg-slate-700" : "text-slate-500"}`}>Bố cục</button>
                     </div>
                   </div>
                   {checkpointMode === "ui" ? (
@@ -1361,7 +1523,7 @@ function BehaviorAuthoringEditor() {
                         <button onClick={appendUiCheckpoint} title="Lưu checkpoint không exception" className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white"><Check size={16} /></button>
                       </div>}
                     </div>
-                  ) : (
+                  ) : checkpointMode === "database" ? (
                     <div className="mt-3 space-y-2">
                       <div className="grid gap-2 sm:grid-cols-3">
                         <input value={databaseTable} onChange={(e) => setDatabaseTable(e.target.value)} placeholder="Tên bảng, ví dụ users" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />
@@ -1374,15 +1536,72 @@ function BehaviorAuthoringEditor() {
                       </div>
                       <p className="text-xs text-slate-500">Mục này dùng để bổ sung assertion DB có chủ đích. Dù bỏ qua, hệ thống vẫn tự replay Golden, so Hidden DB với Output DB và tách INSERT/UPDATE/DELETE thành checkpoint độc lập. Nếu checkpoint UI và row SQLite cùng chứa giá trị nhập cuối, hệ thống tự gộp thành checkpoint đối chiếu Input → UI → Database.</p>
                     </div>
+                  ) : checkpointMode === "route" ? (
+                    <div className="mt-3 space-y-2">
+                      <div className="grid gap-2 sm:grid-cols-[1.6fr_1fr_auto]">
+                        <input value={routeExpected} onChange={(e) => setRouteExpected(e.target.value)} placeholder="URI/path mong đợi, ví dụ /movies/42?tab=cast" className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />
+                        <select value={routeCanPop} onChange={(e) => setRouteCanPop(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700"><option value="ignore">Không xét canPop</option><option value="true">Phải back được</option><option value="false">Không được back</option></select>
+                        <button onClick={appendRouteCheckpoint} title="Lưu checkpoint route" className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white"><Check size={16} /></button>
+                      </div>
+                      <p className="text-xs text-slate-500">Đang đọc từ Golden: <code>{currentRoute}</code>. Có thể sửa giá trị để kiểm deep link/path/query khác.</p>
+                    </div>
+                  ) : (
+                    <div className="mt-3 space-y-2">
+                      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                        <select value={layoutFirstLocator} onChange={(e) => setLayoutFirstLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{item} A</option>)}</select>
+                        <input value={layoutFirstValue} onChange={(e) => setLayoutFirstValue(e.target.value)} placeholder="Thành phần A" list="golden-layout-targets" className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />
+                        <select value={layoutSecondLocator} onChange={(e) => setLayoutSecondLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{item} B</option>)}</select>
+                        <input value={layoutSecondValue} onChange={(e) => setLayoutSecondValue(e.target.value)} placeholder="Thành phần B" list="golden-layout-targets" className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />
+                      </div>
+                      <datalist id="golden-layout-targets">{(uiInventory || []).map((item) => <option key={`${item.attribute}:${item.value}`} value={item.value}>{item.attribute}</option>)}</datalist>
+                      <div className="grid gap-2 sm:grid-cols-[1.5fr_1fr_auto]">
+                        <select value={layoutRelation} onChange={(e) => setLayoutRelation(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">
+                          <option value="auto">Tự suy ra quan hệ từ Golden</option><option value="above">A nằm trên B</option><option value="below">A nằm dưới B</option><option value="left_of">A bên trái B</option><option value="right_of">A bên phải B</option><option value="same_row">A và B cùng hàng</option><option value="same_column">A và B cùng cột</option><option value="inside">A nằm trong B</option><option value="contains">A chứa B</option><option value="not_overlap">A và B không chồng lấp</option><option value="overlap">A và B chồng lấp</option><option value="wider_than">A rộng hơn B</option><option value="taller_than">A cao hơn B</option>
+                        </select>
+                        <label className="flex items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700">Sai số %<input type="number" min={0} max={50} step={0.5} value={layoutTolerance} onChange={(e) => setLayoutTolerance(Number(e.target.value))} className="min-w-0 flex-1 bg-transparent text-right outline-none" /></label>
+                        <button onClick={appendLayoutCheckpoint} title="Lưu checkpoint quan hệ bố cục" className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white"><Check size={16} /></button>
+                      </div>
+                      <p className="text-xs text-slate-500">Không so pixel. Runner chỉ đo Rect logic của hai semantic element. Hãy “Chụp semantic UI” trước để lấy gợi ý target; chế độ tự động sẽ nướng quan hệ đo được từ Golden vào oracle.</p>
+                    </div>
                   )}
                 </div>
-                <div className="mt-4 max-h-48 space-y-2 overflow-auto">{(recording.raw_trace || []).map((item, index) => {
+                <div className="mt-4 max-h-72 space-y-2 overflow-auto pr-1">{(recording.raw_trace || []).map((item, index) => {
                   const sequence = Number(item.sequence || index + 1);
-                  return <div key={sequence} className="flex items-center gap-3 rounded-lg bg-slate-50 px-3 py-2 text-xs dark:bg-slate-800">
-                    <span className="font-mono text-indigo-500">{sequence}</span>
-                    <span className="font-bold">{String(item.action || item.kind)}</span>
-                    <span className="min-w-0 flex-1 truncate text-slate-500">{JSON.stringify(item.target || item.expect || {})}</span>
-                    <button onClick={() => deleteRecordedEvent(sequence)} disabled={Boolean(busy)} title="Xóa thao tác/checkpoint này" className="rounded-md p-1.5 text-rose-500 hover:bg-rose-100 disabled:opacity-40 dark:hover:bg-rose-950"><Trash2 size={15} /></button>
+                  const actionCode = String(item.action || item.kind || "event");
+                  const target = asJsonMap(item.target);
+                  const locator = ["semanticId", "valueKey", "label", "hint", "text"]
+                    .map((key) => ({ key, value: readableValue(target[key]) }))
+                    .find((entry) => entry.value.trim().length > 0);
+                  const targetHint = readableValue(target.hint);
+                  const inputValue = readableValue(item.value);
+                  const delta = asJsonMap(item.delta);
+                  const deltaText = Object.keys(delta).length
+                    ? `x: ${readableValue(delta.x) || "0"}, y: ${readableValue(delta.y) || "0"}`
+                    : "";
+                  const expectation = summarizeExpectation(item.expect);
+                  const technicalDetail = JSON.stringify(item, null, 2);
+                  return <div key={sequence} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs dark:border-slate-700 dark:bg-slate-800/80">
+                    <div className="flex items-center gap-2">
+                      <span className="flex h-6 min-w-6 shrink-0 items-center justify-center rounded-full bg-indigo-100 px-1.5 font-mono font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">{sequence}</span>
+                      <span className="font-bold text-slate-800 dark:text-slate-100">{ACTION_LABELS[actionCode] || actionCode}</span>
+                      <code className="rounded bg-slate-200 px-1.5 py-0.5 text-[10px] text-slate-500 dark:bg-slate-700 dark:text-slate-400">{actionCode}</code>
+                      <button onClick={() => deleteRecordedEvent(sequence)} disabled={Boolean(busy)} title="Xóa thao tác/checkpoint này" className="ml-auto rounded-md p-1.5 text-rose-500 hover:bg-rose-100 disabled:opacity-40 dark:hover:bg-rose-950"><Trash2 size={15} /></button>
+                    </div>
+                    {(locator || inputValue || deltaText || expectation) && <div className="mt-2 grid gap-1.5 pl-8 text-slate-600 dark:text-slate-300">
+                      {locator && <div className="flex min-w-0 items-start gap-2">
+                        <span className="w-20 shrink-0 text-slate-400">Đích</span>
+                        <span className="min-w-0 break-words font-semibold text-slate-700 dark:text-slate-200">{locator.value}</span>
+                        <span className="shrink-0 rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-semibold text-slate-500 dark:bg-slate-700 dark:text-slate-300">{LOCATOR_LABELS[locator.key] || locator.key}</span>
+                      </div>}
+                      {targetHint && locator?.key !== "hint" && targetHint !== locator?.value && <div className="flex min-w-0 items-start gap-2"><span className="w-20 shrink-0 text-slate-400">Gợi ý</span><span className="min-w-0 break-words">{targetHint}</span></div>}
+                      {inputValue && <div className="flex min-w-0 items-start gap-2"><span className="w-20 shrink-0 text-slate-400">Giá trị nhập</span><span className="min-w-0 break-words rounded-md bg-indigo-50 px-2 py-0.5 font-semibold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300">{inputValue}</span></div>}
+                      {deltaText && <div className="flex min-w-0 items-start gap-2"><span className="w-20 shrink-0 text-slate-400">Độ cuộn</span><span>{deltaText}</span></div>}
+                      {expectation && <div className="flex min-w-0 items-start gap-2"><span className="w-20 shrink-0 text-slate-400">Kỳ vọng</span><span className="min-w-0 break-words">{expectation}</span></div>}
+                    </div>}
+                    <details className="group mt-2 pl-8 text-slate-500">
+                      <summary className="w-fit cursor-pointer select-none text-[11px] hover:text-indigo-500">Chi tiết kỹ thuật</summary>
+                      <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-slate-950 p-3 text-[11px] leading-5 text-slate-300">{technicalDetail}</pre>
+                    </details>
                   </div>;
                 })}</div>
                 {recording.status === "STOPPED" && error && <div className="mt-4 rounded-xl border border-rose-300 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-200">Không thể sinh testcase: {error}. Phiên vẫn được giữ để bạn thử lại hoặc hủy.</div>}
@@ -1466,6 +1685,8 @@ function BehaviorAuthoringEditor() {
               </div>
             )}
             <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+              {/* Các hàm chứa ref phía dưới chỉ chạy trong onClick, không chạy trong render. */}
+              {/* eslint-disable-next-line react-hooks/refs */}
               {(suite.scenarios || []).map((item, index) => <div key={String(item.id || index)} className="rounded-xl border border-slate-200 px-4 py-3 dark:border-slate-700"><div className="flex items-center justify-between gap-2"><span className="font-bold">{String(item.name || item.scenario_code)}</span><span className="rounded-full bg-indigo-100 px-2 py-1 text-xs font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">{String(item.weight)} điểm</span></div><p className="mt-1 font-mono text-[11px] text-indigo-500">{String(item.scenario_code || "")}</p><p className="mt-2 text-xs text-slate-500">{Array.isArray(item.steps) ? item.steps.length : 0} action · {Array.isArray(item.checkpoints) ? item.checkpoints.length : 0} checkpoint</p>{chiaDiemId === String(item.id) && (() => {
                   const chots = Array.isArray(item.checkpoints) ? item.checkpoints as JsonMap[] : [];
                   const hanhVi = chots;
