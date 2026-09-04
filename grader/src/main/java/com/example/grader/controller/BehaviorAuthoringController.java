@@ -171,6 +171,13 @@ public class BehaviorAuthoringController {
     @PutMapping("/recordings/{id}/events/{sequence}")
     public ResponseEntity<?> updateEvent(@PathVariable String id, @PathVariable int sequence,
                                          @RequestBody Map<String, Object> body) {
+        // Hai việc sửa được trên một dòng đã ghi: điểm của checkpoint, và GIÁ TRỊ NHẬP
+        // của bước gõ chữ. Cái sau là đường chính thức để khai chữ — recorder không còn
+        // đoán nữa.
+        if (body.containsKey("value")) {
+            return call(() -> service.updateEventValue(id, sequence,
+                    body.get("value") == null ? "" : String.valueOf(body.get("value"))));
+        }
         return call(() -> service.updateEventWeight(id, sequence,
                 body.get("weight") instanceof Number number ? number.doubleValue() : 1.0));
     }

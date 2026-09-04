@@ -468,6 +468,37 @@ public class BehaviorAuthoringService {
         throw new IllegalArgumentException("Không tìm thấy event sequence " + sequence);
     }
 
+    @Transactional
+    /**
+     * Sửa GIÁ TRỊ NHẬP của một bước gõ chữ trong phiên record.
+     *
+     * Đây là nguồn sự thật duy nhất cho nội dung gõ. Recorder chỉ ghi được cú chạm vào ô;
+     * chữ thì người soạn tự khai ở đây, vì đọc chữ từ DOM của Flutter Web đã hỏng đủ ba
+     * kiểu: cắt cụt, mất trắng, và gán nhầm ô.
+     */
+    public Map<String, Object> updateEventValue(String recordingId, int sequence, String value) {
+        if (sequence < 1) throw new IllegalArgumentException("sequence event phải lớn hơn hoặc bằng 1");
+        GoldenRecording recording = recordingForUpdate(recordingId);
+        if (recording.getStatus() != RecordingStatus.ACTIVE) {
+            throw new IllegalStateException("Chỉ sửa được giá trị trong phiên ACTIVE");
+        }
+        List<Map<String, Object>> trace = readObjectList(recording.getRawTraceJson());
+        for (Map<String, Object> event : trace) {
+            Object raw = event.get("sequence");
+            if (raw instanceof Number number && number.intValue() == sequence) {
+                if (!"enter_text".equals(text(event, "action", ""))) {
+                    throw new IllegalArgumentException("Chỉ bước gõ chữ mới có giá trị nhập.");
+                }
+                event.put("value", value);
+                event.put("valueType", "string");
+                recording.setRawTraceJson(json(trace));
+                recordings.save(recording);
+                return event;
+            }
+        }
+        throw new IllegalArgumentException("Không tìm thấy event sequence " + sequence);
+    }
+
     // BẮT BUỘC @Transactional: recordingForUpdate() khóa bi quan PESSIMISTIC_WRITE, mà khóa
     // này đòi phải nằm trong transaction — thiếu là ném "No active transaction" ngay khi bấm
     // xóa action (đã xảy ra 31/8). Bốn hàm sửa phiên record còn lại đều đã có.
@@ -540,6 +571,20 @@ public class BehaviorAuthoringService {
         List<Map<String, Object>> trace = readObjectList(recording.getRawTraceJson());
         if (trace.isEmpty()) throw new IllegalStateException("Phiên record chưa có thao tác nào");
 
+        // CHẶN TẠI CỬA: bước gõ chữ mà chưa khai giá trị thì replay sẽ gõ chuỗi rỗng và
+        // mọi tiêu chí phía sau trượt theo — không được để lỗi đó trôi tới lượt capture.
+        List<String> thieuGiaTri = new ArrayList<>();
+        for (Map<String, Object> event : trace) {
+            if (!"enter_text".equals(text(event, "action", ""))) continue;
+            if (text(event, "value", "").isEmpty()) {
+                thieuGiaTri.add(locatorValue(map(event.get("target"))));
+            }
+        }
+        if (!thieuGiaTri.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "Chưa khai giá trị cho ô: " + String.join(", ", thieuGiaTri)
+                    + ". Gõ nội dung vào ô nhập trên từng dòng gõ chữ rồi sinh testcase lại.");
+        }
         List<Map<String, Object>> steps = new ArrayList<>();
         List<Map<String, Object>> checkpoints = new ArrayList<>();
         int actionNo = 0;
@@ -762,19 +807,40 @@ public class BehaviorAuthoringService {
                 .filter(item -> !Set.of("hidden_output_diff", "hidden_output_consistency")
                         .contains(text(item, "generated_from", "")))
                 .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
-        String uiCheckpointCorpus = checkpoints.stream()
-                .filter(item -> !"database_observation".equals(text(item, "kind", "")))
-                .map(this::json)
-                .collect(java.util.stream.Collectors.joining("\n"));
+        // Tập chữ mà các tiêu chí giao diện đang khẳng định NGUYÊN VĂN.
+        //
+        // Trước đây chỗ này gom JSON của mọi tiêu chí thành một chuỗi rồi lọc bằng
+        // `contains` — khớp CON. Nhưng lúc chấm, engine dùng `find.text(value)` khớp
+        // TUYỆT ĐỐI cả widget Text. Hai khái niệm khác nhau nên sinh ra tiêu chí không
+        // bao giờ đạt được: "KHAC" lọt vì nó là một đoạn của "29.300 ₫ · KHAC ·
+        // 2026-09-09", còn "6" lọt vì bất kỳ chuỗi nào có chữ số 6 cũng chứa nó.
+        Set<String> chuUiKhangDinh = new LinkedHashSet<>();
+        for (Map<String, Object> item : checkpoints) {
+            if ("database_observation".equals(text(item, "kind", ""))) continue;
+            themChuKhangDinh(chuUiKhangDinh, map(item.get("target")));
+            Map<String, Object> mongDoi = map(item.get("expect"));
+            for (Object raw : objectList(mongDoi.get("visible_texts"))) {
+                themChuKhangDinh(chuUiKhangDinh, raw);
+            }
+            for (Object raw : objectList(mongDoi.get("semantic_nodes"))) {
+                themChuKhangDinh(chuUiKhangDinh, map(map(raw).get("target")));
+            }
+        }
         int next = checkpoints.size() + 1;
         for (Map<String, Object> raw : derived == null ? List.<Map<String, Object>>of() : derived) {
             Map<String, Object> checkpoint = map(raw);
             validateDatabaseObservation(checkpoint);
-            List<String> uiValues = map(checkpoint.get("row")).values().stream()
-                    .filter(Objects::nonNull)
-                    .map(String::valueOf)
+            // Giữ giá trị nào có THẬT trong một dòng chữ mà tiêu chí giao diện khẳng định
+            // — khớp CON, đúng cách engine sẽ so (một dòng danh sách gộp nhiều trường vào
+            // một Text). Bỏ các cột ghi sổ của CSDL: id và khoá tự sinh không bao giờ hiện
+            // lên màn hình, mà lại khớp bừa với bất kỳ chuỗi nào chứa chữ số đó ("6" khớp
+            // "62.600") — sinh ra tiêu chí vô nghĩa rồi trượt oan.
+            List<String> uiValues = map(checkpoint.get("row")).entrySet().stream()
+                    .filter(o -> o.getValue() != null)
+                    .filter(o -> !COT_GHI_SO.contains(o.getKey().toLowerCase(Locale.ROOT)))
+                    .map(o -> String.valueOf(o.getValue()))
                     .filter(value -> !value.isBlank())
-                    .filter(uiCheckpointCorpus::contains)
+                    .filter(value -> chuUiKhangDinh.stream().anyMatch(chu -> chu.contains(value)))
                     .distinct()
                     .toList();
             if (!uiValues.isEmpty()
@@ -1420,6 +1486,37 @@ public class BehaviorAuthoringService {
         if (value instanceof List<?>) return "array";
         return "string";
     }
+
+    /**
+     * Gom các chuỗi mà một target/giá trị đang khẳng định, dưới dạng `find.text()` sẽ tìm.
+     *
+     * Nhãn hai dòng của ListTile ("tiêu đề\nphụ đề") được tách thêm DÒNG ĐẦU: title của
+     * ListTile là một widget Text riêng nên `find.text` khớp được nó, còn cả cụm hai dòng
+     * thì chỉ tồn tại trong cây ngữ nghĩa.
+     */
+    private void themChuKhangDinh(Set<String> dich, Object nguon) {
+        if (nguon == null) return;
+        if (nguon instanceof Map<?, ?> m) {
+            Map<String, Object> target = map(m);
+            for (String khoa : List.of("text", "label", "hint", "text_prefix")) {
+                themChuKhangDinh(dich, target.get(khoa));
+            }
+            return;
+        }
+        String chu = String.valueOf(nguon).trim();
+        if (chu.isBlank()) return;
+        dich.add(chu);
+        int xuong = chu.indexOf('\n');
+        if (xuong > 0) dich.add(chu.substring(0, xuong).trim());
+    }
+
+    /**
+     * Cột ghi sổ của CSDL — không phải dữ liệu người dùng nhìn thấy, nên không đưa vào
+     * phép đối chiếu UI. Khoá tự sinh còn nguy hiểm ở chỗ nó khớp bừa: id 6 nằm trong
+     * "62.600", trong "2026" — tiêu chí sẽ vừa vô nghĩa vừa trượt thất thường.
+     */
+    private static final Set<String> COT_GHI_SO =
+            Set.of("id", "_id", "rowid", "uuid", "created_at", "updated_at");
 
     private List<Object> objectList(Object value) {
         return value instanceof List<?> source ? new ArrayList<>(source) : new ArrayList<>();
