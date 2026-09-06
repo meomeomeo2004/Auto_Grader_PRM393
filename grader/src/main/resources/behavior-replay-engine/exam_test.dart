@@ -622,6 +622,42 @@ Future<void> _assertCheckpoint(
     return;
   }
 
+  // Ch.7 — WIDGET BỐ CỤC VÀ HIỂN THỊ NÂNG CAO. Giá trị mong đợi do giáo viên tự gõ
+  // (không phải oracle đo tự động trên Golden), nên KHÔNG bỏ qua ở lượt capture như 3
+  // kind phía trên — luôn chạy thật để chấm.
+  if (kind == 'component_scroll_direction') {
+    await _assertScrollDirection(tester, checkpoint, timeout);
+    return;
+  }
+  if (kind == 'component_scroll_to_end') {
+    await _assertScrollToEnd(tester, checkpoint, timeout);
+    return;
+  }
+  if (kind == 'component_stack_order') {
+    await _assertStackOrder(tester, checkpoint, timeout);
+    return;
+  }
+  if (kind == 'component_indexed_switch') {
+    await _assertIndexedSwitch(tester, checkpoint, timeout);
+    return;
+  }
+  if (kind == 'component_bottom_sheet') {
+    await _assertBottomSheet(tester, checkpoint, timeout);
+    return;
+  }
+  if (kind == 'component_table') {
+    await _assertTable(tester, checkpoint, timeout);
+    return;
+  }
+  if (kind == 'component_sliver_collapse') {
+    await _assertSliverCollapse(tester, checkpoint, timeout);
+    return;
+  }
+  if (kind == 'component_expanded') {
+    await _assertExpanded(tester, checkpoint, timeout);
+    return;
+  }
+
   final expectValue = _asMap(checkpoint['expect']);
   // Đếm số phép kiểm THẬT SỰ chạy. Xem chốt chặn cuối hàm.
   var soPhepKiem = 0;
@@ -1262,6 +1298,518 @@ Future<void> _assertComponentColor(
     _double(checkpoint['tolerance_pct'], 5),
     'Màu của $moTa',
   );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Ch.7 — WIDGET BỐ CỤC VÀ HIỂN THỊ NÂNG CAO
+//
+// Port từ common-testcase-engine/exam_test.dart (đã kiểm chứng qua Docker thật) — hai
+// engine biên dịch riêng cho hai runner khác nhau (COMMON_V1 vs BEHAVIOR_REPLAY) nên
+// không import chéo được, phải chép logic sang đây, đổi lại cho khớp helper của file
+// này: `_finder`/`_waitUntil` thay `_byKey`/`_expectPresent`, ném StateError/ArgumentError
+// thay vì phát kênh `_observe` có cấu trúc (file này không có kênh đó).
+//
+// Target LUÔN là {valueKey: "..."} — widget cấu trúc (Stack/Table/Sliver...) không có
+// label/hint/text như thành phần tương tác nên không dùng được cơ chế quét tự động của
+// 4 tiêu chí giao diện gốc; giáo viên tự gõ đúng ValueKey đề yêu cầu sinh viên gắn.
+// ═══════════════════════════════════════════════════════════════
+
+/// [component_scroll_direction] Kiểm chiều cuộn của ListView/GridView.
+/// expect: direction ("horizontal"/"vertical", mặc định "vertical").
+Future<void> _assertScrollDirection(
+  WidgetTester tester,
+  Map<String, dynamic> checkpoint,
+  Duration timeout,
+) async {
+  final target = _asMap(checkpoint['target']);
+  if (target.isEmpty) {
+    throw ArgumentError('Checkpoint component_scroll_direction thiếu target.');
+  }
+  final moTa = _moTaTarget(target);
+  await _waitUntil(
+    tester,
+    () => _finder(target).evaluate().isNotEmpty,
+    timeout,
+    'Không thấy $moTa trên màn hình.',
+  );
+  final expect = _asMap(checkpoint['expect']);
+  final wantedDir = _text(expect, 'direction', 'vertical').toLowerCase();
+  final listFinder = _finder(target);
+  final scrollables = find.descendant(
+    of: listFinder,
+    matching: find.byType(Scrollable, skipOffstage: false),
+    matchRoot: true,
+  );
+  if (scrollables.evaluate().isEmpty) {
+    throw StateError('Không tìm thấy Scrollable bên trong $moTa.');
+  }
+  final scrollable = tester.widget<Scrollable>(scrollables.first);
+  final actualAxis = scrollable.axisDirection;
+  final isHorizontal =
+      actualAxis == AxisDirection.left || actualAxis == AxisDirection.right;
+  final actualDir = isHorizontal ? 'horizontal' : 'vertical';
+  if (actualDir != wantedDir) {
+    throw StateError('Chiều cuộn của $moTa là $actualDir, đề yêu cầu $wantedDir.');
+  }
+}
+
+/// [component_scroll_to_end] Kiểm item lazy của ListView.builder xuất hiện sau khi cuộn.
+/// expect: target_key (key item ở cuối), direction (mặc định "vertical").
+Future<void> _assertScrollToEnd(
+  WidgetTester tester,
+  Map<String, dynamic> checkpoint,
+  Duration timeout,
+) async {
+  final target = _asMap(checkpoint['target']);
+  if (target.isEmpty) {
+    throw ArgumentError('Checkpoint component_scroll_to_end thiếu target.');
+  }
+  final moTa = _moTaTarget(target);
+  await _waitUntil(
+    tester,
+    () => _finder(target).evaluate().isNotEmpty,
+    timeout,
+    'Không thấy $moTa trên màn hình.',
+  );
+  final expect = _asMap(checkpoint['expect']);
+  final targetKey = _text(expect, 'target_key', '');
+  if (targetKey.isEmpty) {
+    throw ArgumentError('Tiêu chí component_scroll_to_end thiếu expect.target_key.');
+  }
+  final targetItem = <String, dynamic>{'valueKey': targetKey};
+  final direction = _text(expect, 'direction', 'vertical').toLowerCase();
+  final offset =
+      direction == 'horizontal' ? const Offset(-300, 0) : const Offset(0, -300);
+  for (var attempt = 0; attempt < 30; attempt++) {
+    if (find.byKey(ValueKey<String>(targetKey), skipOffstage: false)
+        .evaluate()
+        .isNotEmpty) {
+      break;
+    }
+    final scrollables = find.byType(Scrollable, skipOffstage: false);
+    if (scrollables.evaluate().isEmpty) break;
+    final count = scrollables.evaluate().length;
+    await tester.drag(scrollables.at(count - 1), offset);
+    await _boundedPump(tester, const Duration(seconds: 2));
+  }
+  if (find.byKey(ValueKey<String>(targetKey)).evaluate().isEmpty) {
+    throw StateError('Cuộn hết $moTa nhưng không thấy item cuối: $targetKey.');
+  }
+}
+
+/// [component_stack_order] Kiểm Stack có widget chồng nhau đúng thứ tự z-order.
+/// expect: bottom_key, top_key (top phải đè lên bottom).
+Future<void> _assertStackOrder(
+  WidgetTester tester,
+  Map<String, dynamic> checkpoint,
+  Duration timeout,
+) async {
+  final target = _asMap(checkpoint['target']);
+  if (target.isEmpty) {
+    throw ArgumentError('Checkpoint component_stack_order thiếu target.');
+  }
+  final moTa = _moTaTarget(target);
+  await _waitUntil(
+    tester,
+    () => _finder(target).evaluate().isNotEmpty,
+    timeout,
+    'Không thấy $moTa trên màn hình.',
+  );
+  final expect = _asMap(checkpoint['expect']);
+  final bottomKey = _text(expect, 'bottom_key', '');
+  final topKey = _text(expect, 'top_key', '');
+  if (bottomKey.isEmpty || topKey.isEmpty) {
+    throw ArgumentError(
+      'Tiêu chí component_stack_order thiếu expect.bottom_key/top_key.',
+    );
+  }
+  final stackWidget = tester.widget(_finder(target).first);
+  if (stackWidget is! Stack && stackWidget is! IndexedStack) {
+    throw StateError('$moTa không phải Stack hoặc IndexedStack.');
+  }
+  final bottomTarget = <String, dynamic>{'valueKey': bottomKey};
+  final topTarget = <String, dynamic>{'valueKey': topKey};
+  await _waitUntil(
+    tester,
+    () => _finder(bottomTarget).evaluate().isNotEmpty,
+    timeout,
+    'Không tìm thấy layer dưới: $bottomKey.',
+  );
+  await _waitUntil(
+    tester,
+    () => _finder(topTarget).evaluate().isNotEmpty,
+    timeout,
+    'Không tìm thấy layer trên: $topKey.',
+  );
+  final bottomRect = _khungThanhPhan(tester, bottomTarget);
+  final topRect = _khungThanhPhan(tester, topTarget);
+  if (bottomRect == null || topRect == null || !bottomRect.overlaps(topRect)) {
+    throw StateError(
+      'Layer $topKey không đè lên $bottomKey — Stack chưa xếp chồng đúng cách.',
+    );
+  }
+}
+
+/// [component_indexed_switch] Kiểm IndexedStack chỉ hiện 1 trang tại 1 thời điểm.
+/// expect: tabs — CSV các cặp "tabKey:pageKey", ít nhất 2 cặp.
+Future<void> _assertIndexedSwitch(
+  WidgetTester tester,
+  Map<String, dynamic> checkpoint,
+  Duration timeout,
+) async {
+  final target = _asMap(checkpoint['target']);
+  if (target.isEmpty) {
+    throw ArgumentError('Checkpoint component_indexed_switch thiếu target.');
+  }
+  final moTa = _moTaTarget(target);
+  await _waitUntil(
+    tester,
+    () => _finder(target).evaluate().isNotEmpty,
+    timeout,
+    'Không thấy $moTa trên màn hình.',
+  );
+  final expect = _asMap(checkpoint['expect']);
+  final rawPairs = _text(expect, 'tabs', '')
+      .split(',')
+      .map((s) => s.trim())
+      .where((s) => s.isNotEmpty)
+      .toList();
+  if (rawPairs.length < 2) {
+    throw ArgumentError(
+      'Tiêu chí component_indexed_switch cần expect.tabs với ít nhất 2 cặp '
+      '"tabKey:pageKey".',
+    );
+  }
+  final tabKeys = <String>[];
+  final pageKeys = <String>[];
+  for (final pair in rawPairs) {
+    final parts = pair.split(':');
+    if (parts.length != 2 || parts[0].trim().isEmpty || parts[1].trim().isEmpty) {
+      throw ArgumentError('expect.tabs sai định dạng ở "$pair" — cần "tabKey:pageKey".');
+    }
+    tabKeys.add(parts[0].trim());
+    pageKeys.add(parts[1].trim());
+  }
+  await _waitUntil(
+    tester,
+    () => find.byKey(ValueKey<String>(pageKeys[0]), skipOffstage: false)
+        .evaluate()
+        .isNotEmpty,
+    timeout,
+    'Trang đầu tiên (${pageKeys[0]}) phải hiển thị ngay khi mở màn hình.',
+  );
+  for (var i = 1; i < tabKeys.length; i++) {
+    final tabTarget = <String, dynamic>{'valueKey': tabKeys[i]};
+    await _waitUntil(
+      tester,
+      () => _finder(tabTarget).evaluate().isNotEmpty,
+      timeout,
+      'Không tìm thấy nút tab: ${tabKeys[i]}.',
+    );
+    await tester.tap(_finder(tabTarget).first, warnIfMissed: false);
+    await _boundedPump(tester, const Duration(seconds: 2));
+    await _waitUntil(
+      tester,
+      () => find.byKey(ValueKey<String>(pageKeys[i])).evaluate().isNotEmpty,
+      timeout,
+      'Sau khi bấm ${tabKeys[i]}, trang ${pageKeys[i]} phải hiển thị.',
+    );
+    final prevFinder = find.byKey(ValueKey<String>(pageKeys[i - 1]));
+    if (prevFinder.evaluate().isNotEmpty) {
+      throw StateError(
+        'Trang ${pageKeys[i - 1]} vẫn đang hiển thị sau khi chuyển sang tab thứ ${i + 1}.',
+      );
+    }
+  }
+  final firstTabTarget = <String, dynamic>{'valueKey': tabKeys[0]};
+  await tester.tap(_finder(firstTabTarget).first, warnIfMissed: false);
+  await _boundedPump(tester, const Duration(seconds: 2));
+  await _waitUntil(
+    tester,
+    () => find.byKey(ValueKey<String>(pageKeys[0])).evaluate().isNotEmpty,
+    timeout,
+    'Bấm lại tab đầu, trang ${pageKeys[0]} phải hiển thị lại.',
+  );
+}
+
+/// [component_bottom_sheet] Kiểm Modal BottomSheet bật lên và đóng lại đúng cách.
+/// target = nút bật sheet. expect: sheet_key, close_key (tuỳ chọn — bỏ trống thì kéo
+/// sheet xuống để đóng).
+Future<void> _assertBottomSheet(
+  WidgetTester tester,
+  Map<String, dynamic> checkpoint,
+  Duration timeout,
+) async {
+  final target = _asMap(checkpoint['target']);
+  if (target.isEmpty) {
+    throw ArgumentError('Checkpoint component_bottom_sheet thiếu target.');
+  }
+  final moTa = _moTaTarget(target);
+  await _waitUntil(
+    tester,
+    () => _finder(target).evaluate().isNotEmpty,
+    timeout,
+    'Không thấy $moTa trên màn hình.',
+  );
+  final expect = _asMap(checkpoint['expect']);
+  final sheetKey = _text(expect, 'sheet_key', '');
+  final closeKey = _text(expect, 'close_key', '');
+  if (sheetKey.isEmpty) {
+    throw ArgumentError('Tiêu chí component_bottom_sheet thiếu expect.sheet_key.');
+  }
+  final sheetTarget = <String, dynamic>{'valueKey': sheetKey};
+  if (_finder(sheetTarget).evaluate().isNotEmpty) {
+    throw StateError('Sheet $sheetKey không nên hiển thị trước khi bấm $moTa.');
+  }
+  await tester.tap(_finder(target).first, warnIfMissed: false);
+  await _boundedPump(tester, const Duration(seconds: 2));
+  await _waitUntil(
+    tester,
+    () => _finder(sheetTarget).evaluate().isNotEmpty,
+    timeout,
+    'Bấm $moTa nhưng sheet $sheetKey không xuất hiện.',
+  );
+  if (closeKey.isNotEmpty) {
+    final closeTarget = <String, dynamic>{'valueKey': closeKey};
+    await _waitUntil(
+      tester,
+      () => _finder(closeTarget).evaluate().isNotEmpty,
+      timeout,
+      'Không tìm thấy nút đóng sheet: $closeKey.',
+    );
+    await tester.tap(_finder(closeTarget).first, warnIfMissed: false);
+  } else {
+    await tester.drag(_finder(sheetTarget).first, const Offset(0, 400));
+  }
+  await _boundedPump(tester, const Duration(seconds: 2));
+  if (find.byKey(ValueKey<String>(sheetKey)).evaluate().isNotEmpty) {
+    throw StateError('Sheet $sheetKey vẫn còn hiển thị sau khi đóng.');
+  }
+  await tester.tap(_finder(target).first, warnIfMissed: false);
+  await _boundedPump(tester, const Duration(seconds: 2));
+  await _waitUntil(
+    tester,
+    () => _finder(sheetTarget).evaluate().isNotEmpty,
+    timeout,
+    'Sheet $sheetKey không mở được lần 2.',
+  );
+}
+
+/// [component_table] Kiểm Table widget có đúng số hàng và nội dung.
+/// target = Table. expect: row_count, header_keys/cell_keys (CSV, tuỳ chọn), cells
+/// (CSV dạng "c00,c01|c10,c11", tuỳ chọn).
+Future<void> _assertTable(
+  WidgetTester tester,
+  Map<String, dynamic> checkpoint,
+  Duration timeout,
+) async {
+  final target = _asMap(checkpoint['target']);
+  if (target.isEmpty) {
+    throw ArgumentError('Checkpoint component_table thiếu target.');
+  }
+  final moTa = _moTaTarget(target);
+  await _waitUntil(
+    tester,
+    () => _finder(target).evaluate().isNotEmpty,
+    timeout,
+    'Không thấy $moTa trên màn hình.',
+  );
+  final tableWidget = tester.widget(_finder(target).first);
+  if (tableWidget is! Table) {
+    throw StateError('$moTa không phải Table widget — dùng Table() thay vì ListView.');
+  }
+  final expect = _asMap(checkpoint['expect']);
+  final wantedRows = _int(expect['row_count'], -1);
+  final actualRows = tableWidget.children.length;
+  if (wantedRows >= 0 && actualRows != wantedRows) {
+    throw StateError('Bảng $moTa có $actualRows hàng, đề yêu cầu $wantedRows hàng.');
+  }
+  for (final key in _text(expect, 'header_keys', '')
+      .split(',')
+      .map((s) => s.trim())
+      .where((s) => s.isNotEmpty)) {
+    if (find.byKey(ValueKey<String>(key)).evaluate().isEmpty) {
+      throw StateError('Thiếu header cell key: $key.');
+    }
+  }
+  for (final key in _text(expect, 'cell_keys', '')
+      .split(',')
+      .map((s) => s.trim())
+      .where((s) => s.isNotEmpty)) {
+    if (find.byKey(ValueKey<String>(key)).evaluate().isEmpty) {
+      throw StateError('Thiếu data cell key: $key.');
+    }
+  }
+  final cellsRaw = _text(expect, 'cells', '');
+  if (cellsRaw.isNotEmpty) {
+    final rows = cellsRaw.split('|');
+    for (var r = 0; r < rows.length; r++) {
+      if (r >= tableWidget.children.length) {
+        throw StateError(
+          'Số dòng thực tế ($actualRows) ít hơn số dòng mong đợi (${rows.length}).',
+        );
+      }
+      final cols = rows[r].split(',').map((c) => c.trim()).toList();
+      final tableRow = tableWidget.children[r];
+      for (var c = 0; c < cols.length; c++) {
+        if (c >= tableRow.children.length) {
+          throw StateError(
+            'Dòng $r có số cột thực tế (${tableRow.children.length}) ít hơn mong đợi '
+            '(${cols.length}).',
+          );
+        }
+        final expectedText = cols[c];
+        if (expectedText.isEmpty) continue;
+        final cellWidget = tableRow.children[c];
+        final cellFinder = find.byWidget(cellWidget);
+        final textFinder = find.descendant(
+          of: cellFinder,
+          matching: find.byType(Text, skipOffstage: false),
+          matchRoot: true,
+        );
+        if (textFinder.evaluate().isEmpty) {
+          throw StateError('Không tìm thấy text widget tại dòng $r, cột $c.');
+        }
+        final textWidget = tester.widget<Text>(textFinder.first);
+        final actualText =
+            textWidget.data ?? textWidget.textSpan?.toPlainText() ?? '';
+        if (!actualText.contains(expectedText)) {
+          throw StateError(
+            'Nội dung ô ($r, $c) là "$actualText", đề yêu cầu chứa "$expectedText".',
+          );
+        }
+      }
+    }
+  }
+}
+
+/// Đo "chiều cao thật" hiện tại của SliverAppBar tại thời điểm gọi.
+///
+/// `tester.getRect` trên một widget bên trong `flexibleSpace` không dùng được để biết
+/// sliver đã co lại hay chưa: `RenderSliverPersistentHeader` luôn layout con của nó ở
+/// đúng `maxExtent`, bất kể đang collapse hay không. `geometry.paintExtent` của CHÍNH
+/// `RenderSliverPersistentHeader` mới phản ánh đúng độ co giãn — đi ngược cây render từ
+/// widget được tìm thấy lên tới ancestor gần nhất thuộc loại đó.
+double? _sliverCollapsedExtent(WidgetTester tester, Finder finder) {
+  if (finder.evaluate().isEmpty) return null;
+  RenderObject? node = tester.renderObject(finder);
+  while (node != null) {
+    if (node is RenderSliverPersistentHeader) return node.geometry?.paintExtent;
+    node = node.parent;
+  }
+  return null;
+}
+
+/// [component_sliver_collapse] Kiểm SliverAppBar + CustomScrollView không lỗi, co lại
+/// khi cuộn nếu yêu cầu. target = CustomScrollView. expect: appbar_key, list_key (tuỳ
+/// chọn), collapse (bool, mặc định false — chỉ kiểm cuộn an toàn, không kiểm co lại).
+Future<void> _assertSliverCollapse(
+  WidgetTester tester,
+  Map<String, dynamic> checkpoint,
+  Duration timeout,
+) async {
+  final target = _asMap(checkpoint['target']);
+  if (target.isEmpty) {
+    throw ArgumentError('Checkpoint component_sliver_collapse thiếu target.');
+  }
+  final moTa = _moTaTarget(target);
+  await _waitUntil(
+    tester,
+    () => _finder(target).evaluate().isNotEmpty,
+    timeout,
+    'Không thấy $moTa trên màn hình.',
+  );
+  final expect = _asMap(checkpoint['expect']);
+  final appBarKey = _text(expect, 'appbar_key', '');
+  if (appBarKey.isEmpty) {
+    throw ArgumentError('Tiêu chí component_sliver_collapse thiếu expect.appbar_key.');
+  }
+  final appBarTarget = <String, dynamic>{'valueKey': appBarKey};
+  await _waitUntil(
+    tester,
+    () => _finder(appBarTarget).evaluate().isNotEmpty,
+    timeout,
+    'Không tìm thấy SliverAppBar key: $appBarKey.',
+  );
+  final heightBefore = _sliverCollapsedExtent(tester, _finder(appBarTarget)) ??
+      tester.getRect(_finder(appBarTarget).first).height;
+  // jumpTo thay vì tester.drag(): trong engine này, drag() không đẩy được vị trí cuộn
+  // của Scrollable bên trong CustomScrollView + SliverAppBar (đã xác nhận bằng debug —
+  // ScrollPosition.pixels đứng yên ở 0 sau nhiều lần drag, dù cùng cơ chế lại chạy đúng ở
+  // common-testcase-engine). Tiêu chí này chỉ cần biết "co lại khi có vị trí cuộn", không
+  // cần kiểm gesture cuộn hoạt động — việc đó đã do component_scroll_direction/
+  // component_scroll_to_end đảm nhiệm bằng tester.drag() thật.
+  final scrollables = find.descendant(
+    of: _finder(target),
+    matching: find.byType(Scrollable, skipOffstage: false),
+    matchRoot: true,
+  );
+  if (scrollables.evaluate().isNotEmpty) {
+    final scrollState = tester.state<ScrollableState>(scrollables.first);
+    scrollState.position.jumpTo(scrollState.position.maxScrollExtent);
+    await _boundedPump(tester, const Duration(seconds: 2));
+  }
+  final collapseExpected = _bool(expect['collapse'], false);
+  if (collapseExpected && _finder(appBarTarget).evaluate().isNotEmpty) {
+    final heightAfter = _sliverCollapsedExtent(tester, _finder(appBarTarget)) ??
+        tester.getRect(_finder(appBarTarget).first).height;
+    if (heightAfter >= heightBefore) {
+      throw StateError(
+        'SliverAppBar không thu lại khi cuộn: chiều cao trước=$heightBefore, '
+        'sau=$heightAfter.',
+      );
+    }
+  }
+  final listKey = _text(expect, 'list_key', '');
+  if (listKey.isNotEmpty && find.byKey(ValueKey<String>(listKey)).evaluate().isEmpty) {
+    throw StateError('Không tìm thấy SliverList/SliverGrid key: $listKey.');
+  }
+}
+
+/// [component_expanded] Kiểm 1 widget có được bọc trong Expanded, nằm trong
+/// Row/Column/Flex. target = widget con. expect: flex (mặc định 1).
+Future<void> _assertExpanded(
+  WidgetTester tester,
+  Map<String, dynamic> checkpoint,
+  Duration timeout,
+) async {
+  final target = _asMap(checkpoint['target']);
+  if (target.isEmpty) {
+    throw ArgumentError('Checkpoint component_expanded thiếu target.');
+  }
+  final moTa = _moTaTarget(target);
+  await _waitUntil(
+    tester,
+    () => _finder(target).evaluate().isNotEmpty,
+    timeout,
+    'Không thấy $moTa trên màn hình.',
+  );
+  final childFinder = _finder(target);
+  final expandedFinder = find.ancestor(
+    of: childFinder,
+    matching: find.byType(Expanded, skipOffstage: false),
+  );
+  if (expandedFinder.evaluate().isEmpty) {
+    throw StateError('$moTa không được bọc trong Expanded.');
+  }
+  final expandedWidget = tester.widget<Expanded>(expandedFinder.first);
+  final expect = _asMap(checkpoint['expect']);
+  final expectedFlex = _int(expect['flex'], 1);
+  if (expandedWidget.flex != expectedFlex) {
+    throw StateError(
+      'Expanded bọc $moTa có flex=${expandedWidget.flex}, đề yêu cầu $expectedFlex.',
+    );
+  }
+  final parentFinder = find.ancestor(
+    of: expandedFinder.first,
+    matching: find.byWidgetPredicate(
+      (widget) => widget is Row || widget is Column || widget is Flex,
+      skipOffstage: false,
+    ),
+  );
+  if (parentFinder.evaluate().isEmpty) {
+    throw StateError('Expanded bọc $moTa phải nằm trong Row, Column hoặc Flex.');
+  }
 }
 
 /// Đo vị trí + màu chuẩn của mọi thành phần được chấm giao diện, ghi cạnh

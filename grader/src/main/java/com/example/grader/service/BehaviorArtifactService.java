@@ -372,6 +372,139 @@ public class BehaviorArtifactService {
                 .orElse("");
     }
 
+    private static final java.util.regex.Pattern VALUE_KEY_PATTERN = java.util.regex.Pattern.compile(
+            "\\bValueKey(?:<[^>]*>)?\\s*\\(\\s*['\"]([^'\"]+)['\"]\\s*\\)|\\bKey\\s*\\(\\s*['\"]([^'\"]+)['\"]\\s*\\)");
+    /** Tên constructor Widget ngay trước 1 key — kể cả constructor đặt tên (`ListView.builder(`). */
+    private static final java.util.regex.Pattern WIDGET_CTOR_PATTERN = java.util.regex.Pattern.compile(
+            "([A-Z][A-Za-z0-9_]*)(?:\\.[a-zA-Z_][A-Za-z0-9_]*)?\\(");
+    /** Khối comment `//` liền nhau ngay phía trên 1 vị trí trong source. */
+    private static final java.util.regex.Pattern COMMENT_BLOCK_PATTERN = java.util.regex.Pattern.compile(
+            "(?m)(?:^[ \\t]*//[^\\n]*\\n?)+");
+    /**
+     * Hàm/method Dart bao quanh (`_horizontalList() {`, `_openSheet() async {`...) — tín
+     * hiệu KHÔNG cần golden author viết thêm gì (khác comment quy ước), vì hầu hết code đã
+     * đặt tên hàm dựng widget có nghĩa sẵn theo thói quen bình thường.
+     */
+    private static final java.util.regex.Pattern METHOD_NAME_PATTERN = java.util.regex.Pattern.compile(
+            "\\b([_a-z][A-Za-z0-9_]*)\\s*\\([^()]*\\)\\s*(?:async\\s*)?\\{");
+    private static final Set<String> GENERIC_METHOD_NAMES = Set.of(
+            "build", "main", "initState", "dispose", "createState", "didChangeDependencies",
+            "didUpdateWidget", "setState", "call", "if", "for", "while", "switch");
+    private static final int KEY_CONTEXT_WINDOW = 500;
+
+    /**
+     * Quét TĨNH source Golden tìm các `ValueKey('...')`/`Key('...')` literal — dùng để gợi ý
+     * key cho giáo viên khi soạn tiêu chí Chương 7 (bố cục nâng cao), vì ValueKey không lộ ra
+     * DOM/semantics của Flutter Web nên không quét được qua recorder như 4 tiêu chí kia.
+     * Kèm theo 2 tín hiệu để phân biệt các key TRÔNG GIỐNG NHAU (vd "ch7.hlist" và
+     * "ch7.vlist") khi người soạn testcase không phải người viết golden, không đọc được
+     * source để đoán nghĩa:
+     * - "widgetType": tên constructor Widget đứng ngay trước key (đoán bằng tìm ngược) — lọc
+     *   gợi ý theo đúng loại widget mà từng tiêu chí Chương 7 cần (vd Stack cho "Stack xếp
+     *   chồng").
+     * - "hint": ưu tiên khối comment `//` liền kề ngay phía trên (nếu người viết golden có
+     *   ghi chú kiểu "// SCROLL_DIRECTION: listKey=ch7.hlist, direction=horizontal" như quy
+     *   ước sẵn có của repo); NẾU KHÔNG CÓ COMMENT NÀO (golden author không viết, trường hợp
+     *   phổ biến hơn), rơi về tên hàm Dart bao quanh đã "người hoá" (vd `_verticalLazyList`
+     *   → "Vertical Lazy List") — tín hiệu này gần như luôn có sẵn vì không đòi hỏi golden
+     *   author làm thêm gì ngoài đặt tên hàm có nghĩa như thói quen viết code bình thường.
+     *   Rỗng chỉ khi cả 2 nguồn đều không tìm được gì.
+     */
+    public List<Map<String, String>> scanGoldenValueKeys(String suiteId) {
+        BehaviorArtifact golden = active(suiteId, BehaviorArtifactType.GOLDEN_SOLUTION);
+        Map<String, String[]> found = new java.util.LinkedHashMap<>();
+        try (ZipFile file = new ZipFile(Path.of(golden.getStoragePath()).toFile())) {
+            var entries = file.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
+                String entryName = entry.getName().replace('\\', '/');
+                if (entry.isDirectory() || !entryName.endsWith(".dart") || !entryName.contains("lib/")) continue;
+                String source = new String(file.getInputStream(entry).readAllBytes(), StandardCharsets.UTF_8);
+                java.util.regex.Matcher m = VALUE_KEY_PATTERN.matcher(source);
+                while (m.find()) {
+                    String name = m.group(1) != null ? m.group(1) : m.group(2);
+                    if (name == null || name.isBlank()) continue;
+                    String window = source.substring(Math.max(0, m.start() - KEY_CONTEXT_WINDOW), m.start());
+                    String hint = hintIn(window);
+                    if (hint.isBlank()) hint = enclosingMethodLabel(window);
+                    found.putIfAbsent(name, new String[] {widgetTypeIn(window), hint});
+                }
+            }
+        } catch (Exception e) {
+            throw new IllegalStateException("Không đọc được Golden ZIP để quét key: " + e.getMessage(), e);
+        }
+        List<Map<String, String>> result = new java.util.ArrayList<>();
+        for (String key : new java.util.TreeSet<>(found.keySet())) {
+            String[] info = found.get(key);
+            result.add(Map.of("key", key, "widgetType", info[0], "hint", info[1]));
+        }
+        return result;
+    }
+
+    private String enclosingMethodLabel(String window) {
+        java.util.regex.Matcher m = METHOD_NAME_PATTERN.matcher(window);
+        String last = "";
+        while (m.find()) {
+            String name = m.group(1);
+            if (!GENERIC_METHOD_NAMES.contains(name)) last = name;
+        }
+        return last.isEmpty() ? "" : humanizeIdentifier(last);
+    }
+
+    private String humanizeIdentifier(String identifier) {
+        String trimmed = identifier.replaceFirst("^_+", "");
+        if (trimmed.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < trimmed.length(); i++) {
+            char c = trimmed.charAt(i);
+            if (Character.isUpperCase(c) && i > 0) sb.append(' ');
+            sb.append(i == 0 ? Character.toUpperCase(c) : c);
+        }
+        return sb.toString();
+    }
+
+    private String widgetTypeIn(String window) {
+        java.util.regex.Matcher m = WIDGET_CTOR_PATTERN.matcher(window);
+        String last = "";
+        while (m.find()) {
+            last = m.group(1);
+        }
+        return last;
+    }
+
+    private String hintIn(String window) {
+        java.util.regex.Matcher m = COMMENT_BLOCK_PATTERN.matcher(window);
+        String lastBlock = "";
+        int lastEnd = -1;
+        while (m.find()) {
+            lastBlock = m.group();
+            lastEnd = m.end();
+        }
+        if (lastBlock.isBlank()) return "";
+        // Comment chỉ thật sự mô tả key đang xét nếu hàm/khối mà nó mở ra CHƯA ĐÓNG trước
+        // khi tới key — dò cân bằng ngoặc {} từ ngay sau comment: nếu độ sâu tụt về đáy (một
+        // hàm đã đóng trọn) rồi mới gặp key, nghĩa là comment đó thuộc hàm liền trước đã kết
+        // thúc, trôi vào cửa sổ tìm ngược do tình cờ đủ gần — không phải của key đang xét.
+        // (Bug thật gặp phải: 2 hàm ngắn liền nhau khiến comment của hàm 1 lại bị gán nhầm
+        // cho key ở hàm 2 — phát hiện qua unit test, không phải suy diễn.)
+        String gap = window.substring(lastEnd);
+        int depth = 0;
+        boolean opened = false;
+        for (int i = 0; i < gap.length(); i++) {
+            char c = gap.charAt(i);
+            if (c == '{') { depth++; opened = true; }
+            else if (c == '}') {
+                depth--;
+                if (opened && depth <= 0) return "";
+            }
+        }
+        String joined = String.join(" ", lastBlock.lines()
+                .map(line -> line.trim().replaceFirst("^//\\s*", ""))
+                .filter(line -> !line.isBlank())
+                .toList());
+        return joined.length() > 160 ? joined.substring(0, 160) + "…" : joined;
+    }
+
     private Set<String> scanDartDatabaseNames(Path zip) throws Exception {
         Set<String> found = new java.util.LinkedHashSet<>();
         java.util.regex.Pattern mau = java.util.regex.Pattern.compile("['\"]([-A-Za-z0-9_./]+[.]db)['\"]");

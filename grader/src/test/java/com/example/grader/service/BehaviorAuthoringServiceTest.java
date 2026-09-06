@@ -220,6 +220,41 @@ class BehaviorAuthoringServiceTest {
     }
 
     @Test
+    void ch7ComponentEventsSurviveAbstractionIntoScenarioCheckpoints() {
+        // Bug thật gặp phải khi chấm thử 1 bài qua đúng luồng sản phẩm (record → stop →
+        // abstract): appendEvent lưu đúng 8 event component_* Chương 7 vào raw_trace, nhưng
+        // abstractRecording lọc checkpoint theo 1 danh sách kind cứng KHÔNG có 8 kind Ch.7 —
+        // rơi vào nhánh else im lặng, mất trắng, scenario sinh ra 0 tiêu chí Chương 7. Test
+        // này khoá lại đúng hành vi: mỗi kind Ch.7 phải còn nguyên trong checkpoints sau abstract.
+        Map<String, Object> golden = service.registerGoldenApp(Map.of(
+                "name", "Golden Ch7", "runtime_url", "http://localhost:9010", "ready", true));
+        Map<String, Object> suite = service.createSuite(Map.of(
+                "suite_code", "CH7_ABSTRACT", "name", "Ch7 abstract suite", "golden_app_id", golden.get("id")));
+        Map<String, Object> recording = service.startRecording(String.valueOf(suite.get("id")), Map.of(
+                "name", "Ch7 demo", "initial_state", Map.of("reset_storage", false)));
+        String recordingId = String.valueOf(recording.get("id"));
+        service.appendEvent(recordingId, Map.of(
+                "kind", "action", "action", "tap", "target", Map.of("label", "Mở demo Chương 7")));
+        service.appendEvent(recordingId, Map.of(
+                "kind", "component_stack_order", "target", Map.of("valueKey", "ch7.stack"),
+                "expect", Map.of("bottom_key", "ch7.stack.bottom", "top_key", "ch7.stack.top")));
+        service.appendEvent(recordingId, Map.of(
+                "kind", "component_table", "target", Map.of("valueKey", "ch7.table"),
+                "expect", Map.of("row_count", "3")));
+        service.stopRecording(recordingId, Map.of());
+
+        Map<String, Object> scenario = service.abstractRecording(recordingId, Map.of(
+                "scenario_code", "CH7_DEMO", "name", "Ch7 demo", "weight", 5.0));
+
+        List<?> checkpoints = (List<?>) scenario.get("checkpoints");
+        List<String> kinds = checkpoints.stream().map(item -> String.valueOf(((Map<?, ?>) item).get("kind"))).toList();
+        assertTrue(kinds.contains("component_stack_order"),
+                "component_stack_order phải còn trong checkpoints sau abstract, danh sách hiện có: " + kinds);
+        assertTrue(kinds.contains("component_table"),
+                "component_table phải còn trong checkpoints sau abstract, danh sách hiện có: " + kinds);
+    }
+
+    @Test
     void stoppedRecordingCanBeDiscardedAfterAbstractFailure() {
         Map<String, Object> golden = service.registerGoldenApp(Map.of(
                 "name", "Golden recoverable recording",
@@ -337,6 +372,57 @@ class BehaviorAuthoringServiceTest {
         Map<String, Object> plan = service.executionPlan(String.valueOf(suite.get("id")));
         assertEquals("1.0", plan.get("schema_version"));
         assertEquals(1, ((List<?>) plan.get("scenarios")).size());
+    }
+
+    @Test
+    void recapturingOracleAfterGoldenChangeUpdatesGoldenShaSoPublishSucceeds() {
+        // Bug thật gặp phải khi publish thử sau khi thay Golden Solution: recapture oracle
+        // của scenario ĐÃ CÓ SẴN qua applyDerivedDatabaseCheckpoints (đường updateScenario
+        // dùng, khác đường abstractRecording lần đầu) chỉ cập nhật nội dung/observation chứ
+        // KHÔNG đụng golden_sha256 — oracle mãi mãi "READY" nhưng trỏ sha Golden CŨ, nên
+        // publish() cứ báo "chưa có oracle READY khớp phiên bản Golden hiện tại" dù đã
+        // recapture bao nhiêu lần. Test khoá lại: truyền goldenSha256 mới phải cập nhật
+        // đúng, và publish() phải thành công sau đó.
+        Map<String, Object> golden = service.registerGoldenApp(Map.of(
+                "name", "Golden resha", "runtime_url", "http://localhost:9010", "ready", true));
+        Map<String, Object> suite = service.createSuite(Map.of(
+                "suite_code", "RESHA_AFTER_GOLDEN_CHANGE", "name", "Resha suite", "golden_app_id", golden.get("id")));
+        Map<String, Object> recording = service.startRecording(String.valueOf(suite.get("id")), Map.of("name", "Add user"));
+        String recordingId = String.valueOf(recording.get("id"));
+        service.appendEvent(recordingId, Map.of(
+                "kind", "action", "action", "tap", "target", Map.of("semanticId", "action.add")));
+        service.appendEvent(recordingId, Map.of(
+                "kind", "checkpoint", "action", "observe_ui",
+                "expect", Map.of("visible_texts", List.of("ok"), "no_exception", true)));
+        service.stopRecording(recordingId, Map.of());
+        Map<String, Object> scenario = service.abstractRecording(recordingId, Map.of(
+                "scenario_code", "RESHA_SCENARIO", "weight", 1.0));
+        String scenarioId = String.valueOf(scenario.get("id"));
+        service.applyDerivedDatabaseCheckpoints(scenarioId, List.of(), "a".repeat(64));
+
+        Map<String, Object> published = service.publish(String.valueOf(suite.get("id")));
+        assertEquals("PUBLISHED", published.get("status"));
+
+        // Mô phỏng đổi Golden Solution (như markGoldenSolutionReady làm khi upload version mới).
+        com.example.grader.entity.GoldenApp goldenRow = goldenAppRepository.findById(String.valueOf(golden.get("id"))).orElseThrow();
+        goldenRow.setArtifactSha256("b".repeat(64));
+        goldenAppRepository.save(goldenRow);
+
+        IllegalStateException blocked = assertThrows(IllegalStateException.class,
+                () -> service.publish(String.valueOf(suite.get("id"))));
+        assertTrue(blocked.getMessage().contains("oracle READY"),
+                "Sau khi đổi Golden mà chưa recapture, publish phải chặn lại: " + blocked.getMessage());
+
+        // Recapture với sha Golden MỚI — mô phỏng đúng những gì GoldenOracleCaptureService làm.
+        service.applyDerivedDatabaseCheckpoints(scenarioId, List.of(), "c".repeat(64), "b".repeat(64));
+
+        com.example.grader.entity.OracleSnapshot refreshed =
+                oracleRepository.findFirstByScenarioIdOrderByCreatedAtDesc(scenarioId).orElseThrow();
+        assertEquals("b".repeat(64), refreshed.getGoldenSha256(),
+                "Recapture phải cập nhật golden_sha256 sang phiên bản Golden vừa dùng để replay");
+
+        Map<String, Object> republished = service.publish(String.valueOf(suite.get("id")));
+        assertEquals("PUBLISHED", republished.get("status"));
     }
 
     @Test

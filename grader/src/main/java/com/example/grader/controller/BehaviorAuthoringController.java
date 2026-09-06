@@ -401,6 +401,11 @@ public class BehaviorAuthoringController {
                 .body(resource);
     }
 
+    @GetMapping("/suites/{id}/golden-value-keys")
+    public ResponseEntity<?> goldenValueKeys(@PathVariable String id) {
+        return call(() -> Map.of("keys", artifactService.scanGoldenValueKeys(id)));
+    }
+
     @GetMapping("/suites/{id}/execution-plan")
     public ResponseEntity<?> executionPlan(@PathVariable String id) {
         return call(() -> service.executionPlan(id));

@@ -44,8 +44,26 @@ public class BehaviorAuthoringService {
             "theme_color",
             // So bố cục màn hình với ảnh chuẩn chụp từ Golden trong cùng container.
             "screen_match",
+            // Ch.7 — widget bố cục và hiển thị nâng cao. Không quét được từ semantics
+            // (Stack/IndexedStack/Table/Sliver đều lộ ra là container "list"/"generic"
+            // giống nhau) nên giáo viên tự gõ ValueKey thay vì tick từ bảng quét. Mỗi
+            // kind ứng với đúng 1 runner COMMON_V1 cùng tên khái niệm ở
+            // common-testcase-engine/exam_test.dart — xem CH7_KIND_TO_EXPECT_FIELDS.
+            "component_scroll_direction", "component_scroll_to_end", "component_stack_order",
+            "component_indexed_switch", "component_bottom_sheet", "component_table",
+            "component_sliver_collapse", "component_expanded",
             // Trạng thái Router/URL do ứng dụng phản ánh ra SystemNavigator.
             "route_state");
+    /** Ch.7 — field bắt buộc trong {@code expect} theo từng kind, xem {@link #EVENT_KINDS}. */
+    private static final Map<String, List<String>> CH7_REQUIRED_EXPECT_FIELDS = Map.of(
+            "component_scroll_direction", List.of("direction"),
+            "component_scroll_to_end", List.of("target_key"),
+            "component_stack_order", List.of("bottom_key", "top_key"),
+            "component_indexed_switch", List.of("tabs"),
+            "component_bottom_sheet", List.of("sheet_key"),
+            "component_table", List.of("row_count"),
+            "component_sliver_collapse", List.of("appbar_key"),
+            "component_expanded", List.of("flex"));
     private static final Set<String> ACTIONS = Set.of(
             "boot", "boot_with_uri", "tap", "enter_text", "clear_text", "scroll", "back",
             "open_uri", "browser_back", "browser_forward", "reload", "restart",
@@ -388,6 +406,26 @@ public class BehaviorAuthoringService {
             event.putIfAbsent("stage", "ASSERT");
             event.putIfAbsent("action", "observe_ui");
             event.putIfAbsent("browser", "flutter_tester");
+        } else if (CH7_REQUIRED_EXPECT_FIELDS.containsKey(kind)) {
+            // Ch.7 nhắm vào widget cấu trúc (Stack/Table/Sliver...), không có label/hint/
+            // text như thành phần tương tác — chỉ nhận valueKey làm locator, gõ sai tên là
+            // trượt rõ ràng chứ không âm thầm rơi về finder khác.
+            Map<String, Object> target = map(event.get("target"));
+            if (text(target, "valueKey", "").isBlank() && text(target, "key", "").isBlank()) {
+                throw new IllegalArgumentException(
+                        "Tiêu chí Ch.7 phải có target.valueKey (ValueKey của widget cần chấm)");
+            }
+            Map<String, Object> expect = map(event.get("expect"));
+            for (String field : CH7_REQUIRED_EXPECT_FIELDS.get(kind)) {
+                if (text(expect, field, "").isBlank()) {
+                    throw new IllegalArgumentException(
+                            "Tiêu chí " + kind + " thiếu expect." + field);
+                }
+            }
+            event.putIfAbsent("checkpoint", true);
+            event.putIfAbsent("stage", "ASSERT");
+            event.putIfAbsent("action", "observe_ui");
+            event.putIfAbsent("browser", "flutter_tester");
         } else if ("component_present".equals(kind)) {
             // Không có target thì lúc chấm không biết tìm widget nào — chặn ngay lúc ghi,
             // đừng để lỗi trôi tới preflight.
@@ -581,6 +619,11 @@ public class BehaviorAuthoringService {
                     || "theme_color".equals(kind)
                     || "screen_match".equals(kind)
                     || "route_state".equals(kind)
+                    // Ch.7 — thiếu nhánh này thì abstractRecording ÂM THẦM LOẠI BỎ cả 8 event
+                    // component_* Chương 7 (rơi qua vòng lặp không action cũng không
+                    // checkpoint), scenario sinh ra không hề có tiêu chí nào dù appendEvent đã
+                    // lưu đúng vào raw_trace — bug thật phát hiện khi chấm thử 1 bài thật.
+                    || CH7_REQUIRED_EXPECT_FIELDS.containsKey(kind)
                     || (bool(event.get("checkpoint"), false)
                     && Set.of("ui_observation", "database_observation", "navigation").contains(kind))) {
                 Map<String, Object> checkpoint = new LinkedHashMap<>(event);
@@ -749,6 +792,23 @@ public class BehaviorAuthoringService {
     public Map<String, Object> applyDerivedDatabaseCheckpoints(String scenarioId,
                                                                 List<Map<String, Object>> derived,
                                                                 String outputSha256) {
+        return applyDerivedDatabaseCheckpoints(scenarioId, derived, outputSha256, null);
+    }
+
+    /**
+     * @param goldenSha256 sha của Golden Solution VỪA DÙNG để replay ra outputSha256 — PHẢI
+     *                     ghi lại vào oracle, nếu không publish() sẽ mãi mãi coi oracle này là
+     *                     "chưa khớp phiên bản Golden hiện tại" sau khi Golden đổi (bug thật:
+     *                     recapture qua updateScenario chỉ cập nhật nội dung oracle chứ không
+     *                     đụng golden_sha256, nên oracle cũ "READY" mãi mãi trỏ sha Golden ĐÃ
+     *                     THAY vì Golden ĐANG DÙNG). null = giữ nguyên sha cũ (dùng khi gọi
+     *                     ngay sau abstractRecording, lúc đó sha vừa được set đúng rồi).
+     */
+    @Transactional
+    public Map<String, Object> applyDerivedDatabaseCheckpoints(String scenarioId,
+                                                                List<Map<String, Object>> derived,
+                                                                String outputSha256,
+                                                                String goldenSha256) {
         BehaviorScenario scenario = scenario(scenarioId);
         ensureEditable(suite(scenario.getSuiteId()));
         // Checkpoint tự sinh bị xoá đi tách lại mỗi lần capture — nhưng ĐIỂM và RÀNG BUỘC
@@ -826,6 +886,7 @@ public class BehaviorAuthoringService {
         observation.put("output_database_sha256", outputSha256);
         oracle.setDatabaseObservationJson(json(observation));
         oracle.setStatus(OracleStatus.READY);
+        if (goldenSha256 != null && !goldenSha256.isBlank()) oracle.setGoldenSha256(goldenSha256);
         oracles.save(oracle);
 
         Map<String, Object> out = new LinkedHashMap<>(scenarioView(scenario, true));

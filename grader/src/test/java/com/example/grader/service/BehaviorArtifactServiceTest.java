@@ -136,6 +136,46 @@ class BehaviorArtifactServiceTest {
         assertTrue(checkpoints.stream().allMatch(row -> "database_observation".equals(row.get("kind"))));
     }
 
+    @Test
+    void scanGoldenValueKeysPrefersCommentButFallsBackToEnclosingMethodName() throws Exception {
+        Path zip = tempDir.resolve("golden.zip");
+        try (var out = new java.util.zip.ZipOutputStream(Files.newOutputStream(zip))) {
+            putEntry(out, "lib/main.dart", "void main() {}\n");
+            putEntry(out, "lib/widgets_demo.dart", """
+                    import 'package:flutter/widgets.dart';
+
+                    // SCROLL_DIRECTION: listKey=demo.hlist, direction=horizontal
+                    Widget buildCommented() {
+                      return ListView(key: const ValueKey<String>('demo.hlist'));
+                    }
+
+                    Widget buildVerticalLazyList() {
+                      return ListView(key: const ValueKey<String>('demo.vlist'));
+                    }
+                    """);
+        }
+        service.upload("suite-1", BehaviorArtifactType.GOLDEN_SOLUTION,
+                new MockMultipartFile("file", "golden.zip", "application/zip", Files.readAllBytes(zip)), "{}");
+
+        List<java.util.Map<String, String>> keys = service.scanGoldenValueKeys("suite-1");
+        java.util.Map<String, java.util.Map<String, String>> byKey = keys.stream()
+                .collect(java.util.stream.Collectors.toMap(k -> k.get("key"), k -> k));
+
+        assertEquals("ListView", byKey.get("demo.hlist").get("widgetType"));
+        assertTrue(byKey.get("demo.hlist").get("hint").startsWith("SCROLL_DIRECTION"),
+                "Có comment ngay trên key thì phải ưu tiên dùng comment làm hint");
+
+        assertEquals("ListView", byKey.get("demo.vlist").get("widgetType"));
+        assertEquals("Build Vertical Lazy List", byKey.get("demo.vlist").get("hint"),
+                "Không có comment thì phải rơi về tên hàm Dart bao quanh đã người hoá, không được để trống");
+    }
+
+    private void putEntry(java.util.zip.ZipOutputStream out, String name, String content) throws Exception {
+        out.putNextEntry(new java.util.zip.ZipEntry(name));
+        out.write(content.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        out.closeEntry();
+    }
+
     private Path sqlite(String fileName, String... statements) throws Exception {
         Path path = tempDir.resolve(fileName);
         try (Connection connection = DriverManager.getConnection("jdbc:sqlite:" + path.toAbsolutePath());
