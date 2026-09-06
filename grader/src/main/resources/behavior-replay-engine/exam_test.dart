@@ -445,6 +445,12 @@ Future<void> _assertCheckpoint(
           ? 'Không thấy $moTa trên màn hình.'
           : 'Vẫn thấy $moTa trên màn hình dù lẽ ra phải ẩn.',
     );
+    // THÀNH PHẦN LẶP: Golden có nhiều thể hiện thì "có mặt" nghĩa là có ở MỌI dòng,
+    // không phải có ở một dòng. Thiếu chốt này thì bài vẽ nút Xóa đúng dòng đầu vẫn đạt.
+    final lap = _asMap(_asMap(checkpoint['expect'])['repeat']);
+    if (visible && lap.isNotEmpty) {
+      _kiemDuMoiDong(_finder(target).evaluate().toList(), lap, moTa);
+    }
     return;
   }
 
@@ -607,6 +613,11 @@ String _moTaTarget(Map<String, dynamic> target) {
   ]) {
     final v = _text(target, khoa);
     if (v.isNotEmpty) return '"$v"';
+  }
+  final icon = _text(target, 'icon');
+  if (icon.isNotEmpty) {
+    final ma = _maIcon(icon);
+    return 'nút icon ${ma == null ? icon : _tenIcon(ma)}';
   }
   final tienTo = _text(target, 'text_prefix');
   if (tienTo.isNotEmpty) return '"$tienTo…"';
@@ -866,6 +877,19 @@ Future<void> _loadRealFonts() async {
       }
     }
     await loader.load();
+    // FONT ICON. Không nạp thì mọi Icon vẽ thành ô vuông tofu: ảnh chuẩn lưu cho phúc
+    // khảo sai hình, và tiêu chí màu đo trên vùng icon lấy phải màu ô vuông. Nằm cùng
+    // thư mục với Roboto nên không thêm phụ thuộc nào — đo 6/9/2026: nạp xong ra đúng
+    // glyph (thùng rác, bút, dấu cộng), còn màu chủ đạo của nút thì KHÔNG đổi vì màu
+    // lấy trên nền nút, glyph chỉ chiếm phần nhỏ giữa nút.
+    final tepIcon = File(p.join(dir.path, 'MaterialIcons-Regular.otf'));
+    if (tepIcon.existsSync()) {
+      final iconLoader = FontLoader('MaterialIcons')
+        ..addFont(
+          Future.value(ByteData.view(tepIcon.readAsBytesSync().buffer)),
+        );
+      await iconLoader.load();
+    }
   } catch (_) {
     // Thiếu font không được làm hỏng lượt chấm.
   }
@@ -1066,6 +1090,203 @@ String _khoaBoCuc(Map<String, dynamic> c, Map<String, dynamic> checkpoint) {
   return id.isNotEmpty ? id : _text(c, 'test_id');
 }
 
+// ============================ ICON ============================
+// Vì sao chấm theo ICON: nút chỉ có hình (Thêm, Xóa) không có chữ nào để bám, nên trước
+// đây đề phải bắt sinh viên gắn Semantics(label:) chỉ để máy tìm được. Không tiêu chí nào
+// kiểm nội dung nhãn ấy — tức bắt làm một việc thừa rồi trừ 5,05 điểm nếu quên (đo
+// 5/9/2026). Icon mới là thứ người chấm nhìn: đúng hình, đúng chỗ, đúng màu.
+//
+// Đo 6/9/2026 (sa bàn icon): tìm theo mã icon ra đúng đích ở cả ba kiểu bọc — bọc
+// Semantics(label), nút trần trong Card, nút có tooltip — và khung của NÚT BAO NGOÀI
+// trùng từng pixel với khung mà đường tìm theo nhãn trả về. Nhờ vậy bộ đề cũ đổi tiêu
+// chí sang icon không phải sửa một con số oracle nào.
+
+/// Bảng tên icon -> mã, đọc từ file `codepoints` của SDK (dòng dạng "add_baseline e047").
+/// Đọc từ SDK chứ không nhúng bảng cứng: đổi bản Flutter thì bảng tự đúng theo.
+Map<String, int>? _bangIcon;
+
+Map<String, int> _docBangIcon() {
+  final ra = <String, int>{};
+  final root = Platform.environment['FLUTTER_ROOT'] ?? '';
+  if (root.isEmpty) return ra;
+  final tep = File(
+    p.join(root, 'bin', 'cache', 'artifacts', 'material_fonts', 'codepoints'),
+  );
+  if (!tep.existsSync()) return ra;
+  try {
+    for (final dong in tep.readAsLinesSync()) {
+      final cot = dong.trim().split(' ');
+      if (cot.length != 2) continue;
+      final ma = int.tryParse(cot[1], radix: 16);
+      if (ma != null) ra[cot[0].toLowerCase()] = ma;
+    }
+  } catch (_) {
+    // Thiếu bảng chỉ mất đường khai icon bằng TÊN; khai bằng mã vẫn chạy.
+  }
+  return ra;
+}
+
+/// Mã icon từ chuỗi đề khai: "delete_outline", "Icons.delete_outline", "0xe1bb", "57787".
+///
+/// Tên trong `codepoints` có đuôi biến thể: `Icons.add` nằm ở dòng `add_baseline`, còn
+/// `Icons.add_outlined` nằm ở dòng `add_outlined`. Thử tên nguyên trước rồi mới thêm
+/// `_baseline` thì cả hai kiểu khai đều ra đúng.
+int? _maIcon(String khai) {
+  final s = khai.trim();
+  if (s.isEmpty) return null;
+  if (s.toLowerCase().startsWith('0x')) {
+    return int.tryParse(s.substring(2), radix: 16);
+  }
+  final so = int.tryParse(s);
+  if (so != null) return so;
+  _bangIcon ??= _docBangIcon();
+  final ten = s
+      .replaceFirst(RegExp(r'^Icons\.'), '')
+      .replaceAll('-', '_')
+      .toLowerCase();
+  return _bangIcon![ten] ?? _bangIcon!['${ten}_baseline'];
+}
+
+/// Tên icon từ mã, để in ra log phúc khảo cho người đọc hiểu ("delete_outline" thay vì
+/// "0xe1bb"). Ưu tiên biến thể `_baseline` vì đó là `Icons.xxx` mặc định.
+String _tenIcon(int ma) {
+  _bangIcon ??= _docBangIcon();
+  String? tot;
+  _bangIcon!.forEach((ten, giaTri) {
+    if (giaTri != ma) return;
+    if (ten.endsWith('_baseline')) {
+      tot ??= ten.substring(0, ten.length - '_baseline'.length);
+    } else {
+      tot ??= ten;
+    }
+  });
+  return tot ?? '0x${ma.toRadixString(16)}';
+}
+
+/// Lớp nút thật sự của Material: khung của nó mới là vùng người dùng nhìn và chạm
+/// (IconButton 48x48, FloatingActionButton 56x56), còn glyph chỉ 24x24 nằm giữa.
+const Set<String> _nutBac1 = <String>{
+  'FloatingActionButton',
+  'IconButton',
+  'ElevatedButton',
+  'FilledButton',
+  'OutlinedButton',
+  'TextButton',
+  'ChoiceChip',
+  'FilterChip',
+  'ActionChip',
+  'Chip',
+};
+
+/// Lớp nhận chạm tự viết tay — chỉ dùng khi không có lớp nút Material nào.
+const Set<String> _nutBac2 = <String>{
+  'InkWell',
+  'InkResponse',
+  'GestureDetector',
+};
+
+double _dienTich(Element e) {
+  final ro = e.renderObject;
+  return ro is RenderBox && ro.hasSize ? ro.size.width * ro.size.height : 0;
+}
+
+/// Nút bao ngoài gần nhất của một widget. So bằng TÊN kiểu chứ không tra bảng Type để
+/// đề sau dùng nút nào cũng chạy mà khỏi dựng lại ảnh nền.
+///
+/// Vì sao leo tới 80 tầng: cây Material 3 giữa Icon và IconButton dày hơn 20 tầng (đo
+/// 6/9/2026) — chặn ở 20 thì trả về GestureDetector bên trong và khung đo ra sai.
+///
+/// Vì sao lớp bậc 2 phải nhỏ hơn 8 lần diện tích icon: InkWell/GestureDetector hay bọc
+/// CẢ DÒNG danh sách. Nhận cả dòng làm "nút của icon" thì tiêu chí vị trí đo nhầm sang
+/// khung dòng. Nút thật gấp ~4 lần icon (48x48 so với 24x24), còn dòng gấp ~57 lần.
+Element? _nutBaoNgoai(Element goc) {
+  Element? bac1;
+  Element? bac2;
+  var sau = 0;
+  goc.visitAncestorElements((Element a) {
+    sau++;
+    final ten = a.widget.runtimeType.toString();
+    if (_nutBac1.contains(ten)) {
+      bac1 = a;
+      return false;
+    }
+    if (_nutBac2.contains(ten) && bac2 == null) {
+      if (_dienTich(a) <= _dienTich(goc) * 8) bac2 = a;
+    }
+    return sau < 80;
+  });
+  return bac1 ?? bac2;
+}
+
+/// Finder trỏ đúng MỘT element đã biết.
+Finder _laPhanTu(Element x) => find.byElementPredicate(
+  (Element y) => identical(y, x),
+  description: 'phần tử ${x.widget.runtimeType}',
+);
+
+Finder _timIconThuan(int ma) => find.byWidgetPredicate(
+  (Widget w) => w is Icon && w.icon?.codePoint == ma,
+  description: 'Icon 0x${ma.toRadixString(16)}',
+);
+
+/// Các NÚT mang icon có mã đã cho — trả nút bao ngoài chứ không trả chính Icon, vì tiêu
+/// chí vị trí/màu phải đo trên vùng người dùng nhìn và chạm.
+List<Element> _cacNutIcon(int ma) {
+  final ra = <Element>[];
+  for (final e in _timIconThuan(ma).evaluate()) {
+    ra.add(_nutBaoNgoai(e) ?? e);
+  }
+  return ra;
+}
+
+/// Tìm theo icon. Danh sách nút tính MỘT LẦN lúc dựng finder; `_waitUntil` gọi lại
+/// `_finder` mỗi nhịp poll nên vẫn bắt kịp màn hình đang đổi.
+Finder _timTheoIcon(int ma) {
+  final nut = _cacNutIcon(ma);
+  if (nut.isEmpty) return find.byWidgetPredicate((_) => false);
+  return find.byElementPredicate(
+    (Element e) => nut.any((Element n) => identical(n, e)),
+    description: 'nút mang icon ${_tenIcon(ma)}',
+  );
+}
+
+bool _laConChau(Element con, Element toTien) {
+  var ra = false;
+  con.visitAncestorElements((Element a) {
+    if (identical(a, toTien)) {
+      ra = true;
+      return false;
+    }
+    return true;
+  });
+  return ra;
+}
+
+/// DÒNG của một phần tử: cây con LỚN NHẤT chứa nó mà KHÔNG chứa phần tử "cùng loại" nào
+/// khác, và không leo qua khung cuộn.
+///
+/// Vì sao định nghĩa theo DỮ LIỆU chứ không theo kiểu widget: bản đầu lấy "con trực tiếp
+/// của ListView" thì hỏng ngay ở bài vẽ dòng bằng Card và ở bài dùng Column trong
+/// SingleChildScrollView (đo 6/9/2026: 0/6 dòng). Luật này đo đủ sáu tình huống —
+/// ListTile, Card, có header nằm trong ListView, danh sách dài chỉ dựng một phần, dòng
+/// thiếu icon, Column cuộn — đều ra đúng "mỗi dòng một icon".
+Element _dongCua(Element x, List<Element> khac) {
+  Element dong = x;
+  x.visitAncestorElements((Element a) {
+    // Chặn ở khung cuộn: danh sách chỉ còn MỘT dòng thì không có phần tử cùng loại nào
+    // để chặn, thiếu chốt này là "dòng" phình ra cả màn hình.
+    if (a is SliverMultiBoxAdaptorElement ||
+        a.widget is Scrollable ||
+        a.widget is SingleChildScrollView) {
+      return false;
+    }
+    if (khac.any((Element k) => _laConChau(k, a))) return false;
+    dong = a;
+    return true;
+  });
+  return dong;
+}
+
 /// Khung của thành phần theo pixel LOGIC. Trả null khi không tìm thấy thành phần —
 /// đó là lỗi thiếu nội dung, tiêu chí nội dung đã bắt riêng.
 Rect? _khungThanhPhan(WidgetTester tester, Map<String, dynamic> target) {
@@ -1133,6 +1354,18 @@ Future<void> _assertComponentPosition(
       '(${(saiSo * 100).toStringAsFixed(0)}% màn hình).',
     );
   }
+  // Thành phần lặp: khung tuyệt đối trên chỉ nói về thể hiện đầu. Phần này soát chỗ đứng
+  // của TỪNG cái trong dòng của nó, nên nút Xóa nhảy sang trái ở dòng thứ tư cũng bị bắt.
+  final lap = _asMap(mongDoi['repeat']);
+  if (lap.isNotEmpty) {
+    _kiemViTriLap(
+      tester,
+      _finder(target).evaluate().toList(),
+      lap,
+      _double(checkpoint['tolerance_pct'], 5),
+      moTa,
+    );
+  }
 }
 
 /// MÀU SẮC: so màu chính của thành phần với màu trên ảnh mẫu. Sai số khai theo %
@@ -1160,25 +1393,329 @@ Future<void> _assertComponentColor(
     timeout,
     'Không thấy $moTa trên màn hình nên không chấm được màu.',
   );
-  final khung = _khungThanhPhan(tester, target);
-  if (khung == null) throw StateError('Không đo được khung của $moTa.');
   if (!await _baoDamAnhCuoi(tester)) {
     throw StateError('Không chụp được màn hình để lấy màu của $moTa.');
   }
   final man = _coManHinh(tester);
   final tiLe = man.width > 0 ? _anhCuoiW / man.width : 1.0;
-  final mauBai = _mauChinhTrongVung(khung, tiLe);
-  if (mauBai == null) {
-    throw StateError(
-      'Vùng của $moTa không có pixel nào khác màu nền để lấy màu.',
+  // Thành phần lặp thì đo MỌI thể hiện: tô đúng nút Xóa dòng đầu rồi bỏ quên các dòng
+  // sau là lỗi người chấm nhìn thấy ngay, máy cũng phải thấy.
+  final khungs = <Rect>[];
+  final cac = _asMap(_asMap(checkpoint['expect'])['repeat']).isEmpty
+      ? const <Element>[]
+      : _finder(target).evaluate().toList();
+  if (cac.length >= 2) {
+    for (final e in cac) {
+      khungs.add(tester.getRect(_laPhanTu(e)));
+    }
+  } else {
+    final mot = _khungThanhPhan(tester, target);
+    if (mot != null) khungs.add(mot);
+  }
+  if (khungs.isEmpty) throw StateError('Không đo được khung của $moTa.');
+  for (var i = 0; i < khungs.length; i++) {
+    final mauBai = _mauChinhTrongVung(khungs[i], tiLe);
+    if (mauBai == null) {
+      throw StateError(
+        'Vùng của $moTa không có pixel nào khác màu nền để lấy màu.',
+      );
+    }
+    _soMau(
+      mauChuan,
+      mauBai,
+      _double(checkpoint['tolerance_pct'], 5),
+      khungs.length > 1
+          ? 'Màu của $moTa ở dòng thứ ${i + 1}'
+          : 'Màu của $moTa',
     );
   }
-  _soMau(
-    mauChuan,
-    mauBai,
-    _double(checkpoint['tolerance_pct'], 5),
-    'Màu của $moTa',
+}
+
+// ==================== THÀNH PHẦN LẶP THEO DÒNG ====================
+// Nút Xóa của bài Quản lý chi tiêu nằm ở MỖI dòng: sáu khoản chi thì sáu nút. Trước đây
+// tiêu chí giao diện chỉ đo `.first`, nên bài vẽ nút ở đúng một dòng vẫn đạt cả ba mặt
+// (có mặt, vị trí, màu) — máy chấm không khớp với thứ người chấm nhìn thấy.
+//
+// Luật mới: capture trên Golden thấy từ hai thể hiện trở lên thì tiêu chí chấm CẢ NHÓM.
+// Vị trí đo TƯƠNG ĐỐI TRONG DÒNG nên dòng đầu và dòng cuối đều đạt; màu đo trên mọi thể
+// hiện; và khi đề có định danh dòng thì kiểm đủ "mỗi dòng đúng một cái".
+//
+// Vì sao thiếu định danh dòng thì KHÔNG so số lượng với Golden: số dòng phụ thuộc dữ liệu
+// bài làm dựng ra. Bài hiển thị thiếu một khoản chi đã trượt tiêu chí nội dung rồi, trừ
+// thêm ở tiêu chí icon là phạt hai lần cho cùng một lỗi.
+
+/// Định danh ngữ nghĩa của một element, đọc từ cây semantics đã dựng.
+String _dinhDanhCua(Element e) {
+  try {
+    return e.renderObject?.debugSemantics?.identifier ?? '';
+  } catch (_) {
+    return '';
+  }
+}
+
+/// Các DÒNG mang định danh bắt đầu bằng tiền tố (ví dụ "dong_" cho dong_1..dong_6).
+/// Đây là nguồn DUY NHẤT cho biết màn hình đang có bao nhiêu dòng mà không phải suy
+/// ngược từ chính các thể hiện đang đếm.
+List<Element> _cacDongTheoDinhDanh(String tienTo) {
+  if (tienTo.isEmpty) return const <Element>[];
+  List<Element> tho;
+  try {
+    // Neo hai đầu: bySemanticsIdentifier dùng hasMatch nên không neo thì "chi_tieu.dong."
+    // nuốt luôn "chi_tieu.dong.3.xoa" — nút Xóa bị đếm thành một dòng.
+    tho = find
+        .bySemanticsIdentifier(RegExp('^${RegExp.escape(tienTo)}' + r'\d+$'))
+        .evaluate()
+        .toList();
+  } catch (_) {
+    // Semantics chưa bật thì không có đường nào đếm dòng; bỏ phép kiểm còn hơn báo sai.
+    return const <Element>[];
+  }
+  // Nhiều element cùng báo MỘT nút semantics khi cây bị gộp. Giữ đúng một element cho
+  // mỗi định danh, chọn cái RỘNG NHẤT vì đó là gốc dòng — giữ cả chùm thì những element
+  // con không chứa icon sẽ bị tính là "dòng thiếu icon" và bài đúng trượt oan.
+  final tot = <String, Element>{};
+  for (final e in tho) {
+    final id = _dinhDanhCua(e);
+    if (id.isEmpty) continue;
+    final cu = tot[id];
+    if (cu == null || _dienTich(e) > _dienTich(cu)) tot[id] = e;
+  }
+  return tot.values.toList();
+}
+
+/// Số thể hiện nằm trong một dòng. Đếm theo QUAN HỆ CÂY chứ không theo hình chữ nhật:
+/// lớp phủ (hộp thoại, snackbar) có thể chồng lên khung dòng.
+int _soTrongDong(List<Element> cac, Element dong) => cac
+    .where((Element e) => identical(e, dong) || _laConChau(e, dong))
+    .length;
+
+/// Định danh của DÒNG chứa một nút: định danh gần nhất trên đường leo lên mà khung của
+/// nó rộng ít nhất gấp đôi nút. Vế "gấp đôi" để không nhặt nhầm chính định danh bọc
+/// quanh nút (xoa_dong_3) làm định danh dòng (dong_3).
+String? _dinhDanhDongCua(WidgetTester tester, Element nut) {
+  double rongNut;
+  try {
+    rongNut = tester.getRect(_laPhanTu(nut)).width;
+  } catch (_) {
+    return null;
+  }
+  String? ra;
+  var sau = 0;
+  nut.visitAncestorElements((Element a) {
+    sau++;
+    final w = a.widget;
+    if (w is Semantics) {
+      final id = w.properties.identifier ?? '';
+      if (id.isNotEmpty) {
+        try {
+          if (tester.getRect(_laPhanTu(a)).width >= rongNut * 2) {
+            ra = id;
+            return false;
+          }
+        } catch (_) {
+          // Không đo được thì bỏ qua lớp này, tiếp tục leo.
+        }
+      }
+    }
+    return sau < 80;
+  });
+  return ra;
+}
+
+/// Tiền tố định danh dòng chung của cả nhóm ("dong_1".."dong_6" -> "dong_"). Rỗng khi
+/// đề không đặt định danh theo dòng — lúc đó bỏ hẳn phép kiểm "đủ mọi dòng".
+String _tienToDinhDanhDong(WidgetTester tester, List<Element> cac) {
+  String? chung;
+  for (final e in cac) {
+    final id = _dinhDanhDongCua(tester, e);
+    if (id == null || id.isEmpty) return '';
+    final t = id.replaceFirst(RegExp(r'\d+$'), '');
+    // Không có phần số ở cuối nghĩa là định danh này dùng chung cho cả nhóm, không
+    // phân biệt được dòng nào với dòng nào.
+    if (t == id || t.isEmpty) return '';
+    if (chung == null) {
+      chung = t;
+    } else if (chung != t) {
+      return '';
+    }
+  }
+  return chung ?? '';
+}
+
+/// Vị trí TƯƠNG ĐỐI của một thể hiện trong dòng chứa nó: cách mép phải bao nhiêu phần
+/// trăm bề rộng dòng, và tâm dọc ở bao nhiêu phần trăm chiều cao dòng.
+List<double>? _viTriTrongDong(
+  WidgetTester tester,
+  Element e,
+  List<Element> cac,
+) {
+  final dong = _dongCua(
+    e,
+    cac.where((Element k) => !identical(k, e)).toList(),
   );
+  try {
+    final rD = tester.getRect(_laPhanTu(dong));
+    final rE = tester.getRect(_laPhanTu(e));
+    if (rD.width <= 0 || rD.height <= 0) return null;
+    return <double>[
+      (rD.right - rE.right) / rD.width * 100,
+      (rE.center.dy - rD.top) / rD.height * 100,
+    ];
+  } catch (_) {
+    return null;
+  }
+}
+
+/// Đo đặc trưng LẶP trên Golden lúc capture. Trả null khi chỉ có một thể hiện.
+Map<String, dynamic>? _doLap(WidgetTester tester, Finder finder) {
+  final cac = finder.evaluate().toList();
+  if (cac.length < 2) return null;
+  final ra = <String, dynamic>{'count': cac.length};
+  final tienTo = _tienToDinhDanhDong(tester, cac);
+  if (tienTo.isNotEmpty) ra['row_id_prefix'] = tienTo;
+
+  final dongs = <Element>[];
+  for (final e in cac) {
+    dongs.add(
+      _dongCua(e, cac.where((Element k) => !identical(k, e)).toList()),
+    );
+  }
+  // "Theo dòng" khi: mỗi thể hiện một dòng riêng, dòng rộng hơn hẳn nút (dòng danh sách
+  // chứ không phải ba nút cạnh nhau trên thanh công cụ), và các dòng xếp dọc không chồng.
+  var theoDong = dongs.toSet().length == cac.length;
+  final phai = <double>[];
+  final doc = <double>[];
+  final khung = <Rect>[];
+  if (theoDong) {
+    for (var i = 0; i < cac.length; i++) {
+      try {
+        final rD = tester.getRect(_laPhanTu(dongs[i]));
+        final rE = tester.getRect(_laPhanTu(cac[i]));
+        if (rD.width < rE.width * 2 || rD.height <= 0) {
+          theoDong = false;
+          break;
+        }
+        khung.add(rD);
+        phai.add((rD.right - rE.right) / rD.width * 100);
+        doc.add((rE.center.dy - rD.top) / rD.height * 100);
+      } catch (_) {
+        theoDong = false;
+        break;
+      }
+    }
+  }
+  if (theoDong) {
+    final sap = <Rect>[...khung]..sort((a, b) => a.top.compareTo(b.top));
+    for (var i = 1; i < sap.length; i++) {
+      if (sap[i].top < sap[i - 1].bottom - 1) {
+        theoDong = false;
+        break;
+      }
+    }
+  }
+  ra['per_row'] = theoDong;
+  if (theoDong) {
+    double tb(List<double> l) => l.reduce((a, b) => a + b) / l.length;
+    ra['row_right_pct'] = tb(phai);
+    ra['row_center_y_pct'] = tb(doc);
+  }
+  return ra;
+}
+
+/// "Mỗi dòng đúng một cái". Chỉ chạy khi đề có định danh dòng và bài làm cũng gắn —
+/// bài quên định danh đã trượt ở tiêu chí định danh rồi, không phạt thêm ở đây.
+void _kiemDuMoiDong(
+  List<Element> cac,
+  Map<String, dynamic> lap,
+  String moTa,
+) {
+  final tienTo = _text(lap, 'row_id_prefix');
+  if (tienTo.isEmpty) return;
+  final dongs = _cacDongTheoDinhDanh(tienTo);
+  if (dongs.isEmpty) return;
+  final sai = <String>[];
+  for (final d in dongs) {
+    final so = _soTrongDong(cac, d);
+    if (so != 1) {
+      final ten = _dinhDanhCua(d);
+      sai.add('${ten.isEmpty ? 'dòng' : ten} có $so');
+    }
+  }
+  if (sai.isNotEmpty) {
+    throw StateError(
+      'Danh sách có ${dongs.length} dòng nhưng $moTa không đúng một cái mỗi dòng: '
+      '${sai.length} dòng sai (${sai.take(3).join('; ')}).',
+    );
+  }
+}
+
+/// Vị trí tương đối trong dòng của MỌI thể hiện. Nhờ đo tương đối mà dòng đầu và dòng
+/// cuối cùng một chuẩn, khỏi phải sinh oracle riêng cho từng dòng.
+void _kiemViTriLap(
+  WidgetTester tester,
+  List<Element> cac,
+  Map<String, dynamic> lap,
+  double saiSoPhanTram,
+  String moTa,
+) {
+  if (!_bool(lap['per_row'], false)) return;
+  final chuanPhai = _double(lap['row_right_pct'], -1);
+  final chuanDoc = _double(lap['row_center_y_pct'], -1);
+  if (chuanPhai < 0 || chuanDoc < 0) return;
+  for (var i = 0; i < cac.length; i++) {
+    final do_ = _viTriTrongDong(tester, cac[i], cac);
+    if (do_ == null) continue;
+    if ((do_[0] - chuanPhai).abs() > saiSoPhanTram ||
+        (do_[1] - chuanDoc).abs() > saiSoPhanTram) {
+      throw StateError(
+        'Ở dòng thứ ${i + 1}, $moTa đặt lệch trong dòng: cách mép phải '
+        '${do_[0].toStringAsFixed(1)}% (mẫu ${chuanPhai.toStringAsFixed(1)}%), '
+        'tâm dọc ${do_[1].toStringAsFixed(1)}% (mẫu ${chuanDoc.toStringAsFixed(1)}%), '
+        'quá mức cho phép ${saiSoPhanTram.toStringAsFixed(0)}%.',
+      );
+    }
+  }
+}
+
+/// KIỂM KÊ ICON trên màn hình lúc capture, để màn soạn đề bày ra cho người ra đề tick.
+///
+/// Vì sao phải đo ở đây chứ không quét DOM như phần còn lại của "Quét UI": nút chỉ có
+/// hình, không nhãn, thì trên web KHÔNG có aria-label nào để quét — đúng những nút mà
+/// gói này muốn chấm lại là những nút DOM không thấy. Máy chấm nhìn thẳng cây widget nên
+/// thấy đủ.
+List<Map<String, dynamic>> _kiemKeIcon(WidgetTester tester) {
+  final theoMa = <int, List<Element>>{};
+  for (final e in find.byType(Icon).evaluate()) {
+    final ma = (e.widget as Icon).icon?.codePoint;
+    if (ma == null) continue;
+    theoMa.putIfAbsent(ma, () => <Element>[]).add(e);
+  }
+  final ra = <Map<String, dynamic>>[];
+  theoMa.forEach((int ma, List<Element> cac) {
+    final nut = _timTheoIcon(ma);
+    final cacNut = nut.evaluate().toList();
+    Rect? khung;
+    try {
+      if (cacNut.isNotEmpty) khung = tester.getRect(_laPhanTu(cacNut.first));
+    } catch (_) {
+      // Icon nằm ngoài khung nhìn thì không có toạ độ; vẫn liệt kê để người ra đề thấy.
+    }
+    final lap = cacNut.length >= 2 ? _doLap(tester, nut) : null;
+    ra.add(<String, dynamic>{
+      'icon': _tenIcon(ma),
+      'code': ma,
+      'count': cacNut.length,
+      if (cacNut.isNotEmpty)
+        'button_type': cacNut.first.widget.runtimeType.toString(),
+      if (khung != null) 'center_x': khung.center.dx,
+      if (khung != null) 'center_y': khung.center.dy,
+      if (khung != null) 'width': khung.width,
+      if (khung != null) 'height': khung.height,
+      if (lap != null) 'per_row': _bool(lap['per_row'], false),
+    });
+  });
+  ra.sort((a, b) => _int(a['code'], 0).compareTo(_int(b['code'], 0)));
+  return ra;
 }
 
 /// Đo vị trí + màu chuẩn của mọi thành phần được chấm giao diện, ghi cạnh
@@ -1237,8 +1774,13 @@ Future<void> _luuBoCucChuan(
       continue;
     }
     if (!loaiGiaoDien.contains(kind)) continue;
-    final khung = _khungThanhPhan(tester, _asMap(checkpoint['target']));
+    final target = _asMap(checkpoint['target']);
+    final khung = _khungThanhPhan(tester, target);
     if (khung == null) continue;
+    // Thành phần LẶP (nút Xóa ở mỗi dòng): đo luôn đặc trưng nhóm để lúc chấm biết phải
+    // soát cả nhóm chứ không chỉ cái đầu. Đo ở đây vì đây đúng khoảnh khắc mà tiêu chí
+    // sẽ nhìn thấy, không có thao tác nào xen giữa.
+    final lap = _doLap(tester, _finder(target));
     thanhPhan[khoa] = <String, dynamic>{
       'test_id': _text(c, 'test_id'),
       'left': khung.left,
@@ -1248,9 +1790,14 @@ Future<void> _luuBoCucChuan(
       'center_x': khung.center.dx,
       'center_y': khung.center.dy,
       if (_anhCuoi != null) 'color': _mauChinhTrongVung(khung, tiLe),
+      if (lap != null) 'repeat': lap,
     };
   }
-  if (thanhPhan.isEmpty && _moTaNhanDaThu.isEmpty && _dinhDanhDaThu.isEmpty) {
+  final kiemKeIcon = _kiemKeIcon(tester);
+  if (thanhPhan.isEmpty &&
+      _moTaNhanDaThu.isEmpty &&
+      _dinhDanhDaThu.isEmpty &&
+      kiemKeIcon.isEmpty) {
     return;
   }
   final tep = File(
@@ -1275,12 +1822,15 @@ Future<void> _luuBoCucChuan(
       // Định danh theo khoá cũ của bước (Gói 1 kế hoạch Định danh Semantics); backend
       // nướng vào target bước, giữ nhãn cạnh bên làm đường lui.
       'identifiers': _dinhDanhDaThu,
+      // Kiểm kê icon cho màn soạn đề: nút chỉ có hình không quét được qua DOM web.
+      'icons': kiemKeIcon,
     }),
   );
   stdout.writeln(
     'Đã đo bố cục chuẩn: ${thanhPhan.length} thành phần, '
     '${_moTaNhanDaThu.length} nhãn có đường dự phòng, '
-    '${_dinhDanhDaThu.length} bước có định danh.',
+    '${_dinhDanhDaThu.length} bước có định danh, '
+    '${kiemKeIcon.length} loại icon.',
   );
 }
 
@@ -2175,6 +2725,22 @@ Finder _finder(Map<String, dynamic> target, {bool duPhong = false}) {
   }
   final label = _text(target, 'label');
   final hint = _text(target, 'hint');
+  // ICON — hình dạng khai thẳng trong hợp đồng đề ("Icons.delete_outline"). Đặt TRƯỚC
+  // nhãn: tiêu chí icon nói về HÌNH, không được để nhãn của bài làm dẫn sang widget
+  // khác rồi báo đạt. Trả về nút bao ngoài nên chạm và đo đều đúng chỗ.
+  final khaiIcon = _text(target, 'icon');
+  if (khaiIcon.isNotEmpty) {
+    final ma = _maIcon(khaiIcon);
+    if (ma != null) {
+      final finder = _timTheoIcon(ma);
+      if (finder.evaluate().isNotEmpty) return finder;
+      // Chưa thấy icon mà target KHÔNG khai gì khác thì trả finder rỗng để `_waitUntil`
+      // còn poll tiếp — chứ không rơi xuống nhãn, rơi xuống là chấm nhầm sang thứ khác.
+      if (label.isEmpty && hint.isEmpty && _text(target, 'text').isEmpty) {
+        return find.byWidgetPredicate((_) => false);
+      }
+    }
+  }
   if (label.isNotEmpty) {
     final semantics = find.bySemanticsLabel(label);
     if (semantics.evaluate().isNotEmpty) return semantics;
@@ -2283,6 +2849,7 @@ Finder _finder(Map<String, dynamic> target, {bool duPhong = false}) {
     'valueKey',
     'value_key',
     'key',
+    'icon',
     'label',
     'hint',
   ];

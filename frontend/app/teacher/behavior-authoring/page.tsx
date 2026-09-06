@@ -55,6 +55,18 @@ const DEFAULT_ALLOWED_PACKAGES = [
 
 const ACTIONS = ["boot", "tap", "enter_text", "clear_text", "scroll", "drag", "back", "restart", "wait_until"];
 const LOCATORS = ["semanticId", "valueKey", "label", "hint", "text", "text_prefix", "tooltip"];
+// Chữ hiển thị cho từng cách định vị. Giá trị gửi đi giữ nguyên; chỉ đổi chữ để không ai
+// tưởng "semanticId" là ValueKey: máy chấm tìm nó bằng Semantics(identifier:), còn ValueKey
+// thì recorder không bao giờ thấy (không ra tới DOM) nên chỉ dùng được khi gõ tay ở đây.
+const LOCATOR_LABEL: Record<string, string> = {
+  semanticId: "định danh — Semantics(identifier:)",
+  valueKey: "ValueKey (recorder không thấy, chỉ gõ tay)",
+  label: "nhãn — Semantics(label:)",
+  hint: "gợi ý ô nhập — hintText",
+  text: "chữ hiển thị",
+  text_prefix: "chữ bắt đầu bằng",
+  tooltip: "tooltip",
+};
 
 /** Lam tron ve ba chu so thap phan — don vi nho nhat cua moi phep chia diem. */
 const lamTron = (v: number) => Math.round(v * 1000) / 1000;
@@ -273,8 +285,15 @@ function BehaviorAuthoringEditor() {
   const [scenarioWeight, setScenarioWeight] = useState(10);
   // Bảng tick thành phần giao diện — đổ về từ lệnh quét màn hình của bridge.
   // null = chưa quét; mảng = đang mở bảng tick.
-  const [uiInventory, setUiInventory] = useState<{ attribute: string; value: string; role: string; checked: boolean }[] | null>(null);
+  const [uiInventory, setUiInventory] = useState<{ attribute: string; value: string; role: string; identifier: string; checked: boolean }[] | null>(null);
   const [uiScreenName, setUiScreenName] = useState("");
+  // Kiểm kê ICON của màn cuối luồng, do MÁY CHẤM đo lúc capture. Không quét được qua
+  // DOM như bảng trên: nút chỉ có hình thì web không phơi aria-label nào, nên đúng những
+  // nút cần chấm lại là những nút "Quét thành phần UI" không thấy.
+  const [iconInventory, setIconInventory] = useState<
+    { icon: string; count: number; perRow: boolean; buttonType: string; checked: boolean }[] | null
+  >(null);
+  const [iconScenario, setIconScenario] = useState<{ id: string; ma: string; checkpoints: JsonMap[] } | null>(null);
   // Chấm VỊ TRÍ và MÀU của từng thành phần đã tick. Sai số mặc định 5%: vị trí tính theo
   // % chiều rộng/cao màn hình, màu tính theo % của 255 trên từng kênh R/G/B.
   const [viTriOn, setViTriOn] = useState(true);
@@ -671,6 +690,58 @@ function BehaviorAuthoringEditor() {
     });
   };
 
+  const maMan = (ten: string) => ten.normalize("NFD").replace(/[̀-ͯ]/g, "")
+    .replace(/đ/g, "d").replace(/Đ/g, "D").replace(/[^a-zA-Z0-9]+/g, "_").toUpperCase().replace(/^_+|_+$/g, "");
+
+  // Thêm tiêu chí cho các ICON vừa kiểm kê. Khác đường trên ở chỗ KHÔNG đi qua phiên
+  // record (lúc này phiên đã đóng): ghi thẳng vào checkpoints của scenario, backend tự
+  // chạy lại capture để nướng vị trí, màu và luật lặp.
+  const luuTieuChiIcon = () => {
+    if (!suite || !iconScenario) return;
+    const chon = (iconInventory || []).filter((it) => it.checked);
+    if (chon.length === 0) { setError("Chưa tick icon nào để chấm."); return; }
+    run("icon-criteria", async () => {
+      const man = uiScreenName.trim() || "Màn hình";
+      const slug = maMan(man);
+      const cu = iconScenario.checkpoints;
+      // Số thứ tự tiếp theo: id checkpoint phải duy nhất trong scenario vì oracle nối
+      // vào chính id đó.
+      let so = cu.reduce((m, c) => Math.max(m, Number(String(c.id || "").replace(/\D+/g, "")) || 0), 0);
+      const cacMat = [
+        { bat: true, kind: "component_present", hau: "", nhan: "có", diem: uiGroupWeight, saiSo: 0 },
+        { bat: viTriOn, kind: "component_position", hau: "_VITRI", nhan: "đúng vị trí", diem: viTriWeight, saiSo: viTriSaiSo },
+        { bat: mauOn, kind: "component_color", hau: "_MAU", nhan: "đúng màu", diem: mauWeight, saiSo: mauSaiSo },
+      ].filter((m) => m.bat && Number(m.diem) > 0);
+
+      const them: JsonMap[] = [];
+      for (const mat of cacMat) {
+        const diemDong = chiaDeu(Number(mat.diem), chon.length);
+        chon.forEach((it, i) => {
+          so += 1;
+          them.push({
+            id: `checkpoint_${so}`, kind: mat.kind, checkpoint: true, stage: "ASSERT",
+            action: "observe_ui", browser: "flutter_tester",
+            target: { icon: it.icon }, visible: true,
+            attribute: "icon", attributeValue: it.icon, valueType: "string", value: "",
+            name: `${man} — ${mat.nhan} icon ${it.icon}`, weight: diemDong[i],
+            ...(mat.saiSo > 0 ? { tolerance_pct: Math.min(50, Math.max(0.5, Number(mat.saiSo))) } : {}),
+            ui_group: {
+              id: "G_UI_" + slug + mat.hau,
+              name: `Giao diện — ${man}${mat.hau === "" ? "" : mat.hau === "_VITRI" ? " (vị trí)" : " (màu sắc)"}`,
+            },
+          });
+        });
+      }
+      await api(`/behavior-authoring/scenarios/${iconScenario.id}`, {
+        method: "PUT", body: JSON.stringify({ checkpoints: [...cu, ...them] }),
+      });
+      setIconInventory(null);
+      setIconScenario(null);
+      setNotice(`Đã thêm ${them.length} tiêu chí icon và capture lại oracle. Icon lặp theo dòng được chấm ở mọi dòng.`);
+      await refresh(suite.id);
+    });
+  };
+
 
 
 
@@ -934,13 +1005,34 @@ function BehaviorAuthoringEditor() {
       setRecording(null);
       await refresh(suite.id);
       setEditingScenarioId(null);
+      // Số bước vừa nhận định danh từ Golden (Gói 2): 0 nghĩa là Golden chưa gắn
+      // Semantics(identifier:) hoặc mọi bước đã có sẵn — cả hai đều không phải lỗi.
+      const soDinhDanh = Number(sinhXong.identifier_step_count || 0);
+      const duoiDinhDanh = soDinhDanh > 0 ? ` Đã nướng định danh vào ${soDinhDanh} bước.` : "";
+      // Icon máy chấm nhìn thấy ở màn cuối luồng — mở bảng tick ngay, vì đây là lần duy
+      // nhất trong luồng soạn đề mà thông tin này tồn tại.
+      const dsIcon = Array.isArray(sinhXong.icons) ? (sinhXong.icons as JsonMap[]) : [];
+      if (dsIcon.length > 0 && sinhXong.id) {
+        setIconScenario({
+          id: String(sinhXong.id),
+          ma: String(sinhXong.scenario_code || sinhXong.name || ""),
+          checkpoints: Array.isArray(sinhXong.checkpoints) ? (sinhXong.checkpoints as JsonMap[]) : [],
+        });
+        setIconInventory(dsIcon.map((it) => ({
+          icon: String(it.icon || ""),
+          count: Number(it.count || 1),
+          perRow: Boolean(it.per_row),
+          buttonType: String(it.button_type || ""),
+          checked: false,
+        })));
+      }
       if (sinhXong.capture_warning) {
         // Sinh testcase THÀNH CÔNG nhưng có mùi hỏng-im-lặng — phải đỏ để không bị bỏ qua.
         setError(`Đã sinh testcase, NHƯNG: ${String(sinhXong.capture_warning)}`);
       } else {
-        setNotice(editingScenarioId
+        setNotice((editingScenarioId
           ? "Đã cập nhật scenario, replay Golden trên Database ẩn và tạo lại oracle."
-          : "Đã replay Golden trên Database ẩn, sinh Output Database, oracle và testcase-definition.json.");
+          : "Đã replay Golden trên Database ẩn, sinh Output Database, oracle và testcase-definition.json.") + duoiDinhDanh);
       }
     });
   };
@@ -963,9 +1055,16 @@ function BehaviorAuthoringEditor() {
   });
 
   const publish = () => suite && run("publish", async () => {
-    await api(`/behavior-authoring/suites/${suite.id}/publish`, { method: "POST" });
+    const daPublish = await api<JsonMap>(`/behavior-authoring/suites/${suite.id}/publish`, { method: "POST" });
     await refresh(suite.id);
-    setNotice("Bộ chấm đã publish và materialize thành runner có thể dùng khi chấm batch.");
+    // Độ phủ định danh toàn bộ đề (backend đếm lúc publish): chỉ để biết, không chặn.
+    const phu = (daPublish.identifier_coverage || {}) as JsonMap;
+    const co = Number(phu.steps_with_identifier || 0);
+    const tong = Number(phu.steps_total || 0);
+    const duoi = tong > 0
+      ? ` Định danh: ${co}/${tong} bước${co < tong ? "; bước còn lại được tìm bằng nhãn/chữ." : "."}`
+      : "";
+    setNotice("Bộ chấm đã publish và materialize thành runner có thể dùng khi chấm batch." + duoi);
   });
 
   const validateGolden = () => suite && run("validate-golden", async () => {
@@ -1128,6 +1227,9 @@ function BehaviorAuthoringEditor() {
           .filter((it: JsonMap) => typeof it?.attribute === "string" && typeof it?.attributeValue === "string")
           .map((it: JsonMap) => ({
             attribute: String(it.attribute), value: String(it.attributeValue), role: String(it.role || ""),
+            // Định danh recorder đọc được, chỉ để HIỆN. Không đưa vào target checkpoint: tiêu
+            // chí "màn hình có X" phải tiếp tục kiểm nội dung bằng nhãn/chữ (quyết định Q2).
+            identifier: typeof it.identifier === "string" ? it.identifier : "",
             // label/hint là thành phần ngữ nghĩa thật (nút, ô nhập) → tick sẵn. Chữ trần có
             // thể là DỮ LIỆU đang hiển thị chứ không phải khung màn hình — để giảng viên tự cân nhắc.
             checked: it.attribute === "label" || it.attribute === "hint",
@@ -1313,6 +1415,7 @@ function BehaviorAuthoringEditor() {
                         <input type="checkbox" checked={it.checked} onChange={() => setUiInventory((prev) => prev ? prev.map((x, j) => (j === i ? { ...x, checked: !x.checked } : x)) : prev)} />
                         <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold ${it.attribute === "label" ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300" : it.attribute === "hint" ? "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300" : "bg-slate-100 text-slate-500 dark:bg-slate-800"}`}>{it.attribute}</span>
                         <span className="truncate">{it.value}</span>
+                        {it.identifier && <span className="shrink-0 rounded bg-teal-100 px-1.5 py-0.5 font-mono text-[10px] font-bold text-teal-700 dark:bg-teal-950 dark:text-teal-300" title="Định danh Semantics(identifier:) của thành phần. Checkpoint tạo từ đây vẫn kiểm nội dung bằng nhãn/chữ.">{it.identifier}</span>}
                         {it.role && <span className="ml-auto text-[10px] text-slate-400">{it.role}</span>}
                       </label>
                     ))}
@@ -1328,12 +1431,45 @@ function BehaviorAuthoringEditor() {
 
             <div ref={authoringPanel} className="min-w-0 scroll-mt-24 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
               <div className="flex items-center justify-between"><div><p className="text-xs font-bold uppercase tracking-widest text-indigo-500">Bước 4</p><h2 className="text-xl font-bold">Record → Abstract</h2></div>{recording ? <span className={`flex items-center gap-2 text-sm font-bold ${recording.status === "ACTIVE" ? "text-rose-500" : "text-amber-500"}`}><span className={`h-2 w-2 rounded-full ${recording.status === "ACTIVE" ? "animate-pulse bg-rose-500" : "bg-amber-500"}`} /> {recording.status === "ACTIVE" ? "Đang ghi" : "Chờ sinh testcase"}</span> : <span className="text-sm text-slate-500">Chưa ghi</span>}</div>
+              {iconInventory && iconScenario && (
+                <div className="mt-4 rounded-xl border border-teal-300 bg-teal-50/40 p-3 dark:border-teal-800 dark:bg-teal-950/20">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-bold">Icon máy chấm thấy ở luồng {iconScenario.ma} — tick icon được tính điểm</span>
+                    <input value={uiScreenName} onChange={(e) => setUiScreenName(e.target.value)} placeholder="Tên màn (vd: Màn danh sách)" className="rounded-lg border border-slate-300 px-2 py-1 text-sm dark:border-slate-600 dark:bg-slate-800" />
+                    <button onClick={luuTieuChiIcon} disabled={Boolean(busy) || !iconInventory.some((it) => it.checked)} className="rounded-lg bg-teal-600 px-3 py-1.5 text-sm font-bold text-white disabled:opacity-40">
+                      Thêm {iconInventory.filter((it) => it.checked).length * (1 + (viTriOn ? 1 : 0) + (mauOn ? 1 : 0))} tiêu chí
+                    </button>
+                    <button onClick={() => { setIconInventory(null); setIconScenario(null); }} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-bold text-slate-600 dark:border-slate-600 dark:text-slate-300">Đóng</button>
+                  </div>
+                  <p className="mt-2 text-[11px] text-slate-500">
+                    Dành cho nút chỉ có hình (Thêm, Xóa): chấm đúng icon, đúng chỗ, đúng màu mà KHÔNG bắt sinh viên gắn nhãn ngữ nghĩa chỉ để máy tìm.
+                    Bảng này do máy chấm đo trên cây widget lúc capture, không phải quét DOM — nút không nhãn thì DOM web không thấy.
+                    Icon lặp ở mỗi dòng danh sách được chấm ở <b>mọi dòng</b>: thiếu một dòng là trượt, còn vị trí đo tương đối trong dòng nên dòng đầu và dòng cuối cùng một chuẩn.
+                  </p>
+                  <div className="mt-2 grid max-h-56 gap-1 overflow-auto pr-1">
+                    {iconInventory.map((it, i) => (
+                      <label key={it.icon} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 text-sm hover:bg-teal-100/60 dark:hover:bg-teal-900/30">
+                        <input type="checkbox" checked={it.checked} onChange={() => setIconInventory((prev) => prev ? prev.map((x, j) => (j === i ? { ...x, checked: !x.checked } : x)) : prev)} />
+                        <span className="rounded bg-teal-100 px-1.5 py-0.5 font-mono text-[10px] font-bold text-teal-700 dark:bg-teal-950 dark:text-teal-300">icon</span>
+                        <span className="truncate font-mono">{it.icon}</span>
+                        {it.count > 1 && (
+                          <span title="Icon này xuất hiện nhiều lần. Có 'lặp theo dòng' nghĩa là mỗi dòng danh sách đúng một cái — máy sẽ chấm đủ mọi dòng." className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+                            ×{it.count}{it.perRow ? " · lặp theo dòng" : ""}
+                          </span>
+                        )}
+                        {it.buttonType && <span className="ml-auto text-[10px] text-slate-400">{it.buttonType}</span>}
+                      </label>
+                    ))}
+                  </div>
+                  <p className="mt-2 text-[11px] text-slate-500">Ba mặt (có mặt · vị trí · màu) và số điểm lấy theo đúng các ô đã đặt ở bảng “Quét thành phần UI”. Lưu xong hệ thống tự capture lại để đo giá trị chuẩn.</p>
+                </div>
+              )}
               {editingScenarioId && recording && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-indigo-300 bg-indigo-50 px-4 py-3 text-sm dark:border-indigo-800 dark:bg-indigo-950/30"><div><p className="font-bold text-indigo-700 dark:text-indigo-300">Đang sửa scenario {scenarioCode}</p><p className="mt-1 text-xs text-slate-600 dark:text-slate-300">Toàn bộ bước cũ đã nằm trong danh sách bên dưới. Hãy thao tác thêm trên Golden App hoặc dùng các form thêm action/checkpoint; có thể xóa từng bước cũ.</p></div><button onClick={cancelActiveRecording} disabled={Boolean(busy)} className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-bold disabled:opacity-40 dark:border-slate-700">Hủy sửa</button></div>}
               <div className="mt-4 grid gap-3 sm:grid-cols-3"><input value={scenarioCode} disabled={Boolean(editingScenarioId)} onChange={(e) => setScenarioCode(e.target.value)} placeholder="Mã luồng (vd: ADD, EDIT, FILTER_ALL)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700" /><input value={scenarioName} onChange={(e) => setScenarioName(e.target.value)} placeholder="Tên luồng (vd: Thêm khoản chi)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><input type="number" min={0.1} step={0.5} value={scenarioWeight} onChange={(e) => setScenarioWeight(chanTrongSoHam(Number(e.target.value)))} aria-label="Trọng số scenario" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /></div>
               <div className="mt-2 grid gap-2 sm:grid-cols-2"><label className="text-xs font-semibold text-slate-500">Rộng màn (dp)<input type="number" min={240} value={viewportWidth} onChange={(e) => setViewportWidth(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label><label className="text-xs font-semibold text-slate-500">Cao màn (dp)<input type="number" min={320} value={viewportHeight} onChange={(e) => setViewportHeight(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label><label className="flex items-center gap-2 text-xs font-semibold text-slate-500 sm:col-span-2"><input type="checkbox" checked={cheDoToi} onChange={() => setCheDoToi((v) => !v)} /> Chấm hàm này ở chế độ tối <span className="font-normal">— engine đặt platformBrightness = dark trước khi boot; bài có darkTheme sẽ tự đổi, giá trị chuẩn màu/kiểu chữ đo ở chế độ tối. Khung Golden bên trên vẫn hiện sáng.</span></label></div>
               <p className="mt-2 text-xs font-semibold text-slate-600 dark:text-slate-300">Khung máy Android, tính bằng dp — cỡ mà Android Studio hiển thị cho máy ảo (Pixel: 412×915). Mọi phép chấm bố cục đều đo bằng dp nên không cần khai mật độ điểm ảnh.</p>
               {!recording ? <><button onClick={startRecording} disabled={!recordingInputsReady || Boolean(busy)} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-rose-600 px-4 py-2.5 font-bold text-white disabled:opacity-40"><Radio size={18} /> Bắt đầu record</button>{!recordingInputsReady && <p className="mt-2 text-xs text-amber-600">Cần đủ Database phát sinh viên, Database ẩn và Golden Solution.</p>}</> : <>
-                <div className="mt-5 rounded-xl border border-slate-200 p-4 dark:border-slate-700"><h3 className="font-bold">Thêm action</h3><div className="mt-3 grid gap-2 sm:grid-cols-2"><select value={action} onChange={(e) => setAction(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{ACTIONS.map((item) => <option key={item} value={item}>{item}</option>)}</select><select value={locator} onChange={(e) => setLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{item}</option>)}</select><input value={locatorValue} onChange={(e) => setLocatorValue(e.target.value)} placeholder="Giá trị nhận diện" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><input value={inputValue} onChange={(e) => setInputValue(e.target.value)} placeholder="Dữ liệu nhập (nếu có)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /></div><p className="mt-2 text-xs text-slate-500">Gõ chữ trong app chỉ được ghi là <b>cú chạm vào ô</b>; nội dung thì khai ở ô bên phải từng dòng trong danh sách dưới. Flutter Web tráo phần tử nhập giữa chừng nên đọc chữ từ trình duyệt không bao giờ chắc — khai tay thì chính xác tuyệt đối và nhìn thấy được trước khi sinh testcase.</p>{action === "drag" && <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-500"><span>Độ dời (dp):</span><label className="flex items-center gap-1">ngang <input type="number" step={10} value={keoX} onChange={(e) => setKeoX(Number(e.target.value))} className="w-20 rounded border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-600" /></label><label className="flex items-center gap-1">dọc <input type="number" step={10} value={keoY} onChange={(e) => setKeoY(Number(e.target.value))} className="w-20 rounded border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-600" /></label><span>— dương là sang phải / xuống dưới. Kéo dải trượt: chỉ cần ngang.</span></div>}<button onClick={() => appendAction()} className="mt-3 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-bold text-white"><Plus size={16} /> Thêm action</button></div>
+                <div className="mt-5 rounded-xl border border-slate-200 p-4 dark:border-slate-700"><h3 className="font-bold">Thêm action</h3><div className="mt-3 grid gap-2 sm:grid-cols-2"><select value={action} onChange={(e) => setAction(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{ACTIONS.map((item) => <option key={item} value={item}>{item}</option>)}</select><select value={locator} onChange={(e) => setLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{LOCATOR_LABEL[item] || item}</option>)}</select><input value={locatorValue} onChange={(e) => setLocatorValue(e.target.value)} placeholder="Giá trị nhận diện" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><input value={inputValue} onChange={(e) => setInputValue(e.target.value)} placeholder="Dữ liệu nhập (nếu có)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /></div><p className="mt-2 text-xs text-slate-500">Gõ chữ trong app chỉ được ghi là <b>cú chạm vào ô</b>; nội dung thì khai ở ô bên phải từng dòng trong danh sách dưới. Flutter Web tráo phần tử nhập giữa chừng nên đọc chữ từ trình duyệt không bao giờ chắc — khai tay thì chính xác tuyệt đối và nhìn thấy được trước khi sinh testcase.</p>{action === "drag" && <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-500"><span>Độ dời (dp):</span><label className="flex items-center gap-1">ngang <input type="number" step={10} value={keoX} onChange={(e) => setKeoX(Number(e.target.value))} className="w-20 rounded border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-600" /></label><label className="flex items-center gap-1">dọc <input type="number" step={10} value={keoY} onChange={(e) => setKeoY(Number(e.target.value))} className="w-20 rounded border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-600" /></label><span>— dương là sang phải / xuống dưới. Kéo dải trượt: chỉ cần ngang.</span></div>}<button onClick={() => appendAction()} className="mt-3 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-bold text-white"><Plus size={16} /> Thêm action</button></div>
                 <div className="mt-3 rounded-xl border border-slate-200 p-4 dark:border-slate-700">
                   <div className="flex items-center justify-between gap-3">
                     <div><h3 className="font-bold">Thêm checkpoint</h3><p className="text-xs text-slate-500">Mỗi checkpoint trở thành một đầu điểm độc lập. Điểm và ràng buộc chia ở bảng "Chia điểm" trên thẻ hàm, sau khi sinh testcase.</p></div>
@@ -1360,7 +1496,7 @@ function BehaviorAuthoringEditor() {
                       {uiCheckpointType === "widget_state" && <div className="space-y-2">
                         <p className="text-xs text-slate-500">Đọc một giá trị thật bên trong widget: công tắc đang bật hay tắt, dải trượt bao nhiêu, ô nhập có dùng bàn phím số không, nút có đúng loại không. Giá trị chuẩn do hệ thống tự đo trên bài Golden lúc sinh testcase — không phải gõ tay.</p>
                         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-[auto_1.2fr_1.2fr_1.6fr_auto]">
-                          <select value={wsLocator} onChange={(e) => setWsLocator(e.target.value)} title="Cách nhận diện điểm neo trên màn hình" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{item}</option>)}</select>
+                          <select value={wsLocator} onChange={(e) => setWsLocator(e.target.value)} title="Cách nhận diện điểm neo trên màn hình" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{LOCATOR_LABEL[item] || item}</option>)}</select>
                           <input value={wsLocatorValue} onChange={(e) => setWsLocatorValue(e.target.value)} placeholder="Chữ hoặc nhãn để tìm" className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />
                           <input list="ds-widget" value={wsWidget} onChange={(e) => setWsWidget(e.target.value)} placeholder="Loại widget, ví dụ Slider" title="Tên kiểu widget mang giá trị cần đọc. Hệ thống tìm cả bên trong lẫn bao quanh điểm neo." className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />
                           <datalist id="ds-widget">{WIDGET_GOI_Y.map((w) => <option key={w} value={w} />)}</datalist>
@@ -1371,7 +1507,7 @@ function BehaviorAuthoringEditor() {
                       {uiCheckpointType === "text_style" && <div className="space-y-2">
                         <p className="text-xs text-slate-500">Đo kiểu chữ thật sự được vẽ, nên bắt được cả chữ thừa kế từ theme lẫn chữ đặt style thẳng trên widget. Cỡ chữ và độ đậm so tuyệt đối; màu chữ so theo sai số 20% như mọi tiêu chí màu.</p>
                         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-[auto_1.6fr_1.4fr_auto]">
-                          <select value={tsLocator} onChange={(e) => setTsLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{item}</option>)}</select>
+                          <select value={tsLocator} onChange={(e) => setTsLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{LOCATOR_LABEL[item] || item}</option>)}</select>
                           <input value={tsLocatorValue} onChange={(e) => setTsLocatorValue(e.target.value)} placeholder="Dòng chữ cần đo" className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />
                           <select value={tsProperty} onChange={(e) => setTsProperty(e.target.value)} className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{MAT_KIEU_CHU.map(([ma, nhan]) => <option key={ma} value={ma}>{nhan}</option>)}</select>
                           {laThuocTinhMau(tsProperty) && <label className="flex items-center gap-1 whitespace-nowrap text-xs text-slate-500">sai số <input type="number" min={0.5} max={50} step={0.5} value={saiSoMau} onChange={(e) => setSaiSoMau(Number(e.target.value))} className="w-14 rounded border border-slate-300 bg-transparent px-1.5 py-1 dark:border-slate-600" />%</label>}
@@ -1415,6 +1551,16 @@ function BehaviorAuthoringEditor() {
                   return <div key={sequence} className="flex items-center gap-3 rounded-lg bg-slate-50 px-3 py-2 text-xs dark:bg-slate-800">
                     <span className="font-mono text-indigo-500">{sequence}</span>
                     <span className="font-bold">{String(item.action || item.kind)}</span>
+                    {(() => {
+                      // Huy hiệu định danh: máy chấm tìm bằng nó TRƯỚC, nhãn/chữ cạnh bên là đường
+                      // lui. Bước thao tác không có định danh thì nói rõ, để người soạn biết Golden
+                      // còn thiếu Semantics(identifier:) ở widget nào (checkpoint không cần, Q2).
+                      const t = (item.target || {}) as JsonMap;
+                      const id = String(t.semantic_id || t.semanticId || "");
+                      if (id) return <span className="shrink-0 rounded bg-teal-100 px-1.5 py-0.5 font-mono text-[10px] font-bold text-teal-700 dark:bg-teal-950 dark:text-teal-300" title="Định danh recorder đọc được từ Golden. Máy chấm tìm bằng nó trước; nhãn/chữ cạnh bên là đường lui.">{id}</span>;
+                      if (String(item.kind || "") === "action" && Object.keys(t).length > 0) return <span className="shrink-0 text-[10px] text-slate-400" title="Golden chưa gắn Semantics(identifier:) cho widget này. Máy chấm sẽ tìm bằng nhãn/chữ.">chưa có định danh</span>;
+                      return null;
+                    })()}
                     <span className="min-w-0 flex-1 truncate text-slate-500">{JSON.stringify(item.target || item.expect || {})}</span>
                     {String(item.action || "") === "enter_text" && <input
                       defaultValue={String(item.value || "")}
@@ -1509,7 +1655,16 @@ function BehaviorAuthoringEditor() {
               </div>
             )}
             <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-              {(suite.scenarios || []).map((item, index) => <div key={String(item.id || index)} className="rounded-xl border border-slate-200 px-4 py-3 dark:border-slate-700"><div className="flex items-center justify-between gap-2"><span className="font-bold">{String(item.name || item.scenario_code)}</span><span className="rounded-full bg-indigo-100 px-2 py-1 text-xs font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">{String(item.weight)} điểm</span></div><p className="mt-1 font-mono text-[11px] text-indigo-500">{String(item.scenario_code || "")}</p><p className="mt-2 text-xs text-slate-500">{Array.isArray(item.steps) ? item.steps.length : 0} action · {Array.isArray(item.checkpoints) ? item.checkpoints.length : 0} checkpoint</p>{chiaDiemId === String(item.id) && (() => {
+              {(suite.scenarios || []).map((item, index) => <div key={String(item.id || index)} className="rounded-xl border border-slate-200 px-4 py-3 dark:border-slate-700"><div className="flex items-center justify-between gap-2"><span className="font-bold">{String(item.name || item.scenario_code)}</span><span className="rounded-full bg-indigo-100 px-2 py-1 text-xs font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">{String(item.weight)} điểm</span></div><p className="mt-1 font-mono text-[11px] text-indigo-500">{String(item.scenario_code || "")}</p>{(() => {
+                // Độ phủ định danh của kịch bản: bước có target mà chưa có định danh vẫn chấm được
+                // bằng nhãn, nhưng người soạn cần thấy để biết kịch bản nào chưa hưởng định danh
+                // (gắn vào Golden rồi "Sinh lại testcase" là máy nướng vào, không ghi hình lại).
+                const steps = Array.isArray(item.steps) ? (item.steps as JsonMap[]) : [];
+                const coTarget = steps.filter((st) => st && typeof st === "object" && Object.keys((st.target as JsonMap) || {}).length > 0);
+                const coId = coTarget.filter((st) => { const t = (st.target as JsonMap) || {}; return Boolean(t.semantic_id || t.semanticId); });
+                const du = coTarget.length > 0 && coId.length === coTarget.length;
+                return <p className="mt-2 text-xs text-slate-500">{steps.length} action · {Array.isArray(item.checkpoints) ? item.checkpoints.length : 0} checkpoint{coTarget.length > 0 && <> · <span className={du ? "font-bold text-teal-600 dark:text-teal-300" : "font-bold text-amber-600 dark:text-amber-300"} title={du ? "Mọi bước đều có định danh Semantics(identifier:)." : "Bước chưa có định danh được tìm bằng nhãn/chữ. Gắn Semantics(identifier:) vào Golden rồi Sinh lại testcase để máy nướng vào."}>{coId.length}/{coTarget.length} bước có định danh</span></>}</p>;
+              })()}{chiaDiemId === String(item.id) && (() => {
                   const chots = Array.isArray(item.checkpoints) ? item.checkpoints as JsonMap[] : [];
                   const hanhVi = chots;
                   const tongHanhVi = hanhVi.reduce((t, c) => t + (chiaDiemChot[String(c.id)] ?? 1), 0);

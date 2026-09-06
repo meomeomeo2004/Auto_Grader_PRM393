@@ -915,34 +915,55 @@ public class BehaviorAuthoringService {
             String kind = text(checkpoint, "kind", "");
             boolean laViTri = "component_position".equals(kind);
             boolean laMau = "component_color".equals(kind) || "theme_color".equals(kind);
+            // Tiêu chí "có mặt" trước đây không nhận gì từ capture. Nay nó nhận phần LẶP:
+            // Golden có sáu nút Xóa thì "có mặt" nghĩa là có ở mọi dòng, không phải có một cái.
+            boolean laCoMat = "component_present".equals(kind);
             // Ba loại tiêu chí "đọc một giá trị rồi so": trạng thái widget, kiểu chữ, chủ đề.
             // Chúng dùng CHUNG một kênh giá trị chuẩn (`observed`) nên chỉ có một luật nướng.
             boolean laTrangThai = "widget_state".equals(kind)
                     || "text_style".equals(kind)
                     || "theme_value".equals(kind);
-            if (!laViTri && !laMau && !laTrangThai) continue;
+            if (!laViTri && !laMau && !laTrangThai && !laCoMat) continue;
             Map<String, Object> doDuoc = map(components.get(text(checkpoint, "id", "")));
             if (doDuoc.isEmpty()) continue;
             Map<String, Object> mongDoi = new LinkedHashMap<>(map(checkpoint.get("expect")));
+            boolean daDoi = false;
+            if (laViTri || laMau || laCoMat) {
+                Object lap = doDuoc.get("repeat");
+                // Bỏ luật lặp cũ khi lượt đo mới chỉ thấy một thể hiện: dữ liệu mẫu đổi mà giữ
+                // luật cũ thì bài đúng trượt oan vì "thiếu dòng".
+                if (lap == null) {
+                    if (mongDoi.remove("repeat") != null) daDoi = true;
+                } else {
+                    mongDoi.put("repeat", lap);
+                    daDoi = true;
+                }
+            }
             if (laTrangThai) {
                 Object giaTri = doDuoc.get("observed");
                 // Không đo được (tiêu chí khai sai, widget không có trên màn) thì KHÔNG nướng:
                 // để lúc chấm báo "chưa có giá trị chuẩn" còn hơn nướng rỗng rồi cái gì cũng đạt.
                 if (giaTri == null) continue;
                 mongDoi.put("value", giaTri);
+                daDoi = true;
             } else if (laViTri) {
-                if (doDuoc.get("center_x") == null || doDuoc.get("center_y") == null) continue;
-                mongDoi.put("center_x", doDuoc.get("center_x"));
-                mongDoi.put("center_y", doDuoc.get("center_y"));
-                mongDoi.put("width", doDuoc.get("width"));
-                mongDoi.put("height", doDuoc.get("height"));
-            } else {
+                if (doDuoc.get("center_x") != null && doDuoc.get("center_y") != null) {
+                    mongDoi.put("center_x", doDuoc.get("center_x"));
+                    mongDoi.put("center_y", doDuoc.get("center_y"));
+                    mongDoi.put("width", doDuoc.get("width"));
+                    mongDoi.put("height", doDuoc.get("height"));
+                    daDoi = true;
+                }
+            } else if (laMau) {
                 String mau = text(doDuoc, "color", "");
                 // Thành phần trong suốt hoàn toàn thì không có màu để so — bỏ qua, để tiêu chí
                 // báo "chưa có giá trị chuẩn" còn hơn nướng bừa một màu sai.
-                if (mau.isBlank()) continue;
-                mongDoi.put("color", mau);
+                if (!mau.isBlank()) {
+                    mongDoi.put("color", mau);
+                    daDoi = true;
+                }
             }
+            if (!daDoi) continue;
             checkpoint.put("expect", mongDoi);
             daNuong++;
         }
@@ -980,6 +1001,95 @@ public class BehaviorAuthoringService {
         scenario.setStepsJson(json(steps));
         scenarios.save(scenario);
         return daNuong;
+    }
+
+    /**
+     * Khoá định vị cũ của một bước, đúng THỨ TỰ engine chọn lúc thu định danh
+     * ({@code _thuDinhDanh} trong exam_test.dart). Hai bên phải cùng thứ tự, kẻo bước có cả
+     * label lẫn text được engine ghi theo label mà backend lại tra theo text.
+     */
+    private static final List<String> KHOA_DINH_VI_CU =
+            List.of("label", "text", "hint", "tooltip", "text_prefix");
+
+    /**
+     * Nướng ĐỊNH DANH (Semantics identifier) đo trên Golden lúc thu oracle vào target của các
+     * bước — Gói 2 kế hoạch "Định danh Semantics".
+     *
+     * Engine ghi mỗi phần tử dạng {label|text|hint|tooltip|text_prefix: giá trị, semantic_id: ...}.
+     * Bước nào có cùng khoá và giá trị thì nhận {@code semantic_id}; nhãn cũ GIỮ NGUYÊN cạnh
+     * bên làm đường lui, nên bài nộp quên định danh vẫn được tìm bằng nhãn như trước.
+     * Nhờ vậy bộ đề đã ghi hình từ trước nhận định danh sau một lần "Sinh lại testcase".
+     *
+     * KHÔNG ghi đè định danh người soạn đã gõ tay ở khung "Thêm action" (đường 2): tay là
+     * ý người, máy chỉ điền chỗ trống. CHỈ vá steps, KHÔNG vá checkpoint (quyết định Q2,
+     * 4/9/2026): tiêu chí "màn hình có dòng X" là kiểm NỘI DUNG, đổi sang định danh thì
+     * dòng đúng định danh mà sai chữ vẫn đạt.
+     */
+    @Transactional
+    public int applyCapturedIdentifiers(String scenarioId, List<Object> dinhDanh) {
+        if (dinhDanh == null || dinhDanh.isEmpty()) return 0;
+        BehaviorScenario scenario = scenario(scenarioId);
+        ensureEditable(suite(scenario.getSuiteId()));
+        Map<String, String> tra = new LinkedHashMap<>();
+        for (Object raw : dinhDanh) {
+            Map<String, Object> muc = map(raw);
+            String id = text(muc, "semantic_id", "");
+            if (id.isBlank()) continue;
+            for (String khoa : KHOA_DINH_VI_CU) {
+                String giaTri = text(muc, khoa, "");
+                if (giaTri.isBlank()) continue;
+                tra.putIfAbsent(khoa + "=" + giaTri, id);
+                break;
+            }
+        }
+        if (tra.isEmpty()) return 0;
+        List<Map<String, Object>> steps = new ArrayList<>(readObjectList(scenario.getStepsJson()));
+        int daNuong = 0;
+        for (Map<String, Object> step : steps) {
+            Map<String, Object> target = new LinkedHashMap<>(map(step.get("target")));
+            if (target.isEmpty()) continue;
+            if (!text(target, "semantic_id", "").isBlank() || !text(target, "semanticId", "").isBlank()) {
+                continue;
+            }
+            String id = null;
+            for (String khoa : KHOA_DINH_VI_CU) {
+                String giaTri = text(target, khoa, "");
+                if (giaTri.isBlank()) continue;
+                id = tra.get(khoa + "=" + giaTri);
+                break;
+            }
+            if (id == null) continue;
+            // semantic_id đứng đầu để ai đọc JSON cũng thấy nó là khoá chính; nhãn cũ theo sau.
+            Map<String, Object> moi = new LinkedHashMap<>();
+            moi.put("semantic_id", id);
+            moi.putAll(target);
+            step.put("target", moi);
+            daNuong++;
+        }
+        if (daNuong == 0) return 0;
+        scenario.setStepsJson(json(steps));
+        scenarios.save(scenario);
+        return daNuong;
+    }
+
+    /** Số bước có định danh / tổng bước có target — để màn soạn đề và lúc publish thấy độ phủ. */
+    public Map<String, Object> identifierCoverage(List<BehaviorScenario> danhSach) {
+        int co = 0;
+        int tong = 0;
+        for (BehaviorScenario scenario : danhSach) {
+            for (Map<String, Object> step : readObjectList(scenario.getStepsJson())) {
+                Map<String, Object> target = map(step.get("target"));
+                if (target.isEmpty()) continue;
+                tong++;
+                if (!text(target, "semantic_id", "").isBlank() || !text(target, "semanticId", "").isBlank()) {
+                    co++;
+                }
+            }
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("steps_with_identifier", co);
+        out.put("steps_total", tong);
+        return out;
     }
 
     @Transactional
@@ -1105,6 +1215,10 @@ public class BehaviorAuthoringService {
         Map<String, Object> out = new LinkedHashMap<>(suiteView(suite, true));
         out.put("total_weight", totalWeight);
         out.put("ready_for_replay", true);
+        // Độ phủ định danh: thông tin, KHÔNG chặn (Q3: không có điểm riêng cho định danh).
+        // Bước chưa có định danh vẫn chấm được bằng nhãn; con số này chỉ để người soạn biết
+        // bộ đề đã hưởng định danh tới đâu và cần "Sinh lại testcase" kịch bản nào.
+        out.put("identifier_coverage", identifierCoverage(enabled));
         return out;
     }
 
