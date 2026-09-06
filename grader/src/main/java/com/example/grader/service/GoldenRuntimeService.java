@@ -30,7 +30,7 @@ import java.util.zip.ZipFile;
 public class GoldenRuntimeService {
     private static final long MAX_EXPANDED_BYTES = 1_000L * 1024 * 1024;
     private static final int MAX_ZIP_ENTRIES = 20_000;
-    private static final String RECORDER_BRIDGE_VERSION = "semantic-v14";   // v4: quét thành phần CHỈ trong flutter-view (v3 vớ nhầm DOM của extension)
+    private static final String RECORDER_BRIDGE_VERSION = "semantic-v15";   // v15: ghi định danh flt-semantics-identifier cạnh nhãn · v4: quét thành phần CHỈ trong flutter-view (v3 vớ nhầm DOM của extension)
 
     @Value("${grader.base-image:grading-base:latest}")
     private String baseImage;
@@ -299,7 +299,7 @@ public class GoldenRuntimeService {
                 Future<void> main() async {
                   WidgetsFlutterBinding.ensureInitialized();
                   // Dấu phiên bản để phân định bản build đang CHẠY với bản bị cache.
-                  debugPrint('recorder-entry semantic-v14');
+                  debugPrint('recorder-entry semantic-v15');
                   // Giữ handle sống suốt phiên để cây ngữ nghĩa luôn được dựng.
                   SemanticsBinding.instance.ensureSemantics();
                   // SQLite THẬT trên web + nạp hidden.db TRƯỚC khi app khởi động — đúng cách
@@ -363,6 +363,34 @@ public class GoldenRuntimeService {
                   // song song cùng một việc). JS lấy bản khai sau, tức bản semanticState(node)
                   // bên dưới — nên khối trên là code chết, và ai đảo thứ tự là inventory() vỡ
                   // câm bằng ReferenceError. Giữ lại splitLabelHint vì semanticNode() đang dùng.
+                  // DINH DANH (Semantics identifier) cua chinh node, hoac cua to tien "wrapper tran"
+                  // gan nhat: cha CHUA CO nhan, hoac mang DUNG nhan cua node (Semantics(label) boc
+                  // ngoai chip lap lai nhan cua chip). Gap cha co nhan KHAC la thuc the khac (nut
+                  // Xoa nam trong dong danh sach) -> dung, khong nhan nham dinh danh cua dong.
+                  // Do GD0 4/9/2026 tren ban web dung bang chinh script nay: dong ListTile, nut
+                  // Xoa, FAB mang id ngay tren phan tu co aria-label; o nhap va nut "Luu" mang id
+                  // o phan tu CHA cua INPUT / cua nut. Cung luat voi _docDinhDanhTaiDich ben engine
+                  // de dinh danh ghi luc soan va dinh danh engine tim luc cham la MOT.
+                  function identifierOf(node, nhanCuaNode) {
+                    let cur = node;
+                    for (let buoc = 0; cur instanceof Element && buoc < 5; buoc++) {
+                      const id = cur.getAttribute('flt-semantics-identifier');
+                      if (id) return id;
+                      const cha = cur.parentElement;
+                      if (!cha) break;
+                      const nhanCha = cha.getAttribute('aria-label') || '';
+                      if (nhanCha && nhanCha !== nhanCuaNode) break;
+                      cur = cha;
+                    }
+                    return '';
+                  }
+                  // Target ghi CA HAI: dinh danh (neu co) dung dau, nhan/chu cu giu nguyen lam
+                  // duong lui. attribute/attributeValue KHONG doi de moi cho khac (docTuSemantics,
+                  // bang tick, chong doi enter_text) van hoat dong y het ban v14.
+                  function ketQua(node, target, attribute, attributeValue) {
+                    const id = identifierOf(node, attribute === 'label' ? attributeValue : '');
+                    return {target: id ? {semantic_id: id, ...target} : target, attribute, attributeValue};
+                  }
                   function semanticNode(event) {
                     lastReject = '';
                     const path = event.composedPath ? event.composedPath() : [];
@@ -375,11 +403,11 @@ public class GoldenRuntimeService {
                         // tach ra la sai — replay so nhan TUYET DOI se khong bao gio khop.
                         const laONhap = node.tagName === 'INPUT' || node.tagName === 'TEXTAREA'
                           || node.getAttribute('role') === 'textbox';
-                        return {target: laONhap ? splitLabelHint(rawLabel) : {label: rawLabel},
-                                attribute: 'label', attributeValue: rawLabel};
+                        return ketQua(node, laONhap ? splitLabelHint(rawLabel) : {label: rawLabel},
+                                'label', rawLabel);
                       }
                       const hint = node.getAttribute('placeholder');
-                      if (hint) return {target: {hint}, attribute: 'hint', attributeValue: hint};
+                      if (hint) return ketQua(node, {hint}, 'hint', hint);
                       const text = textOf(node);
                       if (!text) continue;
                       // Chi nhan chu cua node khi no la mot nhan/nut THAT SU.
@@ -390,7 +418,7 @@ public class GoldenRuntimeService {
                         lastReject = text;
                         return null;
                       }
-                      if (text.length <= MAX_TEXT_LOCATOR) return {target: {text}, attribute: 'text', attributeValue: text};
+                      if (text.length <= MAX_TEXT_LOCATOR) return ketQua(node, {text}, 'text', text);
                       lastReject = text;
                       return null;
                     }
@@ -523,13 +551,20 @@ public class GoldenRuntimeService {
                   function semanticState(node) {
                     const label = node.getAttribute('aria-label') || node.getAttribute('data-semantics-label');
                     if (label && label !== 'Enable accessibility') {
-                      return {target: {label}, attribute: 'label', attributeValue: label, role: node.getAttribute('role') || ''};
+                      // `identifier` nam NGOAI target, chi de hien tren bang tick: checkpoint tao tu
+                      // day phai tiep tuc kiem NOI DUNG bang nhan/chu (Q2), khong kiem "co dinh danh".
+                      const identifier = identifierOf(node, label);
+                      return {target: {label}, attribute: 'label', attributeValue: label, role: node.getAttribute('role') || '',
+                              ...(identifier ? {identifier} : {})};
                     }
                     const hint = node.getAttribute('placeholder');
                     if (hint) return {target: {hint}, attribute: 'hint', attributeValue: hint, role: 'text_field'};
                     const text = textOf(node);
                     if (!text || textLeafCount(node) > 1 || text.length > MAX_TEXT_LOCATOR) return null;
-                    return {target: {text}, attribute: 'text', attributeValue: text, role: node.getAttribute('role') || 'text'};
+                    // Nut tim theo chu (vd "Luu") mang dinh danh o phan tu cha — cung chi de hien.
+                    const idChu = identifierOf(node, '');
+                    return {target: {text}, attribute: 'text', attributeValue: text, role: node.getAttribute('role') || 'text',
+                            ...(idChu ? {identifier: idChu} : {})};
                   }
                   // LIET KE thanh phan man hinh hien tai cho bang tick ben trang soan de.
                   // Truoc day lenh nay goi ham semanticState CHUA TON TAI — ReferenceError,
