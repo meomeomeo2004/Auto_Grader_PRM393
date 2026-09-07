@@ -243,7 +243,40 @@ public class ExamSetupController {
         }
     }
 
-    /** Đọc đề bài đã lưu (cho trợ lý AI nạp lại khi mở bộ testcase cũ). */
+    /**
+     * Phiên làm việc của TRỢ LÝ AI cho một bộ testcase (đề bài, khung starter, app lời giải mẫu…).
+     *
+     * <p>Nhờ nó mà bấm "Sửa" một bộ đã soạn bằng AI là mở lại đúng phiên đó và nhờ AI sửa tiếp
+     * được ngay — kể cả khi mở trên máy khác hoặc đã dọn trình duyệt.
+     */
+    @GetMapping("/{examId}/ai-draft")
+    public ResponseEntity<?> readAiDraft(@PathVariable String examId) {
+        try {
+            String json = examService.readAiAuthorDraft(examId);
+            return ResponseEntity.ok(Map.of("exam_id", examId, "has_draft", json != null,
+                    "draft", json == null ? "" : json));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", "Lỗi máy chủ"));
+        }
+    }
+
+    /** Body: { draft: "<json>" } — chuỗi rỗng = xoá nháp AI của bộ này. */
+    @PostMapping("/{examId}/ai-draft")
+    public ResponseEntity<?> saveAiDraft(@PathVariable String examId,
+                                         @RequestBody(required = false) Map<String, Object> body) {
+        try {
+            Object draft = body == null ? null : body.get("draft");
+            examService.saveAiAuthorDraft(examId, draft == null ? null : String.valueOf(draft));
+            return ResponseEntity.ok(Map.of("exam_id", examId, "ok", true));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        }
+    }
+
     /**
      * Trang "Xem đề": đề bài + hình minh họa đã gộp thành MỘT tài liệu HTML tự chứa.
      * Kèm luôn danh sách SVG để trình duyệt đổi sang PNG khi tải bản .docx.

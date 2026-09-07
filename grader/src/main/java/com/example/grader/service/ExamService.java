@@ -504,6 +504,36 @@ public class ExamService {
         return saved;
     }
 
+    /**
+     * Phiên làm việc của trợ lý AI cho một bộ; {@code null} nếu bộ đó chưa từng dùng AI.
+     *
+     * <p>Bộ mới chỉ nằm trên đĩa (chưa có hàng trong DB) thì cũng trả null chứ KHÔNG dựng bản ghi:
+     * chỉ mở màn sửa mà đã ghi vào DB là đăng ký nhầm cả những bộ người dùng chỉ ghé xem.
+     */
+    public String readAiAuthorDraft(String examId) {
+        safeId(examId, "đề");
+        return examRepository.findByExamId(examId).map(Exam::getAiAuthorJson).orElse(null);
+    }
+
+    /**
+     * Ghi phiên làm việc của trợ lý AI cho một bộ. Chuỗi rỗng/null = xoá nháp (bấm "Bắt đầu lại").
+     *
+     * <p>KHÔNG đụng tới testcase đang chấm hay cấu hình Golden Suite — đây chỉ là bản nháp soạn thảo.
+     */
+    public synchronized void saveAiAuthorDraft(String examId, String json) {
+        safeId(examId, "đề");
+        Exam exam = examRepository.findByExamId(examId).orElse(null);
+        if (exam == null) {
+            // Chưa có bộ trên đĩa lẫn DB (đang soạn cho một mã hoàn toàn mới): giữ nháp ở trình
+            // duyệt là đủ, tạo hàng exam rỗng ở đây sẽ đẻ ra bộ testcase ma trong Kho.
+            if (!Files.exists(examsRoot().resolve(examId).resolve("testcase").resolve("skills_matrix.json")))
+                return;
+            exam = ensureExamRecord(examId);
+        }
+        exam.setAiAuthorJson(json == null || json.isBlank() ? null : json);
+        examRepository.save(exam);
+    }
+
     /** Chép nguyên cây thư mục; chặn đường dẫn thoát ra ngoài đích khi tên file bất thường. */
     private void copyTree(Path source, Path target) throws Exception {
         try (Stream<Path> walk = Files.walk(source)) {
