@@ -1982,10 +1982,39 @@ List<Map<String, dynamic>> _kiemKeIcon(WidgetTester tester) {
 // này: `_finder`/`_waitUntil` thay `_byKey`/`_expectPresent`, ném StateError/ArgumentError
 // thay vì phát kênh `_observe` có cấu trúc (file này không có kênh đó).
 //
-// Target LUÔN là {valueKey: "..."} — widget cấu trúc (Stack/Table/Sliver...) không có
-// label/hint/text như thành phần tương tác nên không dùng được cơ chế quét tự động của
-// 4 tiêu chí giao diện gốc; giáo viên tự gõ đúng ValueKey đề yêu cầu sinh viên gắn.
+// Đích LUÔN là ĐỊNH DANH — {semantic_id: "..."}. Widget cấu trúc (Stack/Table/Sliver...)
+// không có label/hint/text như thành phần tương tác nên không quét tự động được; giáo viên
+// gõ đúng định danh mà đề yêu cầu sinh viên gắn.
+//
+// Vì sao KHÔNG dùng ValueKey như bản đầu: đề chỉ được có MỘT hệ định danh. Bắt sinh viên
+// gắn Semantics(identifier:) cho phần tương tác rồi lại ValueKey cho phần bố cục là hai hệ
+// song song, học hai lần và nhầm lẫn hai lần. Đo 7/9/2026 trên cả tám loại widget của mục
+// này: định danh tìm được hết, kể cả sliver nhờ SliverSemantics(identifier:) có sẵn trong
+// SDK. Danh sách cuộn lười cho kết quả y hệt ValueKey. Chỗ duy nhất mất là trang KHÔNG
+// được chọn của IndexedStack: widget còn trong cây nhưng không sinh nút ngữ nghĩa nên
+// không thấy — phép kiểm "trang có tồn tại lúc mới mở" vì thế bỏ đi, thay bằng bấm từng
+// tab rồi soi trang hiện lên, vốn chặt hơn.
 // ═══════════════════════════════════════════════════════════════
+
+/// Đích con của tiêu chí mục này (bottom_key, top_key, appbar_key, sheet_key...): đề khai
+/// ĐỊNH DANH chứ không phải ValueKey.
+Map<String, dynamic> _dichCon(String khoa) => <String, dynamic>{'semantic_id': khoa};
+
+/// Tìm theo định danh, nhìn CẢ widget đã dựng mà đang nằm ngoài khung nhìn. Cần cho phép
+/// cuộn tới cuối danh sách lười: item chỉ vừa dựng xong thì chưa vào khung nhìn.
+Finder _timNgoaiKhung(String khoa) =>
+    find.bySemanticsIdentifier(khoa, skipOffstage: false);
+
+/// Widget THẬT ở đích: chính nó nếu đúng kiểu, không thì tìm xuống cây con.
+///
+/// Vì sao cần: tìm theo định danh trả về lớp bọc Semantics/SliverSemantics chứ không phải
+/// Stack hay Table, nên phép kiểm "có đúng kiểu không" của bản đầu luôn trượt oan. Đo
+/// 7/9/2026: đi xuống một nấc là ra đúng widget.
+Finder _dungKieu(Finder goc, Type kieu) => find.descendant(
+  of: goc,
+  matching: find.byType(kieu, skipOffstage: false),
+  matchRoot: true,
+);
 
 /// [component_scroll_direction] Kiểm chiều cuộn của ListView/GridView.
 /// expect: direction ("horizontal"/"vertical", mặc định "vertical").
@@ -2049,23 +2078,18 @@ Future<void> _assertScrollToEnd(
   if (targetKey.isEmpty) {
     throw ArgumentError('Tiêu chí component_scroll_to_end thiếu expect.target_key.');
   }
-  final targetItem = <String, dynamic>{'valueKey': targetKey};
   final direction = _text(expect, 'direction', 'vertical').toLowerCase();
   final offset =
       direction == 'horizontal' ? const Offset(-300, 0) : const Offset(0, -300);
   for (var attempt = 0; attempt < 30; attempt++) {
-    if (find.byKey(ValueKey<String>(targetKey), skipOffstage: false)
-        .evaluate()
-        .isNotEmpty) {
-      break;
-    }
+    if (_timNgoaiKhung(targetKey).evaluate().isNotEmpty) break;
     final scrollables = find.byType(Scrollable, skipOffstage: false);
     if (scrollables.evaluate().isEmpty) break;
     final count = scrollables.evaluate().length;
     await tester.drag(scrollables.at(count - 1), offset);
     await _boundedPump(tester, const Duration(seconds: 2));
   }
-  if (find.byKey(ValueKey<String>(targetKey)).evaluate().isEmpty) {
+  if (_timNgoaiKhung(targetKey).evaluate().isEmpty) {
     throw StateError('Cuộn hết $moTa nhưng không thấy item cuối: $targetKey.');
   }
 }
@@ -2096,12 +2120,13 @@ Future<void> _assertStackOrder(
       'Tiêu chí component_stack_order thiếu expect.bottom_key/top_key.',
     );
   }
-  final stackWidget = tester.widget(_finder(target).first);
-  if (stackWidget is! Stack && stackWidget is! IndexedStack) {
+  final khungStack = _dungKieu(_finder(target), Stack);
+  final khungIndexed = _dungKieu(_finder(target), IndexedStack);
+  if (khungStack.evaluate().isEmpty && khungIndexed.evaluate().isEmpty) {
     throw StateError('$moTa không phải Stack hoặc IndexedStack.');
   }
-  final bottomTarget = <String, dynamic>{'valueKey': bottomKey};
-  final topTarget = <String, dynamic>{'valueKey': topKey};
+  final bottomTarget = _dichCon(bottomKey);
+  final topTarget = _dichCon(topKey);
   await _waitUntil(
     tester,
     () => _finder(bottomTarget).evaluate().isNotEmpty,
@@ -2163,16 +2188,16 @@ Future<void> _assertIndexedSwitch(
     tabKeys.add(parts[0].trim());
     pageKeys.add(parts[1].trim());
   }
+  // Trang đầu phải HIỆN, không chỉ "có trong cây": trang bị ẩn của IndexedStack không sinh
+  // nút ngữ nghĩa nên định danh không thấy, mà phép kiểm này vốn muốn nói trang đầu đang mở.
   await _waitUntil(
     tester,
-    () => find.byKey(ValueKey<String>(pageKeys[0]), skipOffstage: false)
-        .evaluate()
-        .isNotEmpty,
+    () => _finder(_dichCon(pageKeys[0])).evaluate().isNotEmpty,
     timeout,
     'Trang đầu tiên (${pageKeys[0]}) phải hiển thị ngay khi mở màn hình.',
   );
   for (var i = 1; i < tabKeys.length; i++) {
-    final tabTarget = <String, dynamic>{'valueKey': tabKeys[i]};
+    final tabTarget = _dichCon(tabKeys[i]);
     await _waitUntil(
       tester,
       () => _finder(tabTarget).evaluate().isNotEmpty,
@@ -2183,23 +2208,23 @@ Future<void> _assertIndexedSwitch(
     await _boundedPump(tester, const Duration(seconds: 2));
     await _waitUntil(
       tester,
-      () => find.byKey(ValueKey<String>(pageKeys[i])).evaluate().isNotEmpty,
+      () => _finder(_dichCon(pageKeys[i])).evaluate().isNotEmpty,
       timeout,
       'Sau khi bấm ${tabKeys[i]}, trang ${pageKeys[i]} phải hiển thị.',
     );
-    final prevFinder = find.byKey(ValueKey<String>(pageKeys[i - 1]));
+    final prevFinder = _finder(_dichCon(pageKeys[i - 1]));
     if (prevFinder.evaluate().isNotEmpty) {
       throw StateError(
         'Trang ${pageKeys[i - 1]} vẫn đang hiển thị sau khi chuyển sang tab thứ ${i + 1}.',
       );
     }
   }
-  final firstTabTarget = <String, dynamic>{'valueKey': tabKeys[0]};
+  final firstTabTarget = _dichCon(tabKeys[0]);
   await tester.tap(_finder(firstTabTarget).first, warnIfMissed: false);
   await _boundedPump(tester, const Duration(seconds: 2));
   await _waitUntil(
     tester,
-    () => find.byKey(ValueKey<String>(pageKeys[0])).evaluate().isNotEmpty,
+    () => _finder(_dichCon(pageKeys[0])).evaluate().isNotEmpty,
     timeout,
     'Bấm lại tab đầu, trang ${pageKeys[0]} phải hiển thị lại.',
   );
@@ -2230,7 +2255,7 @@ Future<void> _assertBottomSheet(
   if (sheetKey.isEmpty) {
     throw ArgumentError('Tiêu chí component_bottom_sheet thiếu expect.sheet_key.');
   }
-  final sheetTarget = <String, dynamic>{'valueKey': sheetKey};
+  final sheetTarget = _dichCon(sheetKey);
   if (_finder(sheetTarget).evaluate().isNotEmpty) {
     throw StateError('Sheet $sheetKey không nên hiển thị trước khi bấm $moTa.');
   }
@@ -2243,7 +2268,7 @@ Future<void> _assertBottomSheet(
     'Bấm $moTa nhưng sheet $sheetKey không xuất hiện.',
   );
   if (closeKey.isNotEmpty) {
-    final closeTarget = <String, dynamic>{'valueKey': closeKey};
+    final closeTarget = _dichCon(closeKey);
     await _waitUntil(
       tester,
       () => _finder(closeTarget).evaluate().isNotEmpty,
@@ -2255,7 +2280,7 @@ Future<void> _assertBottomSheet(
     await tester.drag(_finder(sheetTarget).first, const Offset(0, 400));
   }
   await _boundedPump(tester, const Duration(seconds: 2));
-  if (find.byKey(ValueKey<String>(sheetKey)).evaluate().isNotEmpty) {
+  if (_finder(sheetTarget).evaluate().isNotEmpty) {
     throw StateError('Sheet $sheetKey vẫn còn hiển thị sau khi đóng.');
   }
   await tester.tap(_finder(target).first, warnIfMissed: false);
@@ -2287,10 +2312,11 @@ Future<void> _assertTable(
     timeout,
     'Không thấy $moTa trên màn hình.',
   );
-  final tableWidget = tester.widget(_finder(target).first);
-  if (tableWidget is! Table) {
+  final khungBang = _dungKieu(_finder(target), Table);
+  if (khungBang.evaluate().isEmpty) {
     throw StateError('$moTa không phải Table widget — dùng Table() thay vì ListView.');
   }
+  final tableWidget = tester.widget<Table>(khungBang.first);
   final expect = _asMap(checkpoint['expect']);
   final wantedRows = _int(expect['row_count'], -1);
   final actualRows = tableWidget.children.length;
@@ -2301,16 +2327,16 @@ Future<void> _assertTable(
       .split(',')
       .map((s) => s.trim())
       .where((s) => s.isNotEmpty)) {
-    if (find.byKey(ValueKey<String>(key)).evaluate().isEmpty) {
-      throw StateError('Thiếu header cell key: $key.');
+    if (_finder(_dichCon(key)).evaluate().isEmpty) {
+      throw StateError('Thiếu định danh ô tiêu đề: $key.');
     }
   }
   for (final key in _text(expect, 'cell_keys', '')
       .split(',')
       .map((s) => s.trim())
       .where((s) => s.isNotEmpty)) {
-    if (find.byKey(ValueKey<String>(key)).evaluate().isEmpty) {
-      throw StateError('Thiếu data cell key: $key.');
+    if (_finder(_dichCon(key)).evaluate().isEmpty) {
+      throw StateError('Thiếu định danh ô dữ liệu: $key.');
     }
   }
   final cellsRaw = _text(expect, 'cells', '');
@@ -2363,12 +2389,31 @@ Future<void> _assertTable(
 /// đúng `maxExtent`, bất kể đang collapse hay không. `geometry.paintExtent` của CHÍNH
 /// `RenderSliverPersistentHeader` mới phản ánh đúng độ co giãn — đi ngược cây render từ
 /// widget được tìm thấy lên tới ancestor gần nhất thuộc loại đó.
-double? _sliverCollapsedExtent(WidgetTester tester, Finder finder) {
+/// Chiều cao đang vẽ của SliverAppBar tại đích.
+///
+/// Tìm XUỐNG cây con trước rồi mới leo lên: đích khai bằng định danh trỏ vào lớp bọc
+/// SliverSemantics nằm NGOÀI SliverAppBar, leo lên là đi xa khỏi header và không bao giờ
+/// gặp. Không có đường lui bằng getRect: sliver không phải hộp nên getRect ném lỗi.
+/// Đo 7/9/2026: đi xuống ra đúng 180 rồi 56 sau khi cuộn.
+double? _caoSliver(WidgetTester tester, Finder finder) {
   if (finder.evaluate().isEmpty) return null;
-  RenderObject? node = tester.renderObject(finder);
-  while (node != null) {
-    if (node is RenderSliverPersistentHeader) return node.geometry?.paintExtent;
-    node = node.parent;
+  final RenderObject goc = tester.renderObject(finder);
+  RenderSliverPersistentHeader? thay;
+  void di(RenderObject r) {
+    if (thay != null) return;
+    if (r is RenderSliverPersistentHeader) {
+      thay = r;
+      return;
+    }
+    r.visitChildren(di);
+  }
+
+  di(goc);
+  if (thay != null) return thay!.geometry?.paintExtent;
+  RenderObject? cha = goc;
+  while (cha != null) {
+    if (cha is RenderSliverPersistentHeader) return cha.geometry?.paintExtent;
+    cha = cha.parent;
   }
   return null;
 }
@@ -2397,15 +2442,17 @@ Future<void> _assertSliverCollapse(
   if (appBarKey.isEmpty) {
     throw ArgumentError('Tiêu chí component_sliver_collapse thiếu expect.appbar_key.');
   }
-  final appBarTarget = <String, dynamic>{'valueKey': appBarKey};
+  final appBarTarget = _dichCon(appBarKey);
   await _waitUntil(
     tester,
     () => _finder(appBarTarget).evaluate().isNotEmpty,
     timeout,
-    'Không tìm thấy SliverAppBar key: $appBarKey.',
+    'Không tìm thấy SliverAppBar mang định danh: $appBarKey.',
   );
-  final heightBefore = _sliverCollapsedExtent(tester, _finder(appBarTarget)) ??
-      tester.getRect(_finder(appBarTarget).first).height;
+  final heightBefore = _caoSliver(tester, _finder(appBarTarget));
+  if (heightBefore == null) {
+    throw StateError('Không đo được chiều cao của SliverAppBar $appBarKey.');
+  }
   // jumpTo thay vì tester.drag(): trong engine này, drag() không đẩy được vị trí cuộn
   // của Scrollable bên trong CustomScrollView + SliverAppBar (đã xác nhận bằng debug —
   // ScrollPosition.pixels đứng yên ở 0 sau nhiều lần drag, dù cùng cơ chế lại chạy đúng ở
@@ -2424,9 +2471,8 @@ Future<void> _assertSliverCollapse(
   }
   final collapseExpected = _bool(expect['collapse'], false);
   if (collapseExpected && _finder(appBarTarget).evaluate().isNotEmpty) {
-    final heightAfter = _sliverCollapsedExtent(tester, _finder(appBarTarget)) ??
-        tester.getRect(_finder(appBarTarget).first).height;
-    if (heightAfter >= heightBefore) {
+    final heightAfter = _caoSliver(tester, _finder(appBarTarget));
+    if (heightAfter != null && heightAfter >= heightBefore) {
       throw StateError(
         'SliverAppBar không thu lại khi cuộn: chiều cao trước=$heightBefore, '
         'sau=$heightAfter.',
@@ -2434,8 +2480,8 @@ Future<void> _assertSliverCollapse(
     }
   }
   final listKey = _text(expect, 'list_key', '');
-  if (listKey.isNotEmpty && find.byKey(ValueKey<String>(listKey)).evaluate().isEmpty) {
-    throw StateError('Không tìm thấy SliverList/SliverGrid key: $listKey.');
+  if (listKey.isNotEmpty && _finder(_dichCon(listKey)).evaluate().isEmpty) {
+    throw StateError('Không tìm thấy SliverList/SliverGrid mang định danh: $listKey.');
   }
 }
 

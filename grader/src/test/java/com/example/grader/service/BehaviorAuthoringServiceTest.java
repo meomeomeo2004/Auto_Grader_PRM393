@@ -238,11 +238,16 @@ class BehaviorAuthoringServiceTest {
         String recordingId = String.valueOf(recording.get("id"));
         service.appendEvent(recordingId, Map.of(
                 "kind", "action", "action", "tap", "target", Map.of("label", "Mở demo Chương 7")));
-        service.appendEvent(recordingId, Map.of(
+        // Đích của tiêu chí Ch.7 là ĐỊNH DANH, không phải ValueKey: đề chỉ còn một hệ định
+        // danh cho sinh viên. Khai bằng ValueKey phải bị chặn ngay lúc ghi.
+        assertThrows(IllegalArgumentException.class, () -> service.appendEvent(recordingId, Map.of(
                 "kind", "component_stack_order", "target", Map.of("valueKey", "ch7.stack"),
+                "expect", Map.of("bottom_key", "ch7.stack.bottom", "top_key", "ch7.stack.top"))));
+        service.appendEvent(recordingId, Map.of(
+                "kind", "component_stack_order", "target", Map.of("semantic_id", "ch7.stack"),
                 "expect", Map.of("bottom_key", "ch7.stack.bottom", "top_key", "ch7.stack.top")));
         service.appendEvent(recordingId, Map.of(
-                "kind", "component_table", "target", Map.of("valueKey", "ch7.table"),
+                "kind", "component_table", "target", Map.of("semantic_id", "ch7.table"),
                 "expect", Map.of("row_count", "3")));
         service.stopRecording(recordingId, Map.of());
 

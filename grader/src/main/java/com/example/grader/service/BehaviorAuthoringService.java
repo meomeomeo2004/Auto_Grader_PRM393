@@ -430,12 +430,17 @@ public class BehaviorAuthoringService {
             event.putIfAbsent("browser", "flutter_tester");
         } else if (CH7_REQUIRED_EXPECT_FIELDS.containsKey(kind)) {
             // Ch.7 nhắm vào widget cấu trúc (Stack/Table/Sliver...), không có label/hint/
-            // text như thành phần tương tác — chỉ nhận valueKey làm locator, gõ sai tên là
+            // text như thành phần tương tác — chỉ nhận ĐỊNH DANH làm locator, gõ sai tên là
             // trượt rõ ràng chứ không âm thầm rơi về finder khác.
+            //
+            // Vì sao không phải ValueKey như bản đầu: đề chỉ được có MỘT hệ định danh, bắt
+            // sinh viên học hai cách là nhầm hai lần. Đo 7/9/2026: cả tám loại widget của
+            // mục này đều tìm được bằng Semantics(identifier:), sliver thì dùng
+            // SliverSemantics(identifier:) có sẵn trong SDK.
             Map<String, Object> target = map(event.get("target"));
-            if (text(target, "valueKey", "").isBlank() && text(target, "key", "").isBlank()) {
+            if (text(target, "semantic_id", "").isBlank() && text(target, "semanticId", "").isBlank()) {
                 throw new IllegalArgumentException(
-                        "Tiêu chí Ch.7 phải có target.valueKey (ValueKey của widget cần chấm)");
+                        "Tiêu chí Ch.7 phải có target.semantic_id (định danh Semantics của widget cần chấm)");
             }
             Map<String, Object> expect = map(event.get("expect"));
             for (String field : CH7_REQUIRED_EXPECT_FIELDS.get(kind)) {

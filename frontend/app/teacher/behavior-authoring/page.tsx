@@ -58,7 +58,9 @@ const ACTIONS = [
   "open_uri", "browser_back", "browser_forward", "reload", "restart",
   "wait_until", "wait_for_route",
 ];
-const LOCATORS = ["semanticId", "valueKey", "label", "hint", "text", "text_prefix", "tooltip"];
+// Bỏ hẳn "valueKey" khỏi danh sách chọn: đề chỉ còn MỘT hệ định danh. Engine vẫn đọc
+// được khoá cũ để bộ đề đã ra không chết, nhưng không mời ai khai thêm cái mới.
+const LOCATORS = ["semanticId", "label", "hint", "text", "text_prefix", "tooltip"];
 const ACTION_LABELS: Record<string, string> = {
   boot: "Khởi động app",
   boot_with_uri: "Khởi động tại đường dẫn",
