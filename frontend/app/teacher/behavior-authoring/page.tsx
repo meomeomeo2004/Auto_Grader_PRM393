@@ -1901,53 +1901,50 @@ function BehaviorAuthoringEditor() {
                   const sequence = Number(item.sequence || index + 1);
                   const actionCode = String(item.action || item.kind || "event");
                   const target = asJsonMap(item.target);
-                      // semantic_id là khoá đã NƯỚNG từ Golden; để trước để dòng thao tác hiện
-                      // đúng thứ máy chấm dùng, chứ không hiện nhãn dự phòng.
-                      const locator = ["semantic_id", "semanticId", "valueKey", "label", "hint", "text", "text_prefix", "tooltip"]
-                    .map((key) => ({ key, value: readableValue(target[key]) }))
-                    .find((entry) => entry.value.trim().length > 0);
-                  const targetHint = readableValue(target.hint);
-                  const inputValue = readableValue(item.value);
+                  const laThaoTac = String(item.kind || "") === "action";
+                  // Định danh hiện thành huy hiệu riêng, KHÔNG in kèm nhãn dự phòng: đó là thứ
+                  // máy chấm dùng để tìm, nhìn một cái là biết bước này đã được neo chắc chưa.
+                  const dinhDanh = readableValue(target.semantic_id || target.semanticId);
+                  // Chuỗi người soạn NHÌN THẤY trên màn (nhãn, chữ, gợi ý...). Bỏ hai khoá định
+                  // danh ra khỏi danh sách này để khỏi in hai lần cùng một giá trị.
+                  const nhinThay = ["label", "text", "hint", "text_prefix", "tooltip", "valueKey"]
+                    .map((key) => readableValue(target[key]))
+                    .find((value) => value.trim().length > 0) || "";
+                  const laGoChu = String(item.action || "") === "enter_text";
+                  const giaTri = readableValue(item.value);
                   const delta = asJsonMap(item.delta);
                   const deltaText = Object.keys(delta).length
                     ? `x: ${readableValue(delta.x) || "0"}, y: ${readableValue(delta.y) || "0"}`
                     : "";
                   const expectation = summarizeExpectation(item.expect);
-                  const technicalDetail = JSON.stringify(item, null, 2);
+                  // Giá trị nhập CHỈ có nghĩa với thao tác. Checkpoint UI cũng mang `value` bằng
+                  // chính chuỗi chữ cần kiểm, in ra là lặp y hệt dòng "Kỳ vọng" ngay dưới.
+                  const hienGiaTri = laThaoTac && (laGoChu || giaTri.trim().length > 0);
                   return <div key={sequence} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs dark:border-slate-700 dark:bg-slate-800/80">
                     <div className="flex items-center gap-2">
                       <span className="flex h-6 min-w-6 shrink-0 items-center justify-center rounded-full bg-indigo-100 px-1.5 font-mono font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">{sequence}</span>
-                      <span className="font-bold text-slate-800 dark:text-slate-100">{ACTION_LABELS[actionCode] || actionCode}</span>
-                      <code className="rounded bg-slate-200 px-1.5 py-0.5 text-[10px] text-slate-500 dark:bg-slate-700 dark:text-slate-400">{actionCode}</code>
-                      <button onClick={() => deleteRecordedEvent(sequence)} disabled={Boolean(busy)} title="Xóa thao tác/checkpoint này" className="ml-auto rounded-md p-1.5 text-rose-500 hover:bg-rose-100 disabled:opacity-40 dark:hover:bg-rose-950"><Trash2 size={15} /></button>
+                      <span className="shrink-0 font-bold text-slate-800 dark:text-slate-100">{ACTION_LABELS[actionCode] || actionCode}</span>
+                      <code className="shrink-0 rounded bg-slate-200 px-1.5 py-0.5 text-[10px] text-slate-500 dark:bg-slate-700 dark:text-slate-400">{actionCode}</code>
+                      {dinhDanh && <span className="shrink-0 rounded bg-teal-100 px-1.5 py-0.5 font-mono text-[10px] font-bold text-teal-700 dark:bg-teal-950 dark:text-teal-300" title="Định danh Semantics(identifier:) — máy chấm tìm bằng nó trước, nhãn/chữ cạnh bên là đường lui.">{dinhDanh}</span>}
+                      {laThaoTac && !dinhDanh && Object.keys(target).length > 0 && <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-700 dark:bg-amber-950 dark:text-amber-300" title="Bước này còn tìm bằng nhãn/chữ. Gắn Semantics(identifier:) vào Golden rồi Sinh lại testcase là máy nướng vào.">chưa có định danh</span>}
+                      {nhinThay && <span className="min-w-0 flex-1 truncate text-slate-500 dark:text-slate-400" title={nhinThay}>{nhinThay}</span>}
+                      <button onClick={() => deleteRecordedEvent(sequence)} disabled={Boolean(busy)} title="Xóa thao tác/checkpoint này" className="ml-auto shrink-0 rounded-md p-1.5 text-rose-500 hover:bg-rose-50 disabled:opacity-40 dark:hover:bg-rose-950/40"><Trash2 size={14} /></button>
                     </div>
-                    {(locator || inputValue || deltaText || expectation) && <div className="mt-2 grid gap-1.5 pl-8 text-slate-600 dark:text-slate-300">
-                      {locator && <div className="flex min-w-0 items-start gap-2">
-                        <span className="w-20 shrink-0 text-slate-400">Đích</span>
-                        <span className="min-w-0 break-words font-semibold text-slate-700 dark:text-slate-200">{locator.value}</span>
-                        <span className="shrink-0 rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-semibold text-slate-500 dark:bg-slate-700 dark:text-slate-300">{LOCATOR_LABELS[locator.key] || locator.key}</span>
+                    {(hienGiaTri || deltaText || expectation) && <div className="mt-2 grid gap-1.5 pl-8 text-slate-600 dark:text-slate-300">
+                      {hienGiaTri && <div className="flex min-w-0 items-start gap-2">
+                        <span className="w-20 shrink-0 text-slate-400">Giá trị nhập</span>
+                        {laGoChu ? <input
+                          defaultValue={String(item.value || "")}
+                          placeholder="Gõ nội dung cho ô này"
+                          title="Nội dung sẽ được gõ vào ô này lúc chấm. Sửa ở đây nếu recorder ghi chưa đúng."
+                          onBlur={(e) => { const v = e.target.value; if (v !== String(item.value || "")) void suaGiaTriEvent(sequence, v); }}
+                          onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                          className={`w-64 shrink-0 rounded border bg-transparent px-2 py-1 ${String(item.value || "").trim() ? "border-slate-300 dark:border-slate-600" : "border-amber-400"}`}
+                        /> : <span className="min-w-0 break-words font-semibold text-slate-700 dark:text-slate-200">{giaTri}</span>}
                       </div>}
-                          {String(item.kind || "") === "action" && Object.keys(target).length > 0 && !target.semantic_id && !target.semanticId && <div className="flex min-w-0 items-start gap-2"><span className="w-20 shrink-0 text-slate-400">Định danh</span><span className="text-amber-600 dark:text-amber-400">chưa có — gắn Semantics(identifier:) vào Golden rồi Sinh lại testcase</span></div>}
-                      {targetHint && locator?.key !== "hint" && targetHint !== locator?.value && <div className="flex min-w-0 items-start gap-2"><span className="w-20 shrink-0 text-slate-400">Gợi ý</span><span className="min-w-0 break-words">{targetHint}</span></div>}
-                      {inputValue && <div className="flex min-w-0 items-start gap-2"><span className="w-20 shrink-0 text-slate-400">Giá trị nhập</span><span className="min-w-0 break-words rounded-md bg-indigo-50 px-2 py-0.5 font-semibold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300">{inputValue}</span></div>}
-                          {String(item.action || "") === "enter_text" && <div className="flex min-w-0 items-start gap-2">
-                            <span className="w-20 shrink-0 text-slate-400">Sửa giá trị</span>
-                            <input
-                              defaultValue={String(item.value || "")}
-                              placeholder="Gõ nội dung cho ô này"
-                              title="Nội dung sẽ được gõ vào ô này lúc chấm. Sửa ở đây nếu recorder ghi chưa đúng."
-                              onBlur={(e) => { const v = e.target.value; if (v !== String(item.value || "")) void suaGiaTriEvent(sequence, v); }}
-                              onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
-                              className={`w-52 shrink-0 rounded border bg-transparent px-2 py-1 ${String(item.value || "").trim() ? "border-slate-300 dark:border-slate-600" : "border-amber-400"}`}
-                            />
-                          </div>}
                       {deltaText && <div className="flex min-w-0 items-start gap-2"><span className="w-20 shrink-0 text-slate-400">Độ cuộn</span><span>{deltaText}</span></div>}
                       {expectation && <div className="flex min-w-0 items-start gap-2"><span className="w-20 shrink-0 text-slate-400">Kỳ vọng</span><span className="min-w-0 break-words">{expectation}</span></div>}
                     </div>}
-                    <details className="group mt-2 pl-8 text-slate-500">
-                      <summary className="w-fit cursor-pointer select-none text-[11px] hover:text-indigo-500">Chi tiết kỹ thuật</summary>
-                      <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-slate-950 p-3 text-[11px] leading-5 text-slate-300">{technicalDetail}</pre>
-                    </details>
                   </div>;
                 })}</div>
                 {recording.status === "STOPPED" && error && <div className="mt-4 rounded-xl border border-rose-300 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-200">Không thể sinh testcase: {error}. Phiên vẫn được giữ để bạn thử lại hoặc hủy.</div>}
