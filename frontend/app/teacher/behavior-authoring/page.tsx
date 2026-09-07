@@ -291,7 +291,14 @@ function BehaviorAuthoringEditor() {
   const [runtimeUrl, setRuntimeUrl] = useState("");
   const [databaseName, setDatabaseName] = useState("");
   const [allowedPackages, setAllowedPackages] = useState<string[]>(DEFAULT_ALLOWED_PACKAGES);
-  const [packageDraft, setPackageDraft] = useState("");
+  // Danh sách package CÓ THẬT trong ảnh chấm, đọc từ pubspec.lock của ảnh. Bảng tick dựng từ
+  // đây nên người ra đề không gõ được tên không tồn tại — thứ mà thêm vào cũng chẳng cài gì.
+  const [goiCuaAnh, setGoiCuaAnh] = useState<{
+    imageRead: boolean;
+    direct: { name: string; version: string; protected: boolean }[];
+    transitive: string[];
+  } | null>(null);
+  const [moGoiKeoTheo, setMoGoiKeoTheo] = useState(false);
   const [suite, setSuite] = useState<Suite | null>(null);
   const [availableSuites, setAvailableSuites] = useState<Suite[]>([]);
   const [recording, setRecording] = useState<Recording | null>(null);
@@ -441,15 +448,11 @@ function BehaviorAuthoringEditor() {
   const allowedPackagesChanged = Boolean(
     suite && JSON.stringify([...allowedPackages].sort()) !== JSON.stringify([...savedAllowedPackages].sort()),
   );
-  const packageSuggestions = DEFAULT_ALLOWED_PACKAGES.filter((pkg) => !allowedPackages.includes(pkg));
-
-  const addPackage = (raw: string) => {
-    const names = raw.split(",").map((p) => p.trim()).filter(Boolean);
-    if (!names.length) return;
-    setAllowedPackages((current) => [...current, ...names.filter((n) => !current.includes(n))]);
-    setPackageDraft("");
-  };
-  const removePackage = (name: string) => setAllowedPackages((current) => current.filter((p) => p !== name));
+  // flutter và flutter_test là lõi: bỏ chúng đi thì không bài nào biên dịch nổi.
+  const GOI_LOI = ["flutter", "flutter_test"];
+  const batTatPackage = (ten: string) => setAllowedPackages((current) => (GOI_LOI.includes(ten)
+    ? current
+    : current.includes(ten) ? current.filter((p) => p !== ten) : [...current, ten]));
 
   useEffect(() => setRecorderReady(false), [previewUrl]);
 
@@ -504,10 +507,14 @@ function BehaviorAuthoringEditor() {
         || "",
     );
     setDatabaseName(contractName);
+    void api<JsonMap>("/grading-env/importable-packages").then((data) => setGoiCuaAnh({
+      imageRead: Boolean(data.image_read),
+      direct: Array.isArray(data.direct) ? (data.direct as { name: string; version: string; protected: boolean }[]) : [],
+      transitive: Array.isArray(data.transitive) ? (data.transitive as string[]) : [],
+    })).catch(() => setGoiCuaAnh({ imageRead: false, direct: [], transitive: [] }));
     setAllowedPackages(Array.isArray(suiteData.runtime_config?.allowed_packages)
       ? (suiteData.runtime_config.allowed_packages as unknown[]).map(String)
       : DEFAULT_ALLOWED_PACKAGES);
-    setPackageDraft("");
     if (suiteData.golden_app_id) {
       const golden = await api<GoldenApp>(`/behavior-authoring/golden-apps/${suiteData.golden_app_id}`);
       const hasUploadedGolden = artifactData.some((item) => item.active && item.type === "GOLDEN_SOLUTION");
@@ -841,27 +848,7 @@ function BehaviorAuthoringEditor() {
     });
   };
 
-  /** Chia `total` điểm cho `n` dòng theo bội 0,25; phần dư dồn vào dòng cuối để tổng khớp tuyệt đối. */
 
-  /**
-   * Lưu các thành phần đã tick thành tiêu chí giao diện trên phiên ghi hiện tại.
-   *
-   * BA MẶT TÁCH RỜI, mỗi mặt một nhóm điểm riêng: NỘI DUNG (có mặt trên màn hình),
-   * VỊ TRÍ (tâm thành phần so với Golden) và MÀU SẮC (màu chính so với Golden).
-   * Tách ra vì một lỗi chỉ nên trừ đúng phần nó sai: tô lệch màu thì mất điểm màu chứ
-   * không mất điểm nội dung.
-   *
-   * Vì sao KHÔNG còn nút "so bố cục với ảnh chuẩn": phép so cả màn bằng pixel tính luôn
-   * nền trắng nên màn hình càng trống càng được điểm. Đo thật trên 19 bài của SP27 cho
-   * thấy xếp hạng bị đảo — app SAI HẲN ĐỀ được 90,1% còn bài làm ĐÚNG chỉ 88,7%.
-   * Không ngưỡng nào cứu được, nên bỏ hẳn thay vì chỉnh số.
-   *
-   * Giá trị chuẩn của vị trí và màu KHÔNG gõ tay: engine tự đo trên Golden lúc capture
-   * oracle rồi nướng vào tiêu chí.
-   *
-   * Tiêu chí neo vào TRẠNG THÁI CUỐI của luồng đang ghi — muốn chấm màn nào, đưa app tới
-   * màn đó rồi quét.
-   */
   const saveUiCriteria = () => {
     const recordingId = activeRecordingId.current;
     const chosen = (uiInventory || []).filter((it) => it.checked);
@@ -1546,7 +1533,7 @@ function BehaviorAuthoringEditor() {
   }, [recording, runtimeOrigin]);
 
   return (
-    <SidebarLayout activePath="/teacher/archive" title="Quản lý bộ chấm Golden" subtitle="Record thao tác thật, trừu tượng hóa hành vi và replay tự động trên bài sinh viên" contentClassName="!max-w-none">
+    <SidebarLayout activePath="/teacher/archive" title="Quản lý bộ chấm Golden" contentClassName="!max-w-none">
       <div className="mx-auto max-w-[1500px] space-y-5 p-6 text-slate-800 dark:text-slate-100">
         {mounted && suite && createPortal(
           <div className={`fixed right-0 top-1/3 z-40 flex items-start transition-transform ${thuGon ? "translate-x-[13.5rem]" : ""}`}>
@@ -1587,50 +1574,62 @@ function BehaviorAuthoringEditor() {
             </div>
           </div>
           <div className="mt-3">
-            <label className="mb-1 block text-xs font-bold uppercase tracking-widest text-slate-500" htmlFor="golden-allowed-packages">
-              Package được phép dùng trong bài sinh viên
-            </label>
-            <div className="flex min-w-0 flex-wrap items-center gap-1.5 rounded-xl border border-slate-300 bg-transparent px-3 py-2 focus-within:border-indigo-500 dark:border-slate-700">
-              {allowedPackages.map((pkg) => (
-                <span key={pkg} className="inline-flex items-center gap-1 rounded-full bg-indigo-100 py-1 pl-3 pr-1.5 font-mono text-xs font-semibold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">
-                  {pkg}
-                  <button type="button" onClick={() => removePackage(pkg)} title={`Bỏ ${pkg}`} className="rounded-full p-0.5 text-indigo-400 hover:bg-indigo-200 hover:text-indigo-800 dark:hover:bg-indigo-900 dark:hover:text-indigo-100">
-                    <X size={12} />
-                  </button>
-                </span>
-              ))}
-              <input
-                id="golden-allowed-packages"
-                value={packageDraft}
-                onChange={(e) => setPackageDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === ",") { e.preventDefault(); addPackage(packageDraft); }
-                  else if (e.key === "Backspace" && !packageDraft && allowedPackages.length) removePackage(allowedPackages[allowedPackages.length - 1]);
-                }}
-                onBlur={() => packageDraft.trim() && addPackage(packageDraft)}
-                placeholder={allowedPackages.length ? "Thêm package, Enter để xác nhận" : "flutter, flutter_test, flutter_riverpod, sqflite, ..."}
-                className="min-w-[160px] flex-1 bg-transparent px-1 py-1 font-mono text-sm outline-none"
-              />
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs font-bold uppercase tracking-widest text-slate-500">
+                Package bài sinh viên được phép dùng
+              </span>
+              <span className="text-xs text-slate-400">
+                {allowedPackages.length} đang cho phép
+                {goiCuaAnh && !goiCuaAnh.imageRead && " · chưa đọc được ảnh chấm"}
+              </span>
             </div>
-            {packageSuggestions.length > 0 && (
-              <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                <span className="text-xs text-slate-400">Gợi ý bấm thêm nhanh:</span>
-                {packageSuggestions.map((pkg) => (
-                  <button
-                    key={pkg}
-                    type="button"
-                    onClick={() => addPackage(pkg)}
-                    className="inline-flex items-center gap-1 rounded-full border border-dashed border-slate-300 px-2.5 py-0.5 font-mono text-xs text-slate-500 hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-700 dark:hover:border-indigo-500"
-                  >
-                    <Plus size={10} /> {pkg}
-                  </button>
-                ))}
+            {goiCuaAnh && !goiCuaAnh.imageRead && (
+              <p className="mb-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
+                Chưa đọc được danh sách thư viện của ảnh chấm (Docker chưa bật hoặc ảnh chưa build). Danh sách dưới là những gì bộ đề đang lưu.
+              </p>
+            )}
+            <div className="grid gap-1 sm:grid-cols-2 xl:grid-cols-3">
+              {(goiCuaAnh?.direct.length
+                ? goiCuaAnh.direct.map((p) => p.name)
+                : allowedPackages
+              ).map((ten) => {
+                const loi = GOI_LOI.includes(ten);
+                return (
+                  <label key={ten} className={`flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm ${loi ? "opacity-60" : "cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800"}`}>
+                    <input type="checkbox" checked={loi || allowedPackages.includes(ten)} disabled={loi} onChange={() => batTatPackage(ten)} />
+                    <span className="truncate font-mono text-xs">{ten}</span>
+                    {loi && <span className="ml-auto shrink-0 text-[10px] text-slate-400">lõi</span>}
+                  </label>
+                );
+              })}
+            </div>
+            {Boolean(goiCuaAnh?.transitive.length) && (
+              <div className="mt-2">
+                <button type="button" onClick={() => setMoGoiKeoTheo((v) => !v)} className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-indigo-500">
+                  <ChevronDown size={14} className={`transition-transform ${moGoiKeoTheo ? "" : "-rotate-90"}`} />
+                  {goiCuaAnh?.transitive.length} gói kéo theo
+                  {(() => {
+                    const dangBat = (goiCuaAnh?.transitive || []).filter((t) => allowedPackages.includes(t)).length;
+                    return dangBat > 0 ? ` · ${dangBat} đang cho phép` : "";
+                  })()}
+                </button>
+                {moGoiKeoTheo && (
+                  <div className="mt-1 grid max-h-56 gap-1 overflow-auto rounded-lg border border-dashed border-slate-300 p-2 sm:grid-cols-3 xl:grid-cols-4 dark:border-slate-700">
+                    {(goiCuaAnh?.transitive || []).map((ten) => (
+                      <label key={ten} className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs hover:bg-slate-100 dark:hover:bg-slate-800">
+                        <input type="checkbox" checked={allowedPackages.includes(ten)} onChange={() => batTatPackage(ten)} />
+                        <span className="truncate font-mono">{ten}</span>
+                      </label>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
             <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
               <p className="max-w-2xl text-xs text-slate-500">
-                Thiếu package nào đang dùng thật (ví dụ flutter_riverpod) sẽ bị chặn ở bước preflight và chấm 0đ dù
-                code đúng. Sửa mục này không làm mất oracle đã capture — không cần record/replay lại.
+                Chỉ những gói tick ở đây mới được import trong bài; bài dùng gói khác bị chặn ngay trước khi
+                biên dịch và chấm 0đ. Danh sách lấy từ chính ảnh chấm nên tick gì cũng có thật. Sửa mục này
+                không làm mất oracle đã capture.
               </p>
               {suite && (
                 <button
@@ -1689,7 +1688,7 @@ function BehaviorAuthoringEditor() {
                   <label className="mt-2 flex cursor-pointer flex-wrap items-center gap-2 rounded-lg border border-dashed border-emerald-400 px-2 py-1.5 text-sm dark:border-emerald-700">
                     <input type="checkbox" checked={viTriOn} onChange={() => setViTriOn((v) => !v)} />
                     <span className="font-bold">Chấm vị trí từng thành phần</span>
-                    <span className="text-[11px] text-slate-500">(so tâm thành phần với Golden; sai số tính theo % chiều rộng/cao màn — 8% ≈ {Math.round(viewportWidth * 0.08)}dp ngang, {Math.round(viewportHeight * 0.08)}dp dọc trên khung {viewportWidth}×{viewportHeight}. Đo thật trên SP27: 5% và 8% cho kết quả y hệt, 12% thì bài bố cục sai bắt đầu lọt)</span>
+                    <span className="text-[11px] text-slate-500">(so tâm thành phần với Golden; sai số tính theo % chiều rộng/cao màn)</span>
                     <span className="ml-auto flex items-center gap-1 text-xs">
                       <input type="number" min={0.001} step={0.001} value={viTriWeight} onChange={(e) => setViTriWeight(Math.max(0, Number(e.target.value)))} className="w-16 rounded border border-slate-300 bg-transparent px-1.5 py-0.5 dark:border-slate-600" /> điểm ·
                       sai số <input type="number" min={0.5} max={50} step={0.5} value={viTriSaiSo} onChange={(e) => setViTriSaiSo(Number(e.target.value))} className="w-14 rounded border border-slate-300 px-1.5 py-0.5 dark:border-slate-600 dark:bg-slate-800" />%
@@ -1698,13 +1697,12 @@ function BehaviorAuthoringEditor() {
                   <label className="mt-1 flex cursor-pointer flex-wrap items-center gap-2 rounded-lg border border-dashed border-emerald-400 px-2 py-1.5 text-sm dark:border-emerald-700">
                     <input type="checkbox" checked={mauOn} onChange={() => setMauOn((v) => !v)} />
                     <span className="font-bold">Chấm màu từng thành phần</span>
-                    <span className="text-[11px] text-slate-500">(so màu chính với Golden; sai số tính theo % của 255 trên từng kênh R/G/B — 5% bắt được cả lệch một nấc Material shade, xanh-vs-tím lệch tới 30%)</span>
+                    <span className="text-[11px] text-slate-500">(so màu chính với Golden; sai số tính theo % của 255 trên từng kênh R/G/B)</span>
                     <span className="ml-auto flex items-center gap-1 text-xs">
                       <input type="number" min={0.001} step={0.001} value={mauWeight} onChange={(e) => setMauWeight(Math.max(0, Number(e.target.value)))} className="w-16 rounded border border-slate-300 bg-transparent px-1.5 py-0.5 dark:border-slate-600" /> điểm ·
                       sai số <input type="number" min={0.5} max={50} step={0.5} value={mauSaiSo} onChange={(e) => setMauSaiSo(Number(e.target.value))} className="w-14 rounded border border-slate-300 px-1.5 py-0.5 dark:border-slate-600 dark:bg-slate-800" />%
                     </span>
                   </label>
-                  <p className="mt-1 rounded-lg border border-dashed border-slate-300 px-2 py-1.5 text-[11px] text-slate-500 dark:border-slate-600">Màu chủ đạo, phông chữ và Material 3 nay khai ở <b>Thêm checkpoint → Bảng chủ đề của app</b> — bảng này chỉ chấm từng thành phần.</p>
                   <div className="mt-2 grid max-h-56 gap-1 overflow-auto pr-1">
                     {uiInventory.map((it, i) => (
                       <label key={`${it.attribute}-${it.value}`} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 text-sm hover:bg-emerald-100/60 dark:hover:bg-emerald-900/30">
@@ -1717,17 +1715,13 @@ function BehaviorAuthoringEditor() {
                       </label>
                     ))}
                   </div>
-                  <p className="mt-2 text-[11px] text-slate-500">
-                    Nút và ô nhập (label/hint) được tick sẵn. Chữ trần (text) có thể là dữ liệu đang hiển thị — chỉ tick khi nó là khung màn hình
-                    (tiêu đề, nhãn cố định). Tiêu chí neo vào trạng thái cuối của luồng đang ghi: đưa app tới đúng màn cần chấm rồi mới quét.
-                  </p>
                 </div>
               )}
               {previewUrl ? <div className="mt-4 w-full overflow-auto rounded-xl border border-slate-300 bg-slate-100 p-3 dark:border-slate-700 dark:bg-slate-950"><iframe ref={goldenFrame} title="Golden App" src={previewUrl} style={{ width: Math.min(viewportWidth, 900), minWidth: Math.min(viewportWidth, 900), height: Math.min(viewportHeight, 700) }} className="mx-auto block rounded-lg border border-slate-300 bg-white dark:border-slate-700" /></div> : <div className="mt-4 flex h-[300px] flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 text-center dark:border-slate-700"><MonitorPlay size={42} className="text-slate-400" /><p className="mt-3 font-bold">Golden Solution chưa được build để thao tác</p><p className="mt-1 max-w-md text-sm text-slate-500">Upload Golden ZIP rồi bấm “Build & mở Golden”. Hệ thống tự host app và ghi click/nhập liệu bằng semantic locator.</p></div>}
             </div>
 
             <div ref={authoringPanel} className="min-w-0 scroll-mt-24 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
-              <div className="flex items-center justify-between"><div><p className="text-xs font-bold uppercase tracking-widest text-indigo-500">Bước 4</p><h2 className="text-xl font-bold">Record → Abstract</h2></div>{editingScenarioId && <span className="mr-3 rounded-full bg-indigo-100 px-2.5 py-1 text-xs font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300" title="Đang sửa một scenario đã có. Bước cũ nằm sẵn trong danh sách dưới; bấm Hủy sửa ở hàng nút cuối để thoát.">Đang sửa {scenarioCode || "scenario"}</span>}{recording ? <span className={`flex items-center gap-2 text-sm font-bold ${recording.status === "ACTIVE" ? "text-rose-500" : "text-amber-500"}`}><span className={`h-2 w-2 rounded-full ${recording.status === "ACTIVE" ? "animate-pulse bg-rose-500" : "bg-amber-500"}`} /> {recording.status === "ACTIVE" ? "Đang ghi" : "Chờ sinh testcase"}</span> : <span className="text-sm text-slate-500">Chưa ghi</span>}</div>
+              <div className="flex items-center justify-between"><div><p className="text-xs font-bold uppercase tracking-widest text-indigo-500">Bước 4</p><h2 className="text-xl font-bold">Record → Abstract</h2></div>{editingScenarioId && <span className="mr-3 rounded-full bg-indigo-100 px-2.5 py-1 text-xs font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300" title="Đang sửa một scenario đã có. Bước cũ nằm sẵn trong danh sách dưới; bấm Hủy sửa ở hàng nút cuối để thoát.">Đang sửa {scenarioCode || "scenario"}</span>}{recording ? <span className={`flex items-center gap-2 text-sm font-bold ${recording.status === "ACTIVE" ? "text-rose-500" : "text-amber-500"}`}><span className={`h-2 w-2 rounded-full ${recording.status === "ACTIVE" ? "animate-pulse bg-rose-500" : "bg-amber-500"}`} /> {recording.status === "ACTIVE" ? "RECORDING" : "Chờ sinh testcase"}</span> : <span className="text-sm text-slate-500">Chưa ghi</span>}</div>
               {iconInventory && iconScenario && (
                 <div className="mt-4 rounded-xl border border-teal-300 bg-teal-50/40 p-3 dark:border-teal-800 dark:bg-teal-950/20">
                   <div className="flex flex-wrap items-center gap-2">
@@ -1763,7 +1757,7 @@ function BehaviorAuthoringEditor() {
               )}
               <div className="mt-4 grid gap-3 sm:grid-cols-3"><input value={scenarioCode} disabled={Boolean(editingScenarioId)} onChange={(e) => setScenarioCode(e.target.value)} placeholder="Mã luồng (vd: ADD, EDIT, FILTER_ALL)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700" /><input value={scenarioName} onChange={(e) => setScenarioName(e.target.value)} placeholder="Tên luồng (vd: Thêm khoản chi)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><input type="number" min={0.1} step={0.5} value={scenarioWeight} onChange={(e) => setScenarioWeight(chanTrongSoHam(Number(e.target.value)))} aria-label="Trọng số scenario" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /></div>
               <div className="mt-2 grid gap-2 sm:grid-cols-2"><label className="text-xs font-semibold text-slate-500">Rộng màn (dp)<input type="number" min={240} value={viewportWidth} onChange={(e) => setViewportWidth(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label><label className="text-xs font-semibold text-slate-500">Cao màn (dp)<input type="number" min={320} value={viewportHeight} onChange={(e) => setViewportHeight(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label><label className="flex items-center gap-2 text-xs font-semibold text-slate-500 sm:col-span-2"><input type="checkbox" checked={cheDoToi} onChange={() => setCheDoToi((v) => !v)} /> Chấm hàm này ở chế độ tối <span className="font-normal">— engine đặt platformBrightness = dark trước khi boot; bài có darkTheme sẽ tự đổi, giá trị chuẩn màu/kiểu chữ đo ở chế độ tối. Khung Golden bên trên vẫn hiện sáng.</span></label></div>
-              <p className="mt-2 text-xs font-semibold text-slate-600 dark:text-slate-300">Khung máy Android, tính bằng dp — cỡ mà Android Studio hiển thị cho máy ảo (Pixel: 412×915). Mọi phép chấm bố cục đều đo bằng dp nên không cần khai mật độ điểm ảnh.</p>
+              <p className="mt-2 text-xs font-semibold text-slate-600 dark:text-slate-300">Khung máy Android, tính bằng dp. Mọi phép chấm bố cục đều đo bằng dp nên không cần pixel.</p>
               {!recording ? <><button onClick={startRecording} disabled={!recordingInputsReady || Boolean(busy)} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-rose-600 px-4 py-2.5 font-bold text-white disabled:opacity-40"><Radio size={18} /> Bắt đầu record</button>{!recordingInputsReady && <p className="mt-2 text-xs text-amber-600">Cần đủ Database phát sinh viên, Database ẩn và Golden Solution.</p>}</> : <>
                 <div className="mt-5 rounded-xl border border-slate-200 dark:border-slate-700">
                   <button onClick={() => setMoThemAction((v) => !v)} className="flex w-full items-center gap-2 px-4 py-2.5 text-left">
@@ -1784,7 +1778,7 @@ function BehaviorAuthoringEditor() {
                 </div>
                 <div className="mt-3 rounded-xl border border-slate-200 p-4 dark:border-slate-700">
                   <div className="flex items-center justify-between gap-3">
-                    <div><h3 className="font-bold">Thêm checkpoint</h3><p className="text-xs text-slate-500">Mỗi checkpoint trở thành một đầu điểm độc lập. Điểm và ràng buộc chia ở bảng &quot;Chia điểm&quot; trên thẻ hàm, sau khi sinh testcase.</p></div>
+                    <div><h3 className="font-bold">Thêm checkpoint</h3></div>
                     <div className="flex rounded-lg bg-slate-100 p-1 text-xs font-bold dark:bg-slate-800">
                       <button onClick={() => setCheckpointMode("ui")} className={`rounded-md px-3 py-1.5 ${checkpointMode === "ui" ? "bg-white text-indigo-600 shadow dark:bg-slate-700" : "text-slate-500"}`}>UI</button>
                       <button onClick={() => setCheckpointMode("database")} className={`rounded-md px-3 py-1.5 ${checkpointMode === "database" ? "bg-white text-indigo-600 shadow dark:bg-slate-700" : "text-slate-500"}`}>Database</button>
@@ -1872,7 +1866,6 @@ function BehaviorAuthoringEditor() {
                         <textarea value={databaseRow} onChange={(e) => setDatabaseRow(e.target.value)} rows={2} placeholder={'Row JSON, ví dụ {"uid":"SV01"}'} className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-xs dark:border-slate-700" />
                         <button onClick={appendDatabaseCheckpoint} title="Luu checkpoint database" className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white"><Check size={16} /></button>
                       </div>
-                      <p className="text-xs text-slate-500">Mục này dùng để bổ sung assertion DB có chủ đích. Dù bỏ qua, hệ thống vẫn tự replay Golden, so Hidden DB với Output DB và tách INSERT/UPDATE/DELETE thành checkpoint độc lập. Nếu checkpoint UI và row SQLite cùng chứa giá trị nhập cuối, hệ thống tự gộp thành checkpoint đối chiếu Input → UI → Database.</p>
                     </div>
                   ) : checkpointMode === "route" ? (
                     <div className="mt-3 space-y-2">
@@ -1955,8 +1948,7 @@ function BehaviorAuthoringEditor() {
                 })}</div>
                 {recording.status === "STOPPED" && error && <div className="mt-4 rounded-xl border border-rose-300 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-200">Không thể sinh testcase: {error}. Phiên vẫn được giữ để bạn thử lại hoặc hủy.</div>}
                 {buocThieuGiaTri > 0 && <p className="mt-3 rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-200">Còn {buocThieuGiaTri} bước gõ chữ chưa khai nội dung (ô viền đỏ ở trên). Điền xong mới sinh được testcase — nếu để trống, lúc chấm sẽ gõ chuỗi rỗng và mọi tiêu chí phía sau trượt theo.</p>}
-                <div className="mt-4 flex flex-wrap gap-2"><button onClick={stopAndAbstract} disabled={Boolean(busy) || buocThieuGiaTri > 0} className="inline-flex items-center gap-2 rounded-xl bg-slate-800 px-4 py-2.5 font-bold text-white disabled:opacity-40 dark:bg-slate-700">{busy === "record-stop" ? <Loader2 size={17} className="animate-spin" /> : <Square size={17} />} {busy === "record-stop" ? "Đang replay Golden và sinh Output DB…" : recording.status === "STOPPED" ? "Thử sinh testcase lại" : editingScenarioId ? "Lưu sửa đổi và sinh lại testcase" : "Dừng, capture oracle và sinh testcase"}</button><button onClick={cancelActiveRecording} disabled={Boolean(busy)} className="rounded-xl border border-rose-300 px-4 py-2.5 font-bold text-rose-600 disabled:opacity-40 dark:border-rose-900">{editingScenarioId ? "Hủy sửa" : "Hủy record"}</button></div>
-                <p className="mt-2 text-xs text-slate-500">Bước này có thể mất vài phút vì chạy chính Golden Solution trong Docker bằng Hidden DB; không cần tự xuất hoặc tải Output DB.</p>
+                <div className="mt-4 flex flex-wrap gap-2"><button onClick={stopAndAbstract} disabled={Boolean(busy) || buocThieuGiaTri > 0} className="inline-flex items-center gap-2 rounded-xl bg-slate-800 px-4 py-2.5 font-bold text-white disabled:opacity-40 dark:bg-slate-700">{busy === "record-stop" ? <Loader2 size={17} className="animate-spin" /> : <Square size={17} />} {busy === "record-stop" ? "Đang replay Golden và sinh Output DB…" : recording.status === "STOPPED" ? "Thử sinh testcase lại" : editingScenarioId ? "Lưu sửa đổi và sinh lại testcase" : "Dừng, capture oracle và sinh testcase"}</button><button onClick={cancelActiveRecording} disabled={Boolean(busy)} className="rounded-xl border border-rose-300 px-4 py-2.5 font-bold text-rose-600 disabled:opacity-40 dark:border-rose-900">{editingScenarioId ? "Cancel" : "Cancel"}</button></div>
               </>}
             </div>
           </section>
@@ -2005,7 +1997,6 @@ function BehaviorAuthoringEditor() {
                 );
               })}
             </div>
-            <p className="mt-3 text-xs text-slate-500">Nhóm điểm: các luật kiến trúc gộp vào «Kiến trúc mã nguồn», luật lint vào «Chất lượng mã nguồn» — hiện đúng như vậy trong lịch sử chấm và file Excel. Lưu xong phải <b>publish lại</b> thì bộ đề mới mang luật mới.</p>
           </section>}
 
           <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">

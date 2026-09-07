@@ -30,6 +30,21 @@ public class GradingEnvController {
                 "build", examService.buildStatus()));
     }
 
+    /**
+     * Mọi package bài sinh viên IMPORT ĐƯỢC trong ảnh chấm, để màn soạn đề bày ra cho tick.
+     *
+     * <p>Chia hai nhóm vì hai ý nghĩa khác nhau. {@code direct} là thư viện khai thẳng trong
+     * pubspec của ảnh, tức thứ đề thường cho phép. {@code transitive} là gói kéo theo: import
+     * được nhưng hiếm khi đề nhắc tới, để riêng cho khỏi ngập bảng tick.
+     *
+     * <p>{@code image_read=false} nghĩa là chưa đọc được ảnh (Docker tắt, chưa build). Lúc đó
+     * màn soạn đề phải giữ nguyên danh sách đã lưu chứ không được coi là "ảnh không có gì".
+     */
+    @GetMapping("/importable-packages")
+    public ResponseEntity<?> importablePackages() {
+        return ResponseEntity.ok(examService.goiChoManSoanDe());
+    }
+
     /** Trạng thái build (cho frontend poll khi đang build lại). */
     @GetMapping("/build-status")
     public ResponseEntity<?> buildStatus() {

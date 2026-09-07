@@ -93,13 +93,17 @@ public class BehaviorAuthoringService {
     private final SkillRepository skills;
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
 
+    private final ExamService exams;
+
     public BehaviorAuthoringService(GoldenAppRepository goldenApps,
                                     BehaviorSuiteRepository suites,
                                     BehaviorScenarioRepository scenarios,
                                     GoldenRecordingRepository recordings,
                                     OracleSnapshotRepository oracles,
                                     GoldenValidationRunRepository validationRuns,
-                                    SkillRepository skills) {
+                                    SkillRepository skills,
+                                    ExamService exams) {
+        this.exams = exams;
         this.goldenApps = goldenApps;
         this.suites = suites;
         this.scenarios = scenarios;
@@ -169,6 +173,7 @@ public class BehaviorAuthoringService {
         suite.setSchemaVersion(SCHEMA_VERSION);
         suite.setPublicContractJson(normalizeObject(body.get("public_contract"), defaultPublicContract()));
         suite.setDatabaseContractJson(normalizeObject(body.get("database_contract"), defaultDatabaseContract()));
+        kiemGoiChoPhep(body.get("runtime_config"));
         suite.setRuntimeConfigJson(normalizeObject(body.get("runtime_config"), defaultRuntimeConfig()));
         suites.save(suite);
         return suiteView(suite, true);
@@ -249,6 +254,7 @@ public class BehaviorAuthoringService {
             suite.setDatabaseContractJson(normalizeObject(body.get("database_contract"), Map.of()));
         }
         if (body.containsKey("runtime_config")) {
+            kiemGoiChoPhep(body.get("runtime_config"));
             suite.setRuntimeConfigJson(normalizeObject(body.get("runtime_config"), Map.of()));
         }
         if (invalidatesReplay) {
@@ -1777,6 +1783,34 @@ public class BehaviorAuthoringService {
                 "api_base_url", "http://mock-api:8080",
                 "allowed_packages", List.of(
                         "flutter", "flutter_test", "path", "sqflite", "sqflite_common_ffi"));
+    }
+
+    /**
+     * Chặn khai package mà ẢNH CHẤM không có.
+     *
+     * <p>Danh sách này chỉ THU HẸP được, không mở rộng được: thêm một tên vào đây không cài gì
+     * cả, thư viện phải có sẵn trong ảnh nền (trang "Thư viện chấm" rồi build lại ảnh). Không
+     * chặn ở đây thì giảng viên yên tâm cho phép một gói không tồn tại, sinh viên làm theo, và
+     * cả lô bài chết ở khâu biên dịch chứ không phải ở khâu kiểm gói — lúc đó mới biết thì muộn.
+     *
+     * <p>Đọc không được danh sách của ảnh (Docker tắt, chưa build) thì BỎ QUA phép kiểm. Không
+     * biết thì đừng chặn ai.
+     */
+    private void kiemGoiChoPhep(Object runtimeConfig) {
+        List<Object> khai = objectList(map(runtimeConfig).get("allowed_packages"));
+        if (khai.isEmpty()) return;
+        Set<String> coThat = exams.goiCoTrongAnhCham();
+        if (coThat.isEmpty()) return;
+        List<String> thieu = khai.stream()
+                .map(item -> String.valueOf(item).trim())
+                .filter(ten -> !ten.isBlank() && !coThat.contains(ten))
+                .distinct()
+                .toList();
+        if (thieu.isEmpty()) return;
+        throw new IllegalArgumentException(
+                "Ảnh chấm không có package: " + String.join(", ", thieu)
+                + ". Danh sách này chỉ thu hẹp được chứ không cài thêm được gì — muốn dùng thì"
+                + " thêm ở trang \"Thư viện chấm\" rồi build lại ảnh nền, xong mới khai ở đây.");
     }
 
     private Map<String, Object> defaultViewport() {
