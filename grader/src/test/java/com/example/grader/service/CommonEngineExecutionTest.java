@@ -93,6 +93,28 @@ class CommonEngineExecutionTest {
         assertTrue(exam.contains("confirm( delete)?"));
     }
 
+    @Test
+    void chaptersSevenRunnersAreFullyImplemented() throws Exception {
+        String exam = resource("/common-testcase-engine/exam_test.dart");
+
+        assertTrue(exam.contains("case 'SCROLL_DIRECTION':"));
+        assertTrue(exam.contains("case 'SCROLL_TO_END':"));
+        assertTrue(exam.contains("case 'STACK_LAYERS':"));
+        assertTrue(exam.contains("case 'INDEXED_STACK_SWITCH':"));
+        assertTrue(exam.contains("case 'BOTTOM_SHEET_FLOW':"));
+        assertTrue(exam.contains("case 'TABLE_ROWS':"));
+        assertTrue(exam.contains("case 'SLIVER_SCROLL_COLLAPSE':"));
+        assertTrue(exam.contains("case 'EXPANDED_WIDGET':"));
+
+        // Kiểm tra logic Expanded
+        assertTrue(exam.contains("find.byType(Expanded"));
+        assertTrue(exam.contains("widget is Row || widget is Column || widget is Flex"));
+
+        // Kiểm tra cell content check của Table
+        assertTrue(exam.contains("expectedCellsRaw.split('|')"));
+        assertTrue(exam.contains("tableRow.children.length"));
+    }
+
     private String resource(String path) throws Exception {
         try (InputStream in = getClass().getResourceAsStream(path)) {
             assertNotNull(in, "Không tìm thấy resource " + path);

@@ -53,12 +53,74 @@ const DEFAULT_ALLOWED_PACKAGES = [
   "path_provider", "sembast_web", "image_picker", "intl",
 ];
 
-const ACTIONS = ["boot", "tap", "enter_text", "clear_text", "scroll", "drag", "back", "restart", "wait_until"];
+const ACTIONS = [
+  "boot", "boot_with_uri", "tap", "enter_text", "clear_text", "scroll", "drag", "back",
+  "open_uri", "browser_back", "browser_forward", "reload", "restart",
+  "wait_until", "wait_for_route",
+];
 const LOCATORS = ["semanticId", "valueKey", "label", "hint", "text", "text_prefix", "tooltip"];
+const ACTION_LABELS: Record<string, string> = {
+  boot: "Khởi động app",
+  boot_with_uri: "Khởi động tại đường dẫn",
+  tap: "Bấm",
+  enter_text: "Nhập nội dung",
+  clear_text: "Xóa nội dung",
+  scroll: "Cuộn",
+  drag: "Kéo",
+  back: "Quay lại",
+  open_uri: "Mở đường dẫn",
+  browser_back: "Trình duyệt quay lại",
+  browser_forward: "Trình duyệt tiến tới",
+  reload: "Tải lại",
+  restart: "Khởi động lại",
+  wait_until: "Chờ điều kiện",
+  wait_for_route: "Chờ đường dẫn",
+  observe_ui: "Kiểm tra UI",
+  observe_database: "Kiểm tra database",
+  observe_route: "Kiểm tra đường dẫn",
+  observe_layout: "Kiểm tra bố cục",
+};
 // Chữ hiển thị cho từng cách định vị. Giá trị gửi đi giữ nguyên; chỉ đổi chữ để không ai
 // tưởng "semanticId" là ValueKey: máy chấm tìm nó bằng Semantics(identifier:), còn ValueKey
 // thì recorder không bao giờ thấy (không ra tới DOM) nên chỉ dùng được khi gõ tay ở đây.
-const LOCATOR_LABEL: Record<string, string> = {
+function asJsonMap(value: unknown): JsonMap {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as JsonMap : {};
+}
+
+function readableValue(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value);
+}
+
+function summarizeExpectation(value: unknown): string {
+  const expect = asJsonMap(value);
+  const visible = Array.isArray(expect.visible_texts) ? expect.visible_texts.map(readableValue).filter(Boolean) : [];
+  const hidden = Array.isArray(expect.hidden_texts) ? expect.hidden_texts.map(readableValue).filter(Boolean) : [];
+  const semanticNodes = Array.isArray(expect.semantic_nodes) ? expect.semantic_nodes.length : 0;
+  const parts: string[] = [];
+  if (visible.length) parts.push(`Hiện: ${visible.join(", ")}`);
+  if (hidden.length) parts.push(`Không hiện: ${hidden.join(", ")}`);
+  if (semanticNodes) parts.push(`${semanticNodes} thành phần semantic`);
+  if (expect.no_exception === true) parts.push("Không có exception");
+  if (typeof expect.route === "string") parts.push(`Route: ${expect.route}`);
+  return parts.join(" · ") || (Object.keys(expect).length ? "Có dữ liệu kỳ vọng" : "");
+}
+
+const SEMANTIC_ROLES = [
+  ["generic", "Không kiểm tra loại"],
+  ["text_field", "Ô nhập liệu"],
+  ["button", "Nút bấm"],
+  ["checkbox", "Checkbox"],
+  ["switch", "Switch"],
+  ["radio", "Radio"],
+  ["text", "Nội dung text"],
+  ["image", "Hình ảnh / icon"],
+  ["link", "Liên kết"],
+] as const;
+
+const LOCATOR_LABELS: Record<string, string> = {
   semanticId: "định danh — Semantics(identifier:)",
   valueKey: "ValueKey (recorder không thấy, chỉ gõ tay)",
   label: "nhãn — Semantics(label:)",
@@ -260,8 +322,15 @@ function BehaviorAuthoringEditor() {
   const [chiaDiemChot, setChiaDiemChot] = useState<Record<string, number>>({});
   const [chiaDiemCha, setChiaDiemCha] = useState<Record<string, string>>({});
   const [hiddenCheckpointText, setHiddenCheckpointText] = useState("");
-  const [checkpointMode, setCheckpointMode] = useState<"ui" | "database">("ui");
-  const [uiCheckpointType, setUiCheckpointType] = useState<"text" | "widget_state" | "text_style" | "theme_value" | "no_overflow" | "no_exception">("text");
+  const [checkpointMode, setCheckpointMode] = useState<"ui" | "database" | "route" | "layout">("ui");
+  const [uiCheckpointType, setUiCheckpointType] = useState<"text" | "component" | "widget_state" | "text_style" | "theme_value" | "no_overflow" | "no_exception">("text");
+  const [checkpointLocator, setCheckpointLocator] = useState("semanticId");
+  const [checkpointLocatorValue, setCheckpointLocatorValue] = useState("");
+  const [checkpointVisible, setCheckpointVisible] = useState(true);
+  const [checkpointRole, setCheckpointRole] = useState("generic");
+  const [checkpointValue, setCheckpointValue] = useState("");
+  const [checkpointEnabled, setCheckpointEnabled] = useState("ignore");
+  const [checkpointChecked, setCheckpointChecked] = useState("ignore");
   const [wsLocator, setWsLocator] = useState("label");
   const [wsLocatorValue, setWsLocatorValue] = useState("");
   const [wsWidget, setWsWidget] = useState("");
@@ -278,6 +347,15 @@ function BehaviorAuthoringEditor() {
   const [databaseOperation, setDatabaseOperation] = useState("READ");
   const [databaseRow, setDatabaseRow] = useState("{}");
   const [databaseCount, setDatabaseCount] = useState("");
+  const [currentRoute, setCurrentRoute] = useState("/");
+  const [routeExpected, setRouteExpected] = useState("/");
+  const [routeCanPop, setRouteCanPop] = useState("ignore");
+  const [layoutFirstLocator, setLayoutFirstLocator] = useState("semanticId");
+  const [layoutFirstValue, setLayoutFirstValue] = useState("");
+  const [layoutSecondLocator, setLayoutSecondLocator] = useState("semanticId");
+  const [layoutSecondValue, setLayoutSecondValue] = useState("");
+  const [layoutRelation, setLayoutRelation] = useState("auto");
+  const [layoutTolerance, setLayoutTolerance] = useState(5);
   // KHÔNG điền sẵn: mã/tên luồng là danh tính của tiêu chí trong bảng điểm,
   // để mặc định thì mọi bộ chấm đều đầy "MAIN_FLOW/Luồng chính" vô nghĩa.
   const [scenarioCode, setScenarioCode] = useState("");
@@ -320,11 +398,19 @@ function BehaviorAuthoringEditor() {
   const [staticSel, setStaticSel] = useState<Record<string, { checked: boolean; weight: number }>>({});
   const goldenFrame = useRef<HTMLIFrameElement | null>(null);
   const authoringPanel = useRef<HTMLDivElement | null>(null);
-  // The Golden iframe can still emit a debounced event immediately after Stop.
-  // Keep an imperative session guard so those late events never reach a closed
-  // recording while React is waiting for the next render/refresh.
+  // Iframe có thể còn phát event chốt input ngay trước Stop. Guard imperative giữ
+  // event đó trong đúng phiên khi React vẫn đang chờ render/refresh kế tiếp.
   const activeRecordingId = useRef<string | null>(null);
   const acceptsRecorderEvents = useRef(false);
+  // Event từ iframe phải được ghi tuần tự. Nếu /stop chạy trước request enter_text
+  // cuối cùng, backend đổi phiên khỏi ACTIVE và action hợp lệ bị mất do race.
+  const recorderEventQueue = useRef<Promise<void>>(Promise.resolve());
+  const recorderQueueError = useRef<Error | null>(null);
+  const flushWaiters = useRef(new Map<string, {
+    resolve: () => void;
+    reject: (error: Error) => void;
+    timer: number;
+  }>());
   const requestedSuite = search.get("suite");
   const previewUrl = useMemo(() => absoluteRuntimeUrl(runtimeUrl), [runtimeUrl]);
   const runtimeOrigin = useMemo(() => {
@@ -342,6 +428,8 @@ function BehaviorAuthoringEditor() {
       || "",
   ).trim();
   const databaseNameChanged = Boolean(suite && databaseName.trim() !== savedDatabaseName);
+  const manualActionNeedsTarget = ["tap", "enter_text", "clear_text", "scroll", "wait_until"].includes(action);
+  const manualActionNeedsUri = ["boot_with_uri", "open_uri", "wait_for_route"].includes(action);
   const savedAllowedPackages = Array.isArray(suite?.runtime_config?.allowed_packages)
     ? (suite.runtime_config.allowed_packages as unknown[]).map(String)
     : [];
@@ -525,6 +613,7 @@ function BehaviorAuthoringEditor() {
   const closeSuite = () => {
     activeRecordingId.current = null;
     acceptsRecorderEvents.current = false;
+    resetRecorderTransport();
     setSuite(null);
     setRecording(null);
     setArtifacts([]);
@@ -561,6 +650,7 @@ function BehaviorAuthoringEditor() {
 
   const startRecording = () => suite && run("record-start", async () => {
     setEditingScenarioId(null);
+    resetRecorderTransport();
     const created = await api<Recording>(`/behavior-authoring/suites/${suite.id}/recordings`, {
       method: "POST", body: JSON.stringify({ name: scenarioName, viewport: { width: viewportWidth, height: viewportHeight, device_pixel_ratio: 1, brightness: cheDoToi ? "dark" : "light" }, initial_state: { reset_storage: true } }),
     });
@@ -588,29 +678,161 @@ function BehaviorAuthoringEditor() {
     );
   };
 
+  const resetRecorderTransport = () => {
+    recorderEventQueue.current = Promise.resolve();
+    recorderQueueError.current = null;
+    flushWaiters.current.forEach((waiter) => window.clearTimeout(waiter.timer));
+    flushWaiters.current.clear();
+  };
+
+  /** Ghi event iframe theo đúng thứ tự; lỗi ghi event phải chặn Stop thay vì mất action âm thầm. */
+  const enqueueRecorderEvent = (event: JsonMap, recordingId: string, suiteId: string) => {
+    recorderEventQueue.current = recorderEventQueue.current.then(async () => {
+      if (recorderQueueError.current) return;
+      try {
+        await api(`/behavior-authoring/recordings/${recordingId}/events`, {
+          method: "POST",
+          body: JSON.stringify(event),
+        });
+        // Refresh chỉ để cập nhật danh sách đang nhìn; event đã lưu thành công thì lỗi
+        // refresh không được biến thành lỗi dữ liệu và khóa cả phiên record.
+        try { await refresh(suiteId); }
+        catch { setNotice("Đã lưu thao tác nhưng chưa làm mới được danh sách hiển thị."); }
+      } catch (caught) {
+        const failure = caught instanceof Error ? caught : new Error(String(caught));
+        recorderQueueError.current = failure;
+        setError(`Không lưu được thao tác record: ${failure.message}`);
+      }
+    });
+    return recorderEventQueue.current;
+  };
+
+  /** Yêu cầu iframe chốt ô đang nhập và xác nhận đã phát event enter_text. */
+  const requestRecorderFlush = () => {
+    const frame = goldenFrame.current?.contentWindow;
+    if (!frame || !recorderReady || !recording || recording.status !== "ACTIVE") return Promise.resolve();
+    const requestId = globalThis.crypto?.randomUUID?.()
+      || `flush-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    return new Promise<void>((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        flushWaiters.current.delete(requestId);
+        reject(new Error("Golden recorder không xác nhận được giá trị ô nhập cuối. Hãy Build & mở Golden lại rồi thử tiếp."));
+      }, 3_000);
+      flushWaiters.current.set(requestId, { resolve, reject, timer });
+      frame.postMessage(
+        { type: "GOLDEN_RECORDER_COMMAND", action: "flush_input", request_id: requestId },
+        runtimeOrigin || "*",
+      );
+    });
+  };
+
+  const awaitRecorderEvents = async () => {
+    await recorderEventQueue.current;
+    if (recorderQueueError.current) throw recorderQueueError.current;
+  };
+
   const appendAction = (payload?: JsonMap) => {
     const recordingId = activeRecordingId.current;
     if (!recordingId || !acceptsRecorderEvents.current || recording?.status !== "ACTIVE" || !suite) {
       setError("Phiên record không còn nhận thao tác — hãy tải lại trang để nối lại phiên.");
       return;
     }
+    const targetNeeded = ["tap", "enter_text", "clear_text", "scroll", "drag", "wait_until"].includes(action);
+    const uriNeeded = ["boot_with_uri", "open_uri", "wait_for_route"].includes(action);
+    if (!payload && targetNeeded && !locatorValue.trim()) {
+      setError(`Action ${action} cần giá trị nhận diện semantic.`);
+      return;
+    }
+    if (!payload && uriNeeded && !inputValue.trim()) {
+      setError(`Action ${action} cần URI/path, ví dụ /movies/42?tab=cast.`);
+      return;
+    }
+    const event = payload || {
+      kind: "action",
+      stage: "ACTION",
+      action,
+      ...(action === "drag" ? { delta: { x: Number(keoX) || 0, y: Number(keoY) || 0 } } : {}),
+      target: targetNeeded ? { [locator]: locatorValue.trim() } : {},
+      attribute: targetNeeded ? locator : "none",
+      attributeValue: targetNeeded ? locatorValue.trim() : "",
+      valueType: "string",
+      value: action === "enter_text" || uriNeeded ? inputValue.trim() : "",
+      ...(uriNeeded ? { uri: inputValue.trim() } : {}),
+      browser: "flutter_tester",
+    };
+    if (payload) {
+      void enqueueRecorderEvent(event, recordingId, suite.id);
+      return;
+    }
     run("record-event", async () => {
-      const targetNeeded = ["tap", "enter_text", "clear_text", "scroll", "drag"].includes(action);
-      const event = payload || {
-        kind: "action",
-        stage: "ACTION",
-        action,
-        ...(action === "drag" ? { delta: { x: Number(keoX) || 0, y: Number(keoY) || 0 } } : {}),
-        target: targetNeeded ? { [locator]: locatorValue.trim() } : {},
-        attribute: targetNeeded ? locator : "none",
-        attributeValue: targetNeeded ? locatorValue.trim() : "",
-        valueType: "string",
-        value: action === "enter_text" ? inputValue : "",
-        browser: "flutter_tester",
-      };
-      await api(`/behavior-authoring/recordings/${recordingId}/events`, { method: "POST", body: JSON.stringify(event) });
-      await refresh(suite.id);
+      // Action thêm tay cũng là ranh giới logic: lưu input còn chờ trước action mới.
+      await requestRecorderFlush();
+      await awaitRecorderEvents();
+      await enqueueRecorderEvent(event, recordingId, suite.id);
+      await awaitRecorderEvents();
+      if (["boot_with_uri", "open_uri", "browser_back", "browser_forward", "reload"].includes(action)) {
+        goldenFrame.current?.contentWindow?.postMessage(
+          { type: "GOLDEN_RECORDER_COMMAND", action: "perform_route_action", route_action: action, uri: inputValue.trim() },
+          runtimeOrigin || "*",
+        );
+      }
       setLocatorValue(""); setInputValue("");
+    });
+  };
+
+  const appendRouteCheckpoint = () => {
+    const recordingId = activeRecordingId.current;
+    if (!recordingId || !suite || recording?.status !== "ACTIVE" || !acceptsRecorderEvents.current) {
+      setError("Phiên record không còn nhận checkpoint route.");
+      return;
+    }
+    if (!routeExpected.trim() && routeCanPop === "ignore") {
+      setError("Cần nhập URI/path hoặc chọn trạng thái canPop.");
+      return;
+    }
+    run("record-route-checkpoint", async () => {
+      await requestRecorderFlush();
+      await awaitRecorderEvents();
+      const expect: JsonMap = {};
+      if (routeExpected.trim()) expect.uri = routeExpected.trim();
+      if (routeCanPop !== "ignore") expect.can_pop = routeCanPop === "true";
+      await api(`/behavior-authoring/recordings/${recordingId}/events`, {
+        method: "POST",
+        body: JSON.stringify({
+          kind: "route_state", checkpoint: true, stage: "ASSERT", action: "observe_route",
+          browser: "flutter_tester", expect,
+        }),
+      });
+      await refresh(suite.id);
+    });
+  };
+
+  const appendLayoutCheckpoint = () => {
+    const recordingId = activeRecordingId.current;
+    if (!recordingId || !suite || recording?.status !== "ACTIVE" || !acceptsRecorderEvents.current) {
+      setError("Phiên record không còn nhận checkpoint bố cục.");
+      return;
+    }
+    if (!layoutFirstValue.trim() || !layoutSecondValue.trim()) {
+      setError("Cần chọn/nhập đủ hai thành phần để so quan hệ bố cục.");
+      return;
+    }
+    run("record-layout-checkpoint", async () => {
+      await requestRecorderFlush();
+      await awaitRecorderEvents();
+      await api(`/behavior-authoring/recordings/${recordingId}/events`, {
+        method: "POST",
+        body: JSON.stringify({
+          kind: "layout_relation", checkpoint: true, stage: "ASSERT", action: "observe_ui",
+          browser: "flutter_tester",
+          target: { [layoutFirstLocator]: layoutFirstValue.trim() },
+          relative_to: { [layoutSecondLocator]: layoutSecondValue.trim() },
+          relation: layoutRelation,
+          tolerance_pct: Math.min(50, Math.max(0, Number(layoutTolerance))),
+        }),
+      });
+      await refresh(suite.id);
+      setLayoutFirstValue(""); setLayoutSecondValue("");
     });
   };
 
@@ -647,6 +869,10 @@ function BehaviorAuthoringEditor() {
       return;
     }
     run("record-ui-criteria", async () => {
+      // Checkpoint phải đứng sau giá trị cuối của ô đang nhập. Không dựa vào thời
+      // gian nghỉ gõ: bridge chốt theo lệnh và queue bảo đảm POST đúng thứ tự.
+      await requestRecorderFlush();
+      await awaitRecorderEvents();
       const screen = uiScreenName.trim() || "Màn hình";
       const slug = screen.normalize("NFD").replace(/[̀-ͯ]/g, "")
         .replace(/đ/g, "d").replace(/Đ/g, "D").replace(/[^a-zA-Z0-9]+/g, "_").toUpperCase().replace(/^_+|_+$/g, "");
@@ -815,7 +1041,9 @@ function BehaviorAuthoringEditor() {
   const appendUiCheckpoint = () => {
     const recordingId = activeRecordingId.current;
     const textReady = Boolean(checkpointText.trim() || hiddenCheckpointText.trim());
+    const componentReady = Boolean(checkpointLocatorValue.trim());
     if (uiCheckpointType === "text" && !textReady) { setError("Cần nhập text mong đợi cho checkpoint."); return; }
+    if (uiCheckpointType === "component" && !componentReady) { setError("Cần nhập giá trị nhận diện thành phần cho checkpoint."); return; }
     if (uiCheckpointType === "widget_state" && !wsWidget.trim()) { setError("Cần chọn loại widget cần đọc trạng thái."); return; }
     if (uiCheckpointType === "text_style" && !tsLocatorValue.trim()) { setError("Cần nhập dòng chữ cần đo kiểu chữ."); return; }
     if (uiCheckpointType === "widget_state" && !wsLocatorValue.trim() && wsProperty !== "ton_tai") { setError("Cần nhập giá trị nhận diện để biết đọc widget nào."); return; }
@@ -824,6 +1052,10 @@ function BehaviorAuthoringEditor() {
       return;
     }
     run("record-checkpoint", async () => {
+          // Chốt giá trị nhập còn chờ trước khi ghi checkpoint: thứ tự phải đúng như
+          // người soạn thấy trên màn (luật của bản v20).
+          await requestRecorderFlush();
+          await awaitRecorderEvents();
       // TRẠNG THÁI WIDGET đi đường riêng: nó không mô tả "có gì trên màn hình" mà đọc
       // một giá trị thật bên trong widget, nên hình dạng event khác hẳn ba loại kia.
       if (uiCheckpointType === "widget_state") {
@@ -878,8 +1110,8 @@ function BehaviorAuthoringEditor() {
       }
       const event: JsonMap = {
         kind: "checkpoint", stage: "ASSERT", action: "observe_ui", browser: "flutter_tester",
-        attribute: uiCheckpointType,
-        attributeValue: checkpointText.trim(),
+        attribute: uiCheckpointType === "component" ? checkpointLocator : uiCheckpointType,
+        attributeValue: uiCheckpointType === "component" ? checkpointLocatorValue.trim() : checkpointText.trim(),
         valueType: uiCheckpointType === "no_exception" ? "boolean" : "string",
         value: uiCheckpointType === "no_exception" ? true : checkpointText.trim(),
       };
@@ -889,6 +1121,20 @@ function BehaviorAuthoringEditor() {
           hidden_texts: hiddenCheckpointText.split(",").map((item) => item.trim()).filter(Boolean),
           no_exception: true,
         };
+      } else if (uiCheckpointType === "component") {
+        const semanticNode: JsonMap = {
+          target: { [checkpointLocator]: checkpointLocatorValue.trim() },
+          role: checkpointRole,
+          visible: checkpointVisible,
+        };
+        if (checkpointValue.trim()) semanticNode.value = checkpointValue;
+        if (checkpointEnabled !== "ignore") semanticNode.enabled = checkpointEnabled === "true";
+        if (checkpointChecked !== "ignore") semanticNode.checked = checkpointChecked === "true";
+        event.attribute = "semantic_nodes";
+        event.attributeValue = checkpointLocatorValue.trim();
+        event.valueType = "json";
+        event.value = [semanticNode];
+        event.expect = { semantic_nodes: [semanticNode], no_exception: true };
       } else {
         event.no_exception = true;
         event.expect = { no_exception: true };
@@ -943,6 +1189,8 @@ function BehaviorAuthoringEditor() {
       return;
     }
     run("record-db-checkpoint", async () => {
+      await requestRecorderFlush();
+      await awaitRecorderEvents();
       let row: JsonMap = {};
       try {
         const parsed = JSON.parse(databaseRow || "{}");
@@ -978,61 +1226,75 @@ function BehaviorAuthoringEditor() {
       setError("Cần nhập Mã luồng và Tên luồng (ô ngay trên nút này) trước khi sinh testcase.");
       return;
     }
-    // Close the client-side gate before the first network request. This is
-    // intentionally earlier than the backend transition to prevent iframe
-    // messages racing with /stop and /abstract.
-    acceptsRecorderEvents.current = false;
     run("record-stop", async () => {
-      if (recording.status === "ACTIVE") {
-        await api(`/behavior-authoring/recordings/${recordingId}/stop`, { method: "POST", body: JSON.stringify({ final_observation: {} }) });
-        setRecording((current) => current ? { ...current, status: "STOPPED" } : current);
-      }
-      const sinhXong = await api<JsonMap>(`/behavior-authoring/recordings/${recordingId}/abstract`, {
-        method: "POST",
-        body: JSON.stringify({
-          scenario_code: scenarioCode.trim().toUpperCase(),
-          name: scenarioName.trim(),
-          weight: scenarioWeight,
-          ...(editingScenarioId ? { replace_scenario_id: editingScenarioId } : {}),
-          viewports: [
-            // device_pixel_ratio để cố định 1: chấm bố cục đo bằng dp nên mật độ không
-            // đổi điểm, chỉ làm ảnh bằng chứng nặng thêm.
-            { width: viewportWidth, height: viewportHeight, device_pixel_ratio: 1, name: "phone", brightness: cheDoToi ? "dark" : "light" },
-          ],
-        }),
-      });
-      activeRecordingId.current = null;
-      setRecording(null);
-      await refresh(suite.id);
-      setEditingScenarioId(null);
-      // Số bước vừa nhận định danh từ Golden (Gói 2): 0 nghĩa là Golden chưa gắn
-      // Semantics(identifier:) hoặc mọi bước đã có sẵn — cả hai đều không phải lỗi.
-      const soDinhDanh = Number(sinhXong.identifier_step_count || 0);
-      const duoiDinhDanh = soDinhDanh > 0 ? ` Đã nướng định danh vào ${soDinhDanh} bước.` : "";
-      // Icon máy chấm nhìn thấy ở màn cuối luồng — mở bảng tick ngay, vì đây là lần duy
-      // nhất trong luồng soạn đề mà thông tin này tồn tại.
-      const dsIcon = Array.isArray(sinhXong.icons) ? (sinhXong.icons as JsonMap[]) : [];
-      if (dsIcon.length > 0 && sinhXong.id) {
-        setIconScenario({
-          id: String(sinhXong.id),
-          ma: String(sinhXong.scenario_code || sinhXong.name || ""),
-          checkpoints: Array.isArray(sinhXong.checkpoints) ? (sinhXong.checkpoints as JsonMap[]) : [],
+      let backendStopped = recording.status === "STOPPED";
+      try {
+        if (recording.status === "ACTIVE") {
+          // Iframe phát enter_text cuối rồi ACK; sau ACK mới đóng cổng nhận và đợi
+          // toàn bộ POST event hoàn tất. Đây là barrier chống /stop vượt request cuối.
+          await requestRecorderFlush();
+          acceptsRecorderEvents.current = false;
+          await awaitRecorderEvents();
+          await api(`/behavior-authoring/recordings/${recordingId}/stop`, { method: "POST", body: JSON.stringify({ final_observation: {} }) });
+          backendStopped = true;
+          setRecording((current) => current ? { ...current, status: "STOPPED" } : current);
+        } else {
+          acceptsRecorderEvents.current = false;
+          await awaitRecorderEvents();
+        }
+        const sinhXong = await api<JsonMap>(`/behavior-authoring/recordings/${recordingId}/abstract`, {
+          method: "POST",
+          body: JSON.stringify({
+            scenario_code: scenarioCode.trim().toUpperCase(),
+            name: scenarioName.trim(),
+            weight: scenarioWeight,
+            ...(editingScenarioId ? { replace_scenario_id: editingScenarioId } : {}),
+            viewports: [
+              // device_pixel_ratio để cố định 1: chấm bố cục đo bằng dp nên mật độ không
+              // đổi điểm, chỉ làm ảnh bằng chứng nặng thêm.
+              { width: viewportWidth, height: viewportHeight, device_pixel_ratio: 1, name: "phone", brightness: cheDoToi ? "dark" : "light" },
+            ],
+          }),
         });
-        setIconInventory(dsIcon.map((it) => ({
-          icon: String(it.icon || ""),
-          count: Number(it.count || 1),
-          perRow: Boolean(it.per_row),
-          buttonType: String(it.button_type || ""),
-          checked: false,
-        })));
-      }
-      if (sinhXong.capture_warning) {
-        // Sinh testcase THÀNH CÔNG nhưng có mùi hỏng-im-lặng — phải đỏ để không bị bỏ qua.
-        setError(`Đã sinh testcase, NHƯNG: ${String(sinhXong.capture_warning)}`);
-      } else {
-        setNotice((editingScenarioId
-          ? "Đã cập nhật scenario, replay Golden trên Database ẩn và tạo lại oracle."
-          : "Đã replay Golden trên Database ẩn, sinh Output Database, oracle và testcase-definition.json.") + duoiDinhDanh);
+        activeRecordingId.current = null;
+        setRecording(null);
+        resetRecorderTransport();
+        await refresh(suite.id);
+        setEditingScenarioId(null);
+            // Số bước vừa nhận định danh từ Golden (Gói 2): 0 nghĩa là Golden chưa gắn
+            // Semantics(identifier:) hoặc mọi bước đã có sẵn — cả hai đều không phải lỗi.
+            const soDinhDanh = Number(sinhXong.identifier_step_count || 0);
+            const duoiDinhDanh = soDinhDanh > 0 ? ` Đã nướng định danh vào ${soDinhDanh} bước.` : "";
+            // Icon máy chấm nhìn thấy ở màn cuối luồng — mở bảng tick ngay, vì đây là lần duy
+            // nhất trong luồng soạn đề mà thông tin này tồn tại.
+            const dsIcon = Array.isArray(sinhXong.icons) ? (sinhXong.icons as JsonMap[]) : [];
+            if (dsIcon.length > 0 && sinhXong.id) {
+              setIconScenario({
+                id: String(sinhXong.id),
+                ma: String(sinhXong.scenario_code || sinhXong.name || ""),
+                checkpoints: Array.isArray(sinhXong.checkpoints) ? (sinhXong.checkpoints as JsonMap[]) : [],
+              });
+              setIconInventory(dsIcon.map((it) => ({
+                icon: String(it.icon || ""),
+                count: Number(it.count || 1),
+                perRow: Boolean(it.per_row),
+                buttonType: String(it.button_type || ""),
+                checked: false,
+              })));
+            }
+        if (sinhXong.capture_warning) {
+          // Sinh testcase THÀNH CÔNG nhưng có mùi hỏng-im-lặng — phải đỏ để không bị bỏ qua.
+          setError(`Đã sinh testcase, NHƯNG: ${String(sinhXong.capture_warning)}`);
+        } else {
+          setNotice((editingScenarioId
+            ? "Đã cập nhật scenario, replay Golden trên Database ẩn và tạo lại oracle."
+            : "Đã replay Golden trên Database ẩn, sinh Output Database, oracle và testcase-definition.json.") + duoiDinhDanh);
+        }
+      } catch (caught) {
+        // Flush/lưu event lỗi trước khi backend /stop thì phiên vẫn ACTIVE và phải cho
+        // người dùng sửa/thử lại. Nếu /stop đã thành công, state refresh sẽ đưa về STOPPED.
+        if (!backendStopped && recording.status === "ACTIVE") acceptsRecorderEvents.current = true;
+        throw caught;
       }
     });
   };
@@ -1174,6 +1436,7 @@ function BehaviorAuthoringEditor() {
         setViewportHeight(Number(phone.height || 915));
       }
       const created = await api<Recording>(`/behavior-authoring/scenarios/${String(item.id)}/revision-recording`, { method: "POST" });
+      resetRecorderTransport();
       activeRecordingId.current = created.id;
       acceptsRecorderEvents.current = true;
       setEditingScenarioId(String(item.id));
@@ -1193,7 +1456,10 @@ function BehaviorAuthoringEditor() {
     acceptsRecorderEvents.current = false;
     activeRecordingId.current = null;
     run("record-cancel", async () => {
+      // Đợi request đã gửi xong để không còn appendEvent chạy đua với DELETE.
+      await recorderEventQueue.current;
       await api(`/behavior-authoring/recordings/${recordingId}`, { method: "DELETE" });
+      resetRecorderTransport();
       setRecording(null);
       setEditingScenarioId(null);
       await refresh(suite.id);
@@ -1221,24 +1487,42 @@ function BehaviorAuthoringEditor() {
         setRecorderReady(true);
         return;
       }
+      if (event.data.type === "GOLDEN_RECORDER_FLUSHED") {
+        const requestId = event.data.payload?.request_id;
+        if (typeof requestId !== "string") return;
+        const waiter = flushWaiters.current.get(requestId);
+        if (!waiter) return;
+        window.clearTimeout(waiter.timer);
+        flushWaiters.current.delete(requestId);
+        waiter.resolve();
+        return;
+      }
       if (event.data.type === "GOLDEN_RECORDER_INVENTORY") {
         const items = Array.isArray(event.data.payload?.items) ? event.data.payload.items : [];
         setUiInventory(items
           .filter((it: JsonMap) => typeof it?.attribute === "string" && typeof it?.attributeValue === "string")
           .map((it: JsonMap) => ({
             attribute: String(it.attribute), value: String(it.attributeValue), role: String(it.role || ""),
-            // Định danh recorder đọc được, chỉ để HIỆN. Không đưa vào target checkpoint: tiêu
-            // chí "màn hình có X" phải tiếp tục kiểm nội dung bằng nhãn/chữ (quyết định Q2).
-            identifier: typeof it.identifier === "string" ? it.identifier : "",
-            // label/hint là thành phần ngữ nghĩa thật (nút, ô nhập) → tick sẵn. Chữ trần có
+                // Định danh recorder đọc được, chỉ để HIỆN. Không đưa vào target checkpoint: tiêu
+                // chí "màn hình có X" phải tiếp tục kiểm nội dung bằng nhãn/chữ (quyết định Q2).
+                identifier: typeof it.identifier === "string" ? it.identifier : "",
+                // label/hint là thành phần ngữ nghĩa thật (nút, ô nhập) → tick sẵn. Chữ trần có
             // thể là DỮ LIỆU đang hiển thị chứ không phải khung màn hình — để giảng viên tự cân nhắc.
-            checked: it.attribute === "label" || it.attribute === "hint",
+            checked: it.attribute === "semanticId" || it.attribute === "label" || it.attribute === "hint",
           })));
         return;
       }
       if (event.data.type === "GOLDEN_RECORDER_WARNING") {
         const message = event.data.payload?.message;
-        if (typeof message === "string") setNotice(message);
+        if (typeof message === "string") setError(message);
+        return;
+      }
+      if (event.data.type === "GOLDEN_RECORDER_ROUTE") {
+        const uri = event.data.payload?.uri;
+        if (typeof uri === "string" && uri) {
+          setCurrentRoute(uri);
+          setRouteExpected(uri);
+        }
         return;
       }
       if (!acceptsRecorderEvents.current || !activeRecordingId.current || event.data.type !== "GOLDEN_RECORDER_EVENT") return;
@@ -1247,6 +1531,9 @@ function BehaviorAuthoringEditor() {
     };
     window.addEventListener("message", receive);
     return () => window.removeEventListener("message", receive);
+    // appendAction intentionally reads the latest recording/locator state. Rebinding the
+    // window listener for every keystroke would create a short interval with no recorder.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recording, runtimeOrigin]);
 
   return (
@@ -1469,19 +1756,34 @@ function BehaviorAuthoringEditor() {
               <div className="mt-2 grid gap-2 sm:grid-cols-2"><label className="text-xs font-semibold text-slate-500">Rộng màn (dp)<input type="number" min={240} value={viewportWidth} onChange={(e) => setViewportWidth(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label><label className="text-xs font-semibold text-slate-500">Cao màn (dp)<input type="number" min={320} value={viewportHeight} onChange={(e) => setViewportHeight(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label><label className="flex items-center gap-2 text-xs font-semibold text-slate-500 sm:col-span-2"><input type="checkbox" checked={cheDoToi} onChange={() => setCheDoToi((v) => !v)} /> Chấm hàm này ở chế độ tối <span className="font-normal">— engine đặt platformBrightness = dark trước khi boot; bài có darkTheme sẽ tự đổi, giá trị chuẩn màu/kiểu chữ đo ở chế độ tối. Khung Golden bên trên vẫn hiện sáng.</span></label></div>
               <p className="mt-2 text-xs font-semibold text-slate-600 dark:text-slate-300">Khung máy Android, tính bằng dp — cỡ mà Android Studio hiển thị cho máy ảo (Pixel: 412×915). Mọi phép chấm bố cục đều đo bằng dp nên không cần khai mật độ điểm ảnh.</p>
               {!recording ? <><button onClick={startRecording} disabled={!recordingInputsReady || Boolean(busy)} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-rose-600 px-4 py-2.5 font-bold text-white disabled:opacity-40"><Radio size={18} /> Bắt đầu record</button>{!recordingInputsReady && <p className="mt-2 text-xs text-amber-600">Cần đủ Database phát sinh viên, Database ẩn và Golden Solution.</p>}</> : <>
-                <div className="mt-5 rounded-xl border border-slate-200 p-4 dark:border-slate-700"><h3 className="font-bold">Thêm action</h3><div className="mt-3 grid gap-2 sm:grid-cols-2"><select value={action} onChange={(e) => setAction(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{ACTIONS.map((item) => <option key={item} value={item}>{item}</option>)}</select><select value={locator} onChange={(e) => setLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{LOCATOR_LABEL[item] || item}</option>)}</select><input value={locatorValue} onChange={(e) => setLocatorValue(e.target.value)} placeholder="Giá trị nhận diện" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><input value={inputValue} onChange={(e) => setInputValue(e.target.value)} placeholder="Dữ liệu nhập (nếu có)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /></div><p className="mt-2 text-xs text-slate-500">Gõ chữ trong app chỉ được ghi là <b>cú chạm vào ô</b>; nội dung thì khai ở ô bên phải từng dòng trong danh sách dưới. Flutter Web tráo phần tử nhập giữa chừng nên đọc chữ từ trình duyệt không bao giờ chắc — khai tay thì chính xác tuyệt đối và nhìn thấy được trước khi sinh testcase.</p>{action === "drag" && <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-500"><span>Độ dời (dp):</span><label className="flex items-center gap-1">ngang <input type="number" step={10} value={keoX} onChange={(e) => setKeoX(Number(e.target.value))} className="w-20 rounded border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-600" /></label><label className="flex items-center gap-1">dọc <input type="number" step={10} value={keoY} onChange={(e) => setKeoY(Number(e.target.value))} className="w-20 rounded border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-600" /></label><span>— dương là sang phải / xuống dưới. Kéo dải trượt: chỉ cần ngang.</span></div>}<button onClick={() => appendAction()} className="mt-3 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-bold text-white"><Plus size={16} /> Thêm action</button></div>
+                <div className="mt-5 rounded-xl border border-slate-200 p-4 dark:border-slate-700">
+                  <h3 className="font-bold">Thêm action</h3>
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                    <select value={action} onChange={(e) => setAction(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{ACTIONS.map((item) => <option key={item} value={item}>{item}</option>)}</select>
+                    {manualActionNeedsTarget && <select value={locator} onChange={(e) => setLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{item}</option>)}</select>}
+                    {manualActionNeedsTarget && <input value={locatorValue} onChange={(e) => setLocatorValue(e.target.value)} placeholder="Giá trị nhận diện semantic" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />}
+                    {(action === "enter_text" || manualActionNeedsUri) && <input value={inputValue} onChange={(e) => setInputValue(e.target.value)} placeholder={manualActionNeedsUri ? "URI/path, ví dụ /movies/42?tab=cast" : "Dữ liệu nhập"} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />}
+                  </div>
+                      <p className="mt-2 text-xs text-slate-500">Gõ chữ trong app chỉ được ghi là <b>cú chạm vào ô</b>; nội dung thì khai ở ô bên phải từng dòng trong danh sách dưới. Flutter Web tráo phần tử nhập giữa chừng nên đọc chữ từ trình duyệt không bao giờ chắc — khai tay thì chính xác tuyệt đối và nhìn thấy được trước khi sinh testcase.</p>
+                      {action === "drag" && <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-500"><span>Độ dời (dp):</span><label className="flex items-center gap-1">ngang <input type="number" step={10} value={keoX} onChange={(e) => setKeoX(Number(e.target.value))} className="w-20 rounded border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-600" /></label><label className="flex items-center gap-1">dọc <input type="number" step={10} value={keoY} onChange={(e) => setKeoY(Number(e.target.value))} className="w-20 rounded border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-600" /></label><span>— dương là sang phải / xuống dưới. Kéo dải trượt: chỉ cần ngang.</span></div>}
+                  <button onClick={() => appendAction()} className="mt-3 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-bold text-white"><Plus size={16} /> Thêm action</button>
+                  <p className="mt-2 text-xs text-slate-500">Route hiện tại của Golden: <code>{currentRoute}</code>. Reload trong runner phát lại RouteInformation hiện tại để kiểm khả năng phục hồi route; deep link native vẫn cần lane Android riêng.</p>
+                </div>
                 <div className="mt-3 rounded-xl border border-slate-200 p-4 dark:border-slate-700">
                   <div className="flex items-center justify-between gap-3">
-                    <div><h3 className="font-bold">Thêm checkpoint</h3><p className="text-xs text-slate-500">Mỗi checkpoint trở thành một đầu điểm độc lập. Điểm và ràng buộc chia ở bảng "Chia điểm" trên thẻ hàm, sau khi sinh testcase.</p></div>
+                    <div><h3 className="font-bold">Thêm checkpoint</h3><p className="text-xs text-slate-500">Mỗi checkpoint trở thành một đầu điểm độc lập. Điểm và ràng buộc chia ở bảng &quot;Chia điểm&quot; trên thẻ hàm, sau khi sinh testcase.</p></div>
                     <div className="flex rounded-lg bg-slate-100 p-1 text-xs font-bold dark:bg-slate-800">
                       <button onClick={() => setCheckpointMode("ui")} className={`rounded-md px-3 py-1.5 ${checkpointMode === "ui" ? "bg-white text-indigo-600 shadow dark:bg-slate-700" : "text-slate-500"}`}>UI</button>
                       <button onClick={() => setCheckpointMode("database")} className={`rounded-md px-3 py-1.5 ${checkpointMode === "database" ? "bg-white text-indigo-600 shadow dark:bg-slate-700" : "text-slate-500"}`}>Database</button>
+                      <button onClick={() => setCheckpointMode("route")} className={`rounded-md px-3 py-1.5 ${checkpointMode === "route" ? "bg-white text-indigo-600 shadow dark:bg-slate-700" : "text-slate-500"}`}>Route</button>
+                      <button onClick={() => setCheckpointMode("layout")} className={`rounded-md px-3 py-1.5 ${checkpointMode === "layout" ? "bg-white text-indigo-600 shadow dark:bg-slate-700" : "text-slate-500"}`}>Bố cục</button>
                     </div>
                   </div>
                   {checkpointMode === "ui" ? (
                     <div className="mt-3 space-y-2">
-                      <select value={uiCheckpointType} onChange={(e) => setUiCheckpointType(e.target.value as "text" | "widget_state" | "text_style" | "theme_value" | "no_overflow" | "no_exception")} className="w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">
+                      <select value={uiCheckpointType} onChange={(e) => setUiCheckpointType(e.target.value as "text" | "component" | "widget_state" | "text_style" | "theme_value" | "no_overflow" | "no_exception")} className="w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">
                         <option value="text">Nội dung text xuất hiện / không xuất hiện</option>
+                        <option value="component">Thành phần UI và trạng thái semantic</option>
                         <option value="widget_state">Trạng thái thật bên trong widget</option>
                         <option value="text_style">Kiểu chữ của một dòng chữ</option>
                         <option value="theme_value">Bảng chủ đề của app (màu, phông, Material 3)</option>
@@ -1493,10 +1795,25 @@ function BehaviorAuthoringEditor() {
                         <div className="flex min-w-0 gap-1"><input value={hiddenCheckpointText} onChange={(e) => setHiddenCheckpointText(e.target.value)} placeholder="Text không được xuất hiện (tùy chọn)" className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><button type="button" onClick={() => setHiddenCheckpointText((t) => t + "₫")} title="Chèn ký hiệu đồng (₫)" className="shrink-0 rounded-lg border border-slate-300 px-2.5 text-sm font-bold text-slate-600 hover:border-indigo-400 dark:border-slate-600 dark:text-slate-300">₫</button></div>
                         <button onClick={appendUiCheckpoint} title="Lưu checkpoint UI" className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white"><Check size={16} /></button>
                       </div>}
+                      {uiCheckpointType === "component" && <div className="space-y-2">
+                        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                          <select value={checkpointLocator} onChange={(e) => setCheckpointLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{item}</option>)}</select>
+                          <input value={checkpointLocatorValue} onChange={(e) => setCheckpointLocatorValue(e.target.value)} placeholder="Giá trị nhận diện thành phần" className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />
+                          <select value={checkpointRole} onChange={(e) => setCheckpointRole(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{SEMANTIC_ROLES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
+                          <select value={checkpointVisible ? "visible" : "hidden"} onChange={(e) => setCheckpointVisible(e.target.value === "visible")} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700"><option value="visible">Phải hiển thị</option><option value="hidden">Không được hiển thị</option></select>
+                        </div>
+                        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-[1.4fr_1fr_1fr_auto]">
+                          <input value={checkpointValue} onChange={(e) => setCheckpointValue(e.target.value)} placeholder="Giá trị mong đợi (tùy chọn)" disabled={!checkpointVisible} className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 disabled:opacity-40 dark:border-slate-700" />
+                          <select value={checkpointEnabled} onChange={(e) => setCheckpointEnabled(e.target.value)} disabled={!checkpointVisible} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 disabled:opacity-40 dark:border-slate-700"><option value="ignore">Không xét enabled</option><option value="true">Phải được bật</option><option value="false">Phải bị khóa</option></select>
+                          <select value={checkpointChecked} onChange={(e) => setCheckpointChecked(e.target.value)} disabled={!checkpointVisible || !["checkbox", "switch", "radio"].includes(checkpointRole)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 disabled:opacity-40 dark:border-slate-700"><option value="ignore">Không xét checked</option><option value="true">Phải được chọn</option><option value="false">Không được chọn</option></select>
+                          <button onClick={appendUiCheckpoint} title="Lưu checkpoint semantic" className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white"><Check size={16} /></button>
+                        </div>
+                        <p className="text-xs text-slate-500">Có thể chỉ kiểm tra sự tồn tại, hoặc kiểm tra thêm đúng loại widget, giá trị, enabled và checked.</p>
+                      </div>}
                       {uiCheckpointType === "widget_state" && <div className="space-y-2">
                         <p className="text-xs text-slate-500">Đọc một giá trị thật bên trong widget: công tắc đang bật hay tắt, dải trượt bao nhiêu, ô nhập có dùng bàn phím số không, nút có đúng loại không. Giá trị chuẩn do hệ thống tự đo trên bài Golden lúc sinh testcase — không phải gõ tay.</p>
                         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-[auto_1.2fr_1.2fr_1.6fr_auto]">
-                          <select value={wsLocator} onChange={(e) => setWsLocator(e.target.value)} title="Cách nhận diện điểm neo trên màn hình" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{LOCATOR_LABEL[item] || item}</option>)}</select>
+                          <select value={wsLocator} onChange={(e) => setWsLocator(e.target.value)} title="Cách nhận diện điểm neo trên màn hình" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{LOCATOR_LABELS[item] || item}</option>)}</select>
                           <input value={wsLocatorValue} onChange={(e) => setWsLocatorValue(e.target.value)} placeholder="Chữ hoặc nhãn để tìm" className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />
                           <input list="ds-widget" value={wsWidget} onChange={(e) => setWsWidget(e.target.value)} placeholder="Loại widget, ví dụ Slider" title="Tên kiểu widget mang giá trị cần đọc. Hệ thống tìm cả bên trong lẫn bao quanh điểm neo." className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />
                           <datalist id="ds-widget">{WIDGET_GOI_Y.map((w) => <option key={w} value={w} />)}</datalist>
@@ -1507,7 +1824,7 @@ function BehaviorAuthoringEditor() {
                       {uiCheckpointType === "text_style" && <div className="space-y-2">
                         <p className="text-xs text-slate-500">Đo kiểu chữ thật sự được vẽ, nên bắt được cả chữ thừa kế từ theme lẫn chữ đặt style thẳng trên widget. Cỡ chữ và độ đậm so tuyệt đối; màu chữ so theo sai số 20% như mọi tiêu chí màu.</p>
                         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-[auto_1.6fr_1.4fr_auto]">
-                          <select value={tsLocator} onChange={(e) => setTsLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{LOCATOR_LABEL[item] || item}</option>)}</select>
+                          <select value={tsLocator} onChange={(e) => setTsLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{LOCATOR_LABELS[item] || item}</option>)}</select>
                           <input value={tsLocatorValue} onChange={(e) => setTsLocatorValue(e.target.value)} placeholder="Dòng chữ cần đo" className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />
                           <select value={tsProperty} onChange={(e) => setTsProperty(e.target.value)} className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{MAT_KIEU_CHU.map(([ma, nhan]) => <option key={ma} value={ma}>{nhan}</option>)}</select>
                           {laThuocTinhMau(tsProperty) && <label className="flex items-center gap-1 whitespace-nowrap text-xs text-slate-500">sai số <input type="number" min={0.5} max={50} step={0.5} value={saiSoMau} onChange={(e) => setSaiSoMau(Number(e.target.value))} className="w-14 rounded border border-slate-300 bg-transparent px-1.5 py-1 dark:border-slate-600" />%</label>}
@@ -1531,7 +1848,7 @@ function BehaviorAuthoringEditor() {
                         <button onClick={appendUiCheckpoint} title="Lưu checkpoint không exception" className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white"><Check size={16} /></button>
                       </div>}
                     </div>
-                  ) : (
+                  ) : checkpointMode === "database" ? (
                     <div className="mt-3 space-y-2">
                       <div className="grid gap-2 sm:grid-cols-3">
                         <input value={databaseTable} onChange={(e) => setDatabaseTable(e.target.value)} placeholder="Tên bảng, ví dụ users" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />
@@ -1544,33 +1861,86 @@ function BehaviorAuthoringEditor() {
                       </div>
                       <p className="text-xs text-slate-500">Mục này dùng để bổ sung assertion DB có chủ đích. Dù bỏ qua, hệ thống vẫn tự replay Golden, so Hidden DB với Output DB và tách INSERT/UPDATE/DELETE thành checkpoint độc lập. Nếu checkpoint UI và row SQLite cùng chứa giá trị nhập cuối, hệ thống tự gộp thành checkpoint đối chiếu Input → UI → Database.</p>
                     </div>
+                  ) : checkpointMode === "route" ? (
+                    <div className="mt-3 space-y-2">
+                      <div className="grid gap-2 sm:grid-cols-[1.6fr_1fr_auto]">
+                        <input value={routeExpected} onChange={(e) => setRouteExpected(e.target.value)} placeholder="URI/path mong đợi, ví dụ /movies/42?tab=cast" className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />
+                        <select value={routeCanPop} onChange={(e) => setRouteCanPop(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700"><option value="ignore">Không xét canPop</option><option value="true">Phải back được</option><option value="false">Không được back</option></select>
+                        <button onClick={appendRouteCheckpoint} title="Lưu checkpoint route" className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white"><Check size={16} /></button>
+                      </div>
+                      <p className="text-xs text-slate-500">Đang đọc từ Golden: <code>{currentRoute}</code>. Có thể sửa giá trị để kiểm deep link/path/query khác.</p>
+                    </div>
+                  ) : (
+                    <div className="mt-3 space-y-2">
+                      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                        <select value={layoutFirstLocator} onChange={(e) => setLayoutFirstLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{item} A</option>)}</select>
+                        <input value={layoutFirstValue} onChange={(e) => setLayoutFirstValue(e.target.value)} placeholder="Thành phần A" list="golden-layout-targets" className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />
+                        <select value={layoutSecondLocator} onChange={(e) => setLayoutSecondLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{item} B</option>)}</select>
+                        <input value={layoutSecondValue} onChange={(e) => setLayoutSecondValue(e.target.value)} placeholder="Thành phần B" list="golden-layout-targets" className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />
+                      </div>
+                      <datalist id="golden-layout-targets">{(uiInventory || []).map((item) => <option key={`${item.attribute}:${item.value}`} value={item.value}>{item.attribute}</option>)}</datalist>
+                      <div className="grid gap-2 sm:grid-cols-[1.5fr_1fr_auto]">
+                        <select value={layoutRelation} onChange={(e) => setLayoutRelation(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">
+                          <option value="auto">Tự suy ra quan hệ từ Golden</option><option value="above">A nằm trên B</option><option value="below">A nằm dưới B</option><option value="left_of">A bên trái B</option><option value="right_of">A bên phải B</option><option value="same_row">A và B cùng hàng</option><option value="same_column">A và B cùng cột</option><option value="inside">A nằm trong B</option><option value="contains">A chứa B</option><option value="not_overlap">A và B không chồng lấp</option><option value="overlap">A và B chồng lấp</option><option value="wider_than">A rộng hơn B</option><option value="taller_than">A cao hơn B</option>
+                        </select>
+                        <label className="flex items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700">Sai số %<input type="number" min={0} max={50} step={0.5} value={layoutTolerance} onChange={(e) => setLayoutTolerance(Number(e.target.value))} className="min-w-0 flex-1 bg-transparent text-right outline-none" /></label>
+                        <button onClick={appendLayoutCheckpoint} title="Lưu checkpoint quan hệ bố cục" className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white"><Check size={16} /></button>
+                      </div>
+                      <p className="text-xs text-slate-500">Không so pixel. Runner chỉ đo Rect logic của hai semantic element. Hãy “Chụp semantic UI” trước để lấy gợi ý target; chế độ tự động sẽ nướng quan hệ đo được từ Golden vào oracle.</p>
+                    </div>
                   )}
                 </div>
-                <div className="mt-4 max-h-48 space-y-2 overflow-auto">{(recording.raw_trace || []).map((item, index) => {
+                <div className="mt-4 max-h-72 space-y-2 overflow-auto pr-1">{(recording.raw_trace || []).map((item, index) => {
                   const sequence = Number(item.sequence || index + 1);
-                  return <div key={sequence} className="flex items-center gap-3 rounded-lg bg-slate-50 px-3 py-2 text-xs dark:bg-slate-800">
-                    <span className="font-mono text-indigo-500">{sequence}</span>
-                    <span className="font-bold">{String(item.action || item.kind)}</span>
-                    {(() => {
-                      // Huy hiệu định danh: máy chấm tìm bằng nó TRƯỚC, nhãn/chữ cạnh bên là đường
-                      // lui. Bước thao tác không có định danh thì nói rõ, để người soạn biết Golden
-                      // còn thiếu Semantics(identifier:) ở widget nào (checkpoint không cần, Q2).
-                      const t = (item.target || {}) as JsonMap;
-                      const id = String(t.semantic_id || t.semanticId || "");
-                      if (id) return <span className="shrink-0 rounded bg-teal-100 px-1.5 py-0.5 font-mono text-[10px] font-bold text-teal-700 dark:bg-teal-950 dark:text-teal-300" title="Định danh recorder đọc được từ Golden. Máy chấm tìm bằng nó trước; nhãn/chữ cạnh bên là đường lui.">{id}</span>;
-                      if (String(item.kind || "") === "action" && Object.keys(t).length > 0) return <span className="shrink-0 text-[10px] text-slate-400" title="Golden chưa gắn Semantics(identifier:) cho widget này. Máy chấm sẽ tìm bằng nhãn/chữ.">chưa có định danh</span>;
-                      return null;
-                    })()}
-                    <span className="min-w-0 flex-1 truncate text-slate-500">{JSON.stringify(item.target || item.expect || {})}</span>
-                    {String(item.action || "") === "enter_text" && <input
-                      defaultValue={String(item.value || "")}
-                      placeholder="Gõ nội dung cho ô này"
-                      title="Nội dung sẽ được gõ vào ô này lúc chấm. Recorder không đọc chữ nữa — bạn khai ở đây."
-                      onBlur={(e) => { const v = e.target.value; if (v !== String(item.value || "")) void suaGiaTriEvent(sequence, v); }}
-                      onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
-                      className={`w-52 shrink-0 rounded border bg-transparent px-2 py-1 ${String(item.value || "").trim() ? "border-slate-300 dark:border-slate-600" : "border-rose-400 bg-rose-50 dark:bg-rose-950/30"}`}
-                    />}
-                    <button onClick={() => deleteRecordedEvent(sequence)} disabled={Boolean(busy)} title="Xóa thao tác/checkpoint này" className="rounded-md p-1.5 text-rose-500 hover:bg-rose-100 disabled:opacity-40 dark:hover:bg-rose-950"><Trash2 size={15} /></button>
+                  const actionCode = String(item.action || item.kind || "event");
+                  const target = asJsonMap(item.target);
+                      // semantic_id là khoá đã NƯỚNG từ Golden; để trước để dòng thao tác hiện
+                      // đúng thứ máy chấm dùng, chứ không hiện nhãn dự phòng.
+                      const locator = ["semantic_id", "semanticId", "valueKey", "label", "hint", "text", "text_prefix", "tooltip"]
+                    .map((key) => ({ key, value: readableValue(target[key]) }))
+                    .find((entry) => entry.value.trim().length > 0);
+                  const targetHint = readableValue(target.hint);
+                  const inputValue = readableValue(item.value);
+                  const delta = asJsonMap(item.delta);
+                  const deltaText = Object.keys(delta).length
+                    ? `x: ${readableValue(delta.x) || "0"}, y: ${readableValue(delta.y) || "0"}`
+                    : "";
+                  const expectation = summarizeExpectation(item.expect);
+                  const technicalDetail = JSON.stringify(item, null, 2);
+                  return <div key={sequence} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs dark:border-slate-700 dark:bg-slate-800/80">
+                    <div className="flex items-center gap-2">
+                      <span className="flex h-6 min-w-6 shrink-0 items-center justify-center rounded-full bg-indigo-100 px-1.5 font-mono font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">{sequence}</span>
+                      <span className="font-bold text-slate-800 dark:text-slate-100">{ACTION_LABELS[actionCode] || actionCode}</span>
+                      <code className="rounded bg-slate-200 px-1.5 py-0.5 text-[10px] text-slate-500 dark:bg-slate-700 dark:text-slate-400">{actionCode}</code>
+                      <button onClick={() => deleteRecordedEvent(sequence)} disabled={Boolean(busy)} title="Xóa thao tác/checkpoint này" className="ml-auto rounded-md p-1.5 text-rose-500 hover:bg-rose-100 disabled:opacity-40 dark:hover:bg-rose-950"><Trash2 size={15} /></button>
+                    </div>
+                    {(locator || inputValue || deltaText || expectation) && <div className="mt-2 grid gap-1.5 pl-8 text-slate-600 dark:text-slate-300">
+                      {locator && <div className="flex min-w-0 items-start gap-2">
+                        <span className="w-20 shrink-0 text-slate-400">Đích</span>
+                        <span className="min-w-0 break-words font-semibold text-slate-700 dark:text-slate-200">{locator.value}</span>
+                        <span className="shrink-0 rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-semibold text-slate-500 dark:bg-slate-700 dark:text-slate-300">{LOCATOR_LABELS[locator.key] || locator.key}</span>
+                      </div>}
+                          {String(item.kind || "") === "action" && Object.keys(target).length > 0 && !target.semantic_id && !target.semanticId && <div className="flex min-w-0 items-start gap-2"><span className="w-20 shrink-0 text-slate-400">Định danh</span><span className="text-amber-600 dark:text-amber-400">chưa có — gắn Semantics(identifier:) vào Golden rồi Sinh lại testcase</span></div>}
+                      {targetHint && locator?.key !== "hint" && targetHint !== locator?.value && <div className="flex min-w-0 items-start gap-2"><span className="w-20 shrink-0 text-slate-400">Gợi ý</span><span className="min-w-0 break-words">{targetHint}</span></div>}
+                      {inputValue && <div className="flex min-w-0 items-start gap-2"><span className="w-20 shrink-0 text-slate-400">Giá trị nhập</span><span className="min-w-0 break-words rounded-md bg-indigo-50 px-2 py-0.5 font-semibold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300">{inputValue}</span></div>}
+                          {String(item.action || "") === "enter_text" && <div className="flex min-w-0 items-start gap-2">
+                            <span className="w-20 shrink-0 text-slate-400">Sửa giá trị</span>
+                            <input
+                              defaultValue={String(item.value || "")}
+                              placeholder="Gõ nội dung cho ô này"
+                              title="Nội dung sẽ được gõ vào ô này lúc chấm. Sửa ở đây nếu recorder ghi chưa đúng."
+                              onBlur={(e) => { const v = e.target.value; if (v !== String(item.value || "")) void suaGiaTriEvent(sequence, v); }}
+                              onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                              className={`w-52 shrink-0 rounded border bg-transparent px-2 py-1 ${String(item.value || "").trim() ? "border-slate-300 dark:border-slate-600" : "border-amber-400"}`}
+                            />
+                          </div>}
+                      {deltaText && <div className="flex min-w-0 items-start gap-2"><span className="w-20 shrink-0 text-slate-400">Độ cuộn</span><span>{deltaText}</span></div>}
+                      {expectation && <div className="flex min-w-0 items-start gap-2"><span className="w-20 shrink-0 text-slate-400">Kỳ vọng</span><span className="min-w-0 break-words">{expectation}</span></div>}
+                    </div>}
+                    <details className="group mt-2 pl-8 text-slate-500">
+                      <summary className="w-fit cursor-pointer select-none text-[11px] hover:text-indigo-500">Chi tiết kỹ thuật</summary>
+                      <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-slate-950 p-3 text-[11px] leading-5 text-slate-300">{technicalDetail}</pre>
+                    </details>
                   </div>;
                 })}</div>
                 {recording.status === "STOPPED" && error && <div className="mt-4 rounded-xl border border-rose-300 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-200">Không thể sinh testcase: {error}. Phiên vẫn được giữ để bạn thử lại hoặc hủy.</div>}
@@ -1655,6 +2025,8 @@ function BehaviorAuthoringEditor() {
               </div>
             )}
             <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+              {/* Các hàm chứa ref phía dưới chỉ chạy trong onClick, không chạy trong render. */}
+              {/* eslint-disable-next-line react-hooks/refs */}
               {(suite.scenarios || []).map((item, index) => <div key={String(item.id || index)} className="rounded-xl border border-slate-200 px-4 py-3 dark:border-slate-700"><div className="flex items-center justify-between gap-2"><span className="font-bold">{String(item.name || item.scenario_code)}</span><span className="rounded-full bg-indigo-100 px-2 py-1 text-xs font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">{String(item.weight)} điểm</span></div><p className="mt-1 font-mono text-[11px] text-indigo-500">{String(item.scenario_code || "")}</p>{(() => {
                 // Độ phủ định danh của kịch bản: bước có target mà chưa có định danh vẫn chấm được
                 // bằng nhãn, nhưng người soạn cần thấy để biết kịch bản nào chưa hưởng định danh

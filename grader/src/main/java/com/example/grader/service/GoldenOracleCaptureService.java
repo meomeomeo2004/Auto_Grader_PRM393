@@ -172,7 +172,7 @@ public class GoldenOracleCaptureService {
 
             List<Map<String, Object>> checkpoints = artifacts.databaseDiffCheckpoints(suiteId);
             Map<String, Object> completedScenario = authoring.applyDerivedDatabaseCheckpoints(
-                    scenarioId, checkpoints, String.valueOf(outputArtifact.get("sha256")));
+                    scenarioId, checkpoints, String.valueOf(outputArtifact.get("sha256")), golden.getSha256());
 
             Map<String, Object> result = new LinkedHashMap<>();
             // Luồng có nhập liệu mà không đẻ nổi một checkpoint database nào là dấu hiệu

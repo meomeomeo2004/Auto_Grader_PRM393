@@ -50,7 +50,20 @@ public final class TestCaseTaxonomy {
      */
     public static final String CUSTOM_RUNNER = "CUSTOM_CODE";
 
-    /** 24 runner của engine chung COMMON_V1. GROUP là dẫn xuất, xử lý riêng. */
+    /**
+     * 8 runner Ch.7 (bản 3.6.0, widget bố cục và hiển thị nâng cao) — có layer trong
+     * {@link #RUNNER_LAYER} để {@link #layerForRunner} vẫn tra được ngay khi soạn đề dùng chúng,
+     * nhưng CỐ Ý loại khỏi {@link #commonRunners()}: bộ fixture nghiệm thu
+     * ({@code fixtures/result-json-v2}) chưa có testcase nào dùng 8 runner này, nên "chứng nhận"
+     * chúng trên fixture lúc này sẽ nói dối về độ phủ — đúng lỗ hổng mà {@link #commonRunners()}
+     * sinh ra để bịt (xem javadoc ở đó). Gỡ khỏi tập này ngay khi fixture có testcase thật cho cả
+     * tám (cần thiết kế thêm màn hình demo Ch.7 trong app fixture — việc đang dở, xem lịch sử PR).
+     */
+    private static final Set<String> CH7_PENDING_FIXTURE_COVERAGE = Set.of(
+            "SCROLL_DIRECTION", "SCROLL_TO_END", "STACK_LAYERS", "INDEXED_STACK_SWITCH",
+            "BOTTOM_SHEET_FLOW", "TABLE_ROWS", "SLIVER_SCROLL_COLLAPSE", "EXPANDED_WIDGET");
+
+    /** 32 runner của engine chung COMMON_V1 (24 gốc + 8 Ch.7 bản 3.6.0). GROUP là dẫn xuất, xử lý riêng. */
     private static final Map<String, String> RUNNER_LAYER = Map.ofEntries(
             Map.entry("WIDGET_VISIBLE", "widget"),
             Map.entry("WIDGET_TYPE_VISIBLE", "widget"),
@@ -80,6 +93,17 @@ public final class TestCaseTaxonomy {
             Map.entry("RESPONSIVE_GRID_FLOW", "responsive"),
             Map.entry("RESPONSIVE_NO_OVERFLOW", "responsive"),
             Map.entry("RESPONSIVE_TARGET", "responsive"),
+            // Ch.7 (3.6.0) — widget bố cục và hiển thị nâng cao. Cùng tiêu chí phân tầng như
+            // trên: có thao tác (kéo/chạm) rồi khẳng định hệ quả → integration; chỉ mở màn hình
+            // rồi khẳng định trạng thái tĩnh → widget.
+            Map.entry("SCROLL_DIRECTION", "widget"),
+            Map.entry("SCROLL_TO_END", "integration"),
+            Map.entry("STACK_LAYERS", "widget"),
+            Map.entry("INDEXED_STACK_SWITCH", "integration"),
+            Map.entry("BOTTOM_SHEET_FLOW", "integration"),
+            Map.entry("TABLE_ROWS", "widget"),
+            Map.entry("SLIVER_SCROLL_COLLAPSE", "integration"),
+            Map.entry("EXPANDED_WIDGET", "widget"),
             // Code tay của giáo viên: engine khởi động app thật rồi chạy assert của họ — cùng lý lẽ
             // với APP_BOOT. Không có "custom" trong enum layer của SPEC, và tầng thật thì không suy
             // được từ code, nên quy về integration thay vì để rỗng.
@@ -118,10 +142,13 @@ public final class TestCaseTaxonomy {
      * <p>{@code CUSTOM_CODE} nằm ngoài phép đo đó vì nó không khẳng định điều gì cố định — đạt hay
      * hỏng là do code giáo viên viết, nên "chứng nhận" nó trên fixture không nói lên điều gì về
      * engine. Nhánh dispatch của nó trong {@code exam_test.dart} thì vẫn nên có bài đo riêng.
+     *
+     * <p>8 runner Ch.7 cũng tạm loại — xem {@link #CH7_PENDING_FIXTURE_COVERAGE}.
      */
     public static Set<String> commonRunners() {
         Set<String> out = new LinkedHashSet<>(RUNNER_LAYER.keySet());
         out.remove(CUSTOM_RUNNER);
+        out.removeAll(CH7_PENDING_FIXTURE_COVERAGE);
         return out;
     }
 

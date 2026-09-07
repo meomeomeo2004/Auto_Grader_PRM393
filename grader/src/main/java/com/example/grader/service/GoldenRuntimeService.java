@@ -30,7 +30,10 @@ import java.util.zip.ZipFile;
 public class GoldenRuntimeService {
     private static final long MAX_EXPANDED_BYTES = 1_000L * 1024 * 1024;
     private static final int MAX_ZIP_ENTRIES = 20_000;
-    private static final String RECORDER_BRIDGE_VERSION = "semantic-v15";   // v15: ghi định danh flt-semantics-identifier cạnh nhãn · v4: quét thành phần CHỈ trong flutter-view (v3 vớ nhầm DOM của extension)
+    // v21: bảng tick giữ nhãn/chữ làm target và gửi kèm định danh để HIỆN (v20 đổi target
+    // sang định danh, làm tiêu chí thôi kiểm nội dung) · v20: locator duy nhất + chốt giá trị
+    // nhập theo ranh giới thao tác · v4: quét thành phần CHỈ trong flutter-view.
+    private static final String RECORDER_BRIDGE_VERSION = "input-identity-v21";
 
     @Value("${grader.base-image:grading-base:latest}")
     private String baseImage;
@@ -299,7 +302,7 @@ public class GoldenRuntimeService {
                 Future<void> main() async {
                   WidgetsFlutterBinding.ensureInitialized();
                   // Dấu phiên bản để phân định bản build đang CHẠY với bản bị cache.
-                  debugPrint('recorder-entry semantic-v15');
+                  debugPrint('recorder-entry input-identity-v21');
                   // Giữ handle sống suốt phiên để cây ngữ nghĩa luôn được dựng.
                   SemanticsBinding.instance.ensureSemantics();
                   // SQLite THẬT trên web + nạp hidden.db TRƯỚC khi app khởi động — đúng cách
@@ -333,9 +336,35 @@ public class GoldenRuntimeService {
                 (() => {
                   const TYPE = 'GOLDEN_RECORDER_EVENT';
                   const COMMAND = 'GOLDEN_RECORDER_COMMAND';
+                  const FLUSHED = 'GOLDEN_RECORDER_FLUSHED';
                   const timers = new WeakMap();
                   const scrollOffsets = new WeakMap();
                   const send = payload => window.parent.postMessage({type: TYPE, payload}, '*');
+                  const runtimeBase = new URL(document.querySelector('base')?.getAttribute('href') || '/', location.origin);
+                  const logicalRoute = () => {
+                    const path = location.pathname.startsWith(runtimeBase.pathname)
+                      ? '/' + location.pathname.slice(runtimeBase.pathname.length).replace(/^\\/+/, '')
+                      : location.pathname;
+                    return path + location.search + location.hash;
+                  };
+                  const browserRoute = uri => {
+                    const raw = String(uri || '/');
+                    // pushState cấm đổi origin. Với deep link tuyệt đối, chỉ đưa
+                    // pathname/query/fragment vào runtime hiện tại; plan vẫn giữ nguyên
+                    // URI gốc để widget-test kiểm tra Router của bài sinh viên.
+                    try {
+                      const parsed = new URL(raw, location.origin);
+                      const clean = parsed.pathname.replace(/^\\/+/, '');
+                      return runtimeBase.pathname + clean + parsed.search + parsed.hash;
+                    } catch (_) {
+                      const clean = raw.replace(/^\\/+/, '');
+                      return runtimeBase.pathname + clean;
+                    }
+                  };
+                  const sendRoute = () => window.parent.postMessage({
+                    type: 'GOLDEN_RECORDER_ROUTE',
+                    payload: {uri: logicalRoute()}
+                  }, '*');
                   const textOf = el => ((el && (el.innerText || el.textContent)) || '').replace(/\\s+/g, ' ').trim();
                   // Dem so phan tu la CO CHU RIENG ben trong node. Mot nut that chi co 0 hoac 1.
                   // Neu tu 2 tro len thi node la KHUNG CHUA nhieu nhan khac nhau, khong phai nut.
@@ -350,6 +379,78 @@ public class GoldenRuntimeService {
                   };
                   const MAX_TEXT_LOCATOR = 80;
                   let lastReject = '';
+                  const INTERACTIVE_ROLES = new Set([
+                    'textbox', 'searchbox', 'button', 'checkbox', 'radio', 'switch',
+                    'link', 'combobox', 'listbox', 'option', 'slider', 'spinbutton',
+                    'menuitem', 'tab'
+                  ]);
+                  const INPUT_ROLES = new Set(['textbox', 'searchbox', 'combobox', 'spinbutton']);
+                  const CONTAINER_ROLES = new Set([
+                    'form', 'group', 'generic', 'region', 'main', 'list', 'listitem',
+                    'presentation', 'none'
+                  ]);
+                  const SEMANTIC_ID_ATTRIBUTES = [
+                    'flt-semantics-identifier', 'data-semantics-identifier', 'data-semantic-id'
+                  ];
+                  const semanticRoot = () => document.querySelector('flutter-view') || document.body;
+                  function roleOf(node) {
+                    const declared = (node.getAttribute('role') || '').trim().toLowerCase();
+                    if (declared) return declared;
+                    const tag = node.tagName;
+                    if (tag === 'TEXTAREA') return 'textbox';
+                    if (tag === 'SELECT') return 'combobox';
+                    if (tag === 'BUTTON') return 'button';
+                    if (tag === 'A' && node.hasAttribute('href')) return 'link';
+                    if (tag !== 'INPUT') return '';
+                    const type = (node.getAttribute('type') || 'text').toLowerCase();
+                    if (type === 'checkbox') return 'checkbox';
+                    if (type === 'radio') return 'radio';
+                    if (type === 'button' || type === 'submit' || type === 'reset') return 'button';
+                    if (type === 'range') return 'slider';
+                    if (type === 'number') return 'spinbutton';
+                    if (type === 'search') return 'searchbox';
+                    return 'textbox';
+                  }
+                  function checkpointRoleOf(node) {
+                    const role = roleOf(node);
+                    if (INPUT_ROLES.has(role)) return 'text_field';
+                    if (role === 'button' || role === 'checkbox' || role === 'switch'
+                        || role === 'radio' || role === 'link') return role;
+                    if (role === 'img' || node.tagName === 'IMG') return 'image';
+                    if (!role && textOf(node)) return 'text';
+                    return 'generic';
+                  }
+                  function semanticIdOf(node) {
+                    for (const name of SEMANTIC_ID_ATTRIBUTES) {
+                      const value = (node.getAttribute(name) || '').trim();
+                      if (value) return value;
+                    }
+                    return '';
+                  }
+                  function allSemanticElements() {
+                    const root = semanticRoot();
+                    return [root, ...(root.querySelectorAll ? root.querySelectorAll('*') : [])]
+                      .filter(node => node instanceof Element);
+                  }
+                  // DOM Flutter co the co wrapper va node con cung mot nhan. Chi dem node
+                  // sau nhat trong moi nhanh de mot control logic khong bi tinh thanh hai.
+                  function leafMost(nodes) {
+                    return nodes.filter(node => !nodes.some(other => other !== node && node.contains(other)));
+                  }
+                  function uniqueLocator(kind, value, elements = allSemanticElements()) {
+                    if (!value) return false;
+                    const matches = [];
+                    for (const node of elements) {
+                      if (kind === 'semanticId' && semanticIdOf(node) === value) matches.push(node);
+                      if (kind === 'label') {
+                        const label = node.getAttribute('aria-label') || node.getAttribute('data-semantics-label') || '';
+                        if (label === value) matches.push(node);
+                      }
+                      if (kind === 'hint' && (node.getAttribute('placeholder') || '') === value) matches.push(node);
+                      if (kind === 'text' && textOf(node) === value) matches.push(node);
+                    }
+                    return leafMost(matches).length === 1;
+                  }
                   // Flutter Web gop labelText + hintText cua TextFormField vao chung 1
                   // aria-label, ngan cach boi mot ky tu xuong dong. Tach ra de khop
                   // dung decoration.labelText / hintText ma _finder() ben phia replay
@@ -357,6 +458,108 @@ public class GoldenRuntimeService {
                   function splitLabelHint(raw) {
                     const parts = raw.split('\\n');
                     return parts.length > 1 ? {label: parts[0], hint: parts.slice(1).join('\\n')} : {label: raw};
+                  }
+                  function locatorFor(node, mode, elements) {
+                    const role = roleOf(node);
+                    const semanticId = semanticIdOf(node);
+                    if (semanticId) {
+                      if (uniqueLocator('semanticId', semanticId, elements)) {
+                        return {target: {semanticId}, attribute: 'semanticId', attributeValue: semanticId};
+                      }
+                      lastReject = 'Semantic identifier "' + semanticId + '" bi trung.';
+                    }
+                    // Scroll container khong co role tuong tac on dinh. Neu khong co identifier
+                    // rieng thi de runner cuon target mac dinh, khong suy doan bang nhan cua cha.
+                    if (mode === 'scroll') return null;
+                    const rawLabel = node.getAttribute('aria-label') || node.getAttribute('data-semantics-label');
+                    if (rawLabel && rawLabel !== 'Enable accessibility') {
+                      if (uniqueLocator('label', rawLabel, elements)) {
+                        const laONhap = INPUT_ROLES.has(role);
+                        return {target: laONhap ? splitLabelHint(rawLabel) : {label: rawLabel},
+                                attribute: 'label', attributeValue: rawLabel};
+                      }
+                      lastReject = 'Nhan semantic "' + rawLabel + '" bi trung.';
+                    }
+                    const hint = node.getAttribute('placeholder');
+                    if (hint) {
+                      if (uniqueLocator('hint', hint, elements)) {
+                        return {target: {hint}, attribute: 'hint', attributeValue: hint};
+                      }
+                      lastReject = 'Hint "' + hint + '" bi trung.';
+                    }
+                    // Text chi la duong du phong cho tap vao mot node la that. Khong bao gio
+                    // lay text tong hop cua Form/card/container lam dich thao tac.
+                    if (mode === 'tap') {
+                      const text = textOf(node);
+                      if (text && text.length <= MAX_TEXT_LOCATOR && textLeafCount(node) <= 1) {
+                        if (uniqueLocator('text', text, elements)) {
+                          return {target: {text}, attribute: 'text', attributeValue: text};
+                        }
+                        lastReject = 'Noi dung "' + text + '" bi trung.';
+                      }
+                    }
+                    return null;
+                  }
+                  // Flutter Web renders the editable HTML input in a separate editing
+                  // layer. Its composedPath therefore does not always contain the
+                  // flt-semantics node that owns the TextField/Button. Match that layer
+                  // back to exactly one interactive semantic rectangle instead of ever
+                  // falling back to a Form/group ancestor.
+                  function spatialSemanticNode(event, mode, elements) {
+                    const target = event.target instanceof Element ? event.target : null;
+                    const targetRect = target && target.getBoundingClientRect
+                      ? target.getBoundingClientRect() : null;
+                    const hasPoint = Number.isFinite(event.clientX) && Number.isFinite(event.clientY)
+                      && (event.clientX !== 0 || event.clientY !== 0);
+                    const pointX = hasPoint ? event.clientX
+                      : targetRect ? targetRect.left + targetRect.width / 2 : NaN;
+                    const pointY = hasPoint ? event.clientY
+                      : targetRect ? targetRect.top + targetRect.height / 2 : NaN;
+                    const candidates = [];
+                    for (const node of elements) {
+                      const role = roleOf(node);
+                      const isInput = node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
+                        || INPUT_ROLES.has(role);
+                      if (mode === 'input' && !isInput) continue;
+                      if (mode === 'tap' && !INTERACTIVE_ROLES.has(role)) continue;
+                      const rect = node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+                      if (!rect || rect.width <= 0 || rect.height <= 0) continue;
+                      const containsPoint = Number.isFinite(pointX) && Number.isFinite(pointY)
+                        && pointX >= rect.left && pointX <= rect.right
+                        && pointY >= rect.top && pointY <= rect.bottom;
+                      const overlapWidth = targetRect
+                        ? Math.max(0, Math.min(rect.right, targetRect.right) - Math.max(rect.left, targetRect.left)) : 0;
+                      const overlapHeight = targetRect
+                        ? Math.max(0, Math.min(rect.bottom, targetRect.bottom) - Math.max(rect.top, targetRect.top)) : 0;
+                      const overlapArea = overlapWidth * overlapHeight;
+                      const minArea = targetRect
+                        ? Math.min(rect.width * rect.height, Math.max(1, targetRect.width * targetRect.height)) : 1;
+                      const overlapRatio = overlapArea / minArea;
+                      if (!containsPoint && overlapRatio < 0.6) continue;
+                      const found = locatorFor(node, mode, elements);
+                      if (!found) continue;
+                      // Prefer the rectangle under the real pointer, then the closest
+                      // sized/most specific interactive rectangle. A deterministic
+                      // locator remains mandatory, so a visual parent cannot leak in.
+                      const sizeDelta = targetRect
+                        ? Math.abs(rect.width - targetRect.width) + Math.abs(rect.height - targetRect.height) : 0;
+                      candidates.push({found, containsPoint, overlapRatio, area: rect.width * rect.height, sizeDelta});
+                    }
+                    candidates.sort((a, b) => Number(b.containsPoint) - Number(a.containsPoint)
+                      || b.overlapRatio - a.overlapRatio || a.sizeDelta - b.sizeDelta || a.area - b.area
+                      || String(a.found.attributeValue).localeCompare(String(b.found.attributeValue)));
+                    if (!candidates.length) return null;
+                    const best = candidates[0];
+                    const equallyGood = candidates.filter(item => item !== best
+                      && item.containsPoint === best.containsPoint
+                      && Math.abs(item.overlapRatio - best.overlapRatio) < 0.01
+                      && Math.abs(item.sizeDelta - best.sizeDelta) < 1
+                      && item.found.attributeValue !== best.found.attributeValue);
+                    if (equallyGood.length) {
+                      lastReject = 'Nhieu semantic control trung khop tai cung vi tri.';
+                      return null;
+                    }
+                    return best.found;
                   }
                   // ĐÃ GỠ khối roleOf/targetOf/boolAttr + bản semanticState(el) đi kèm: merge
                   // 67fb085 kéo về hai bản semanticState trong cùng một scope (hai nhánh làm
@@ -384,60 +587,47 @@ public class GoldenRuntimeService {
                     }
                     return '';
                   }
-                  // Target ghi CA HAI: dinh danh (neu co) dung dau, nhan/chu cu giu nguyen lam
-                  // duong lui. attribute/attributeValue KHONG doi de moi cho khac (docTuSemantics,
-                  // bang tick, chong doi enter_text) van hoat dong y het ban v14.
-                  function ketQua(node, target, attribute, attributeValue) {
-                    const id = identifierOf(node, attribute === 'label' ? attributeValue : '');
-                    return {target: id ? {semantic_id: id, ...target} : target, attribute, attributeValue};
-                  }
-                  function semanticNode(event) {
+                  function semanticNode(event, mode = 'tap') {
                     lastReject = '';
-                    const path = event.composedPath ? event.composedPath() : [];
+                    const path = (event.composedPath ? event.composedPath() : [])
+                      .filter(node => node instanceof Element);
+                    const elements = allSemanticElements();
+                    // Luot 1: chi xet control tuong tac. Form/group/generic khong bao gio la
+                    // dich cua tap/enter_text, du chung co aria-label tong hop.
                     for (const node of path) {
-                      if (!(node instanceof Element)) continue;
-                      const rawLabel = node.getAttribute('aria-label') || node.getAttribute('data-semantics-label');
-                      if (rawLabel && rawLabel !== 'Enable accessibility') {
-                        // Chi tach label/hint cho O NHAP that: Flutter chi gop labelText+hintText
-                        // o input. Dong danh sach cung co nhan hai dong (title+subtitle) nhung
-                        // tach ra la sai — replay so nhan TUYET DOI se khong bao gio khop.
-                        const laONhap = node.tagName === 'INPUT' || node.tagName === 'TEXTAREA'
-                          || node.getAttribute('role') === 'textbox';
-                        return ketQua(node, laONhap ? splitLabelHint(rawLabel) : {label: rawLabel},
-                                'label', rawLabel);
-                      }
-                      const hint = node.getAttribute('placeholder');
-                      if (hint) return ketQua(node, {hint}, 'hint', hint);
-                      const text = textOf(node);
-                      if (!text) continue;
-                      // Chi nhan chu cua node khi no la mot nhan/nut THAT SU.
-                      // Truoc day chi kiem do dai <= 120 nen chu cua ca khung bi dinh lien
-                      // ("Danh muc Dinh dang yyyy-MM-dd Luu") van duoc ghi lai, roi khong bao gio
-                      // tim thay luc replay vi khong widget nao mang noi dung do.
-                      if (textLeafCount(node) > 1) {
-                        lastReject = text;
-                        return null;
-                      }
-                      if (text.length <= MAX_TEXT_LOCATOR) return ketQua(node, {text}, 'text', text);
-                      lastReject = text;
-                      return null;
+                      const role = roleOf(node);
+                      const isInput = node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
+                        || INPUT_ROLES.has(role);
+                      if (mode === 'input' && !isInput) continue;
+                      if (mode === 'tap' && !INTERACTIVE_ROLES.has(role)) continue;
+                      const found = locatorFor(node, mode, elements);
+                      if (found) return found;
                     }
+                    const spatial = spatialSemanticNode(event, mode, elements);
+                    if (spatial) return spatial;
+                    if (!lastReject) lastReject = mode === 'input'
+                      ? 'O nhap khong co semantic locator rieng.'
+                      : 'Khong tim thay semantic control tuong tac duy nhat tai vi tri bam.';
                     return null;
                   }
                   function warnNoTarget() {
-                    const message = lastReject
-                      ? 'Cham truot ra vung trong. Recorder chi doc duoc chu cua ca khung: "'
-                        + (lastReject.length > 60 ? lastReject.slice(0, 60) + '...' : lastReject)
-                        + '". Hay bam DUNG vao nut hoac o nhap, dung bam vao le hay nen.'
-                      : 'Khong suy ra duoc semantic locator cho thao tac nay. Hay bam dung vao nut hoac o nhap.';
+                    const message = 'Khong ghi thao tac de tranh chon nham element cha. '
+                      + (lastReject || 'Khong suy ra duoc semantic locator duy nhat.')
+                      + ' Hay gan Semantics(identifier: ...) duy nhat cho control neu cac nhan bi trung.';
                     window.parent.postMessage({type: 'GOLDEN_RECORDER_WARNING', payload: {message}}, '*');
                   }
                   function action(event, name, value = '') {
-                    const found = semanticNode(event);
+                    const found = semanticNode(event, 'tap');
                     if (!found) {
                       warnNoTarget();
                       return;
                     }
+                    // Thao tác logic khác là ranh giới chắc chắn của phiên nhập. Chốt
+                    // giá trị đầy đủ TRƯỚC tap để replay giữ đúng thứ tự. Bấm lại chính
+                    // ô đang nhập thì chưa phải đổi thao tác nên chưa cần chốt.
+                    const el = event.target;
+                    const laONhap = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
+                    if (goDangCho && !(laONhap && cungLocator(goDangCho.found, found))) chotEnterText();
                     send({kind: 'action', stage: 'ACTION', action: name, ...found, valueType: 'string', value, browser: 'flutter_tester'});
                   }
                   document.addEventListener('click', event => {
@@ -445,29 +635,47 @@ public class GoldenRuntimeService {
                     if (target instanceof Element && target.getAttribute('aria-label') === 'Enable accessibility') return;
                     action(event, 'tap');
                   }, true);
-                  // Chong doi theo LOCATOR chu khong theo phan tu DOM: Flutter Web tao lai the
-                  // input sau moi lan go, nen khoa theo phan tu thi moi ky tu thanh mot su kien
-                  // rieng (da gap: 8 su kien cho mot o). 700ms de go het roi moi ghi mot lan.
-                  const textTimers = new Map();
-                  // MOT phien go dang cho ghi. Flutter web thay the phan tu input sau moi
-                  // ky tu va phan tu moi thuong MAT dinh danh (khong aria-label) — nen cac
-                  // su kien go sau ky tu dau khong nhan dien duoc muc tieu, va moi cach doc
-                  // gia tri theo timer deu ra chuoi cut ("abyu", roi te hon: mot ky tu "a").
-                  // Chot dung: GHI KHI O MAT FOCUS (blur) — thoi diem duy nhat phan tu con
-                  // song va mang DU chu; timer 700ms chi la duong lui khi nguoi go dung tay
-                  // lau ma chua roi o (doc tu document.activeElement dang giu chu day du).
+                  // Một phiên nhập LOGIC đang chờ ghi. Không dùng debounce theo thời gian:
+                  // người dùng có thể dừng suy nghĩ bao lâu tùy ý rồi gõ tiếp. Flutter Web
+                  // còn thay DOM input giữa các ký tự, nên locator của lần focus/nhập đầu
+                  // phải được giữ độc lập với vòng đời phần tử DOM.
                   let goDangCho = null; // {found, el, giaTri}
-                  const textValues = new Map();
+                  let oDangFocus = null;
+                  let dangGhepBoGo = false;
+                  // Cùng một TextFormField có thể được Flutter Web công bố lúc đầu bằng
+                  // "label + hint", rồi dựng lại node chỉ còn "label" trong khi đang gõ.
+                  // So theo định danh logic ưu tiên thay vì so nguyên chuỗi aria-label để
+                  // khoảng dừng hoặc một lần rebuild DOM không chốt nhầm giá trị trung gian.
+                  const cungLocator = (a, b) => {
+                    if (!a || !b) return false;
+                    const ta = a.target || {};
+                    const tb = b.target || {};
+                    for (const key of ['semanticId', 'valueKey', 'key']) {
+                      if (ta[key] && tb[key]) return ta[key] === tb[key];
+                    }
+                    if (ta.label && tb.label) return ta.label === tb.label;
+                    if (!ta.label && !tb.label && ta.hint && tb.hint) return ta.hint === tb.hint;
+                    return a.attribute === b.attribute && a.attributeValue === b.attributeValue;
+                  };
                   // Nguon gia tri BEN nhat: node semantics (aria-label) — Flutter dong bo
                   // FULL noi dung o vao day moi khung hinh va KHONG trao node nay khi go
                   // (chi trao phan tu editing). Doc tu day thi ky tu cuoi cung khong mat.
                   function docTuSemantics(found) {
-                    if (!found || found.attribute !== 'label' && found.attribute !== 'hint') return null;
+                    if (!found || found.attribute !== 'label' && found.attribute !== 'hint'
+                        && found.attribute !== 'semanticId') return null;
                     const root = document.querySelector('flutter-view') || document.body;
                     for (const el of root.querySelectorAll('input, textarea')) {
+                      if (found.attribute === 'semanticId') {
+                        let owner = el;
+                        while (owner && owner !== root && !semanticIdOf(owner)) owner = owner.parentElement;
+                        if (owner && semanticIdOf(owner) === found.attributeValue
+                            && typeof el.value === 'string') return el.value;
+                        continue;
+                      }
                       const nhan = el.getAttribute('aria-label') || el.getAttribute('placeholder') || '';
                       if (nhan === found.attributeValue || nhan.split(String.fromCharCode(10))[0] === found.attributeValue) {
-                        if (typeof el.value === 'string' && el.value.length > 0) return el.value;
+                        // Chuỗi rỗng cũng là giá trị hợp lệ sau thao tác xóa hết.
+                        if (typeof el.value === 'string') return el.value;
                       }
                     }
                     return null;
@@ -476,94 +684,109 @@ public class GoldenRuntimeService {
                     if (!goDangCho) return;
                     const {found, el, giaTri} = goDangCho;
                     goDangCho = null;
-                    for (const k of ['go', 'blur']) { const t = textTimers.get(k); if (t) { clearTimeout(t); textTimers.delete(k); } }
-                    let value = docTuSemantics(found);
-                    if (value === null) value = (el && el.isConnected && typeof el.value === 'string') ? el.value : giaTri;
+                    // Nguồn ưu tiên: input còn sống -> node semantics hiện tại -> snapshot
+                    // đầy đủ cuối cùng từ event input. Không ghép delta ký tự nên paste,
+                    // cut, undo/redo và bộ gõ tiếng Việt đều giữ đúng giá trị cuối.
+                    let value = (el && el.isConnected && typeof el.value === 'string') ? el.value : null;
+                    if (value === null) value = docTuSemantics(found);
+                    if (value === null) value = giaTri;
                     send({kind: 'action', stage: 'ACTION', action: 'enter_text', ...found, valueType: 'string', value, browser: 'flutter_tester'});
                   }
-                  document.addEventListener('focusout', event => {
-                    const el = event.target;
-                    if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return;
-                    if (!goDangCho) return;
-                    // KHONG chot ngay: Flutter trao phan tu editing giua chung phien go va
-                    // cu trao nao cung ban focusout — chot tai day la cat cut o ky tu vua go
-                    // (dung loi "abyu" da gap). Hoan mot nhip; neu 120ms sau khong co cu go
-                    // tiep theo thi day la roi o THAT -> chot (gia tri doc tu semantics).
-                    goDangCho.el = el; goDangCho.giaTri = el.value;
-                    const old = textTimers.get('blur'); if (old) clearTimeout(old);
-                    textTimers.set('blur', setTimeout(chotEnterText, 120));
-                  }, true);
-                  document.addEventListener('input', event => {
+                  function capNhatONhap(event, canhBao = true) {
                     const target = event.target;
                     if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return;
-                    const found = semanticNode(event);
+                    const found = semanticNode(event, 'input') || oDangFocus || (goDangCho && goDangCho.found);
                     if (!found) {
-                      // Ky tu thu 2 tro di: Flutter da thay phan tu input, dinh danh mat.
-                      // Neu dang co phien go thi day la TIEP DIEN cua chinh phien do —
-                      // gia han timer va cap nhat phan tu, dung canh bao om som.
-                      if (goDangCho) {
-                        goDangCho.el = target;
-                        goDangCho.giaTri = target.value;
-                        const oldBlur = textTimers.get('blur'); if (oldBlur) { clearTimeout(oldBlur); textTimers.delete('blur'); }
-                        const old = textTimers.get('go'); if (old) clearTimeout(old);
-                        textTimers.set('go', setTimeout(chotEnterText, 700));
-                        return;
-                      }
-                      warnNoTarget();
+                      if (canhBao) warnNoTarget();
                       return;
                     }
-                    // O nhap PHAI duoc nhan dien bang nhan ngu nghia hoac goi y nhap lieu.
-                    // Nhan dang 'text' la chu tinh (vi du chu thich duoi o) — luc replay no tro
-                    // vao mot Text widget, khong phai o nhap, va enterText se bao "Bad state: No element".
-                    if (found.attribute !== 'label' && found.attribute !== 'hint') {
-                      window.parent.postMessage({type: 'GOLDEN_RECORDER_WARNING', payload: {message:
+                    if (found.attribute !== 'label' && found.attribute !== 'hint' && found.attribute !== 'semanticId') {
+                      if (canhBao) window.parent.postMessage({type: 'GOLDEN_RECORDER_WARNING', payload: {message:
                         'O nhap nay khong co nhan ngu nghia rieng; recorder chi doc duoc chu tinh "'
                         + String(found.attributeValue).slice(0, 40)
                         + '". Hay them Semantics(label: ...) hoac hintText cho o nhap trong Golden Solution.'}}, '*');
                       return;
                     }
-                    const key = found.attribute + '=' + found.attributeValue;
-                    // Su kien go sau ky tu dau co the khong nhan dien duoc muc tieu (found
-                    // null da bi chan o tren) — nen moi su kien TOI DUOC day deu cap nhat
-                    // phien dang cho; gia tri that se doc lai luc chot.
-                    // Doi o giua chung (goDangCho cua o khac con treo): chot o cu truoc.
-                    if (goDangCho && goDangCho.found.attributeValue !== found.attributeValue) chotEnterText();
+                    if (goDangCho && !cungLocator(goDangCho.found, found)) chotEnterText();
+                    oDangFocus = found;
                     goDangCho = {found, el: target, giaTri: target.value};
-                    const oldBlur = textTimers.get('blur'); if (oldBlur) { clearTimeout(oldBlur); textTimers.delete('blur'); }
-                    const old = textTimers.get('go'); if (old) clearTimeout(old);
-                    textTimers.set('go', setTimeout(chotEnterText, 700));
+                  }
+                  document.addEventListener('focusin', event => {
+                    const target = event.target;
+                    if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return;
+                    const found = semanticNode(event, 'input');
+                    if (!found) return;
+                    if (goDangCho && !cungLocator(goDangCho.found, found)) chotEnterText();
+                    oDangFocus = found;
+                  }, true);
+                  document.addEventListener('focusout', event => {
+                    const el = event.target;
+                    if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return;
+                    if (!goDangCho) return;
+                    // Không chốt theo blur DOM: Flutter tự thay input trong lúc gõ và phát
+                    // blur giả. Chỉ giữ snapshot; focusin/action/flush mới là ranh giới logic.
+                    goDangCho.el = el; goDangCho.giaTri = el.value;
+                  }, true);
+                  document.addEventListener('compositionstart', () => { dangGhepBoGo = true; }, true);
+                  document.addEventListener('compositionend', event => {
+                    dangGhepBoGo = false;
+                    capNhatONhap(event, false);
+                  }, true);
+                  document.addEventListener('input', event => capNhatONhap(event), true);
+                  document.addEventListener('keydown', event => {
+                    const el = event.target;
+                    if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) || dangGhepBoGo) return;
+                    // Tab luôn chuyển control; Enter chỉ là ranh giới ở input một dòng,
+                    // không cắt nội dung xuống dòng hợp lệ của textarea.
+                    if (event.key === 'Tab' || (event.key === 'Enter' && el instanceof HTMLInputElement)) {
+                      capNhatONhap(event, false);
+                      chotEnterText();
+                    }
                   }, true);
                   document.addEventListener('scroll', event => {
                     const target = event.target instanceof Element ? event.target : document.scrollingElement;
                     if (!target) return;
-                    const found = semanticNode(event) || {target: {}, attribute: 'none', attributeValue: ''};
+                    const found = semanticNode(event, 'scroll') || {target: {}, attribute: 'none', attributeValue: ''};
                     const previous = scrollOffsets.get(target) || {x: target.scrollLeft || 0, y: target.scrollTop || 0};
                     const current = {x: target.scrollLeft || 0, y: target.scrollTop || 0};
                     scrollOffsets.set(target, current);
                     const old = timers.get(target); if (old) clearTimeout(old);
                     timers.set(target, setTimeout(() => {
+                      chotEnterText();
                       send({kind: 'action', stage: 'ACTION', action: 'scroll', ...found, delta: {x: previous.x - current.x, y: previous.y - current.y}, valueType: 'json', value: '', browser: 'flutter_tester'});
                     }, 250));
                   }, true);
                   // Phan loai MOT node thanh locator ma engine cham tim lai duoc, DUNG thu tu
-                  // uu tien cua semanticNode (label -> hint -> text). Dong bo hai ham nay la
+                  // uu tien cua semanticNode (semanticId -> label -> hint -> text). Dong bo hai ham nay la
                   // bat buoc: item duoc tick phai tro vao dung widget ma luc replay tim thay.
-                  function semanticState(node) {
+                  // BANG TICK khac duong ghi thao tac: target phai la NHAN/CHU, khong phai
+                  // dinh danh. Tieu chi sinh ra tu day co viec kiem NOI DUNG ("man hinh co
+                  // dong chu X"); doi target sang dinh danh la tieu chi chi con kiem "co gan
+                  // dinh danh", khong ai kiem chu nua (quyet dinh Q2 ke hoach Dinh danh).
+                  // Dinh danh van duoc doc va gui kem, nhung nam NGOAI target — chi de hien.
+                  function semanticState(node, elements) {
+                    const role = roleOf(node);
                     const label = node.getAttribute('aria-label') || node.getAttribute('data-semantics-label');
                     if (label && label !== 'Enable accessibility') {
-                      // `identifier` nam NGOAI target, chi de hien tren bang tick: checkpoint tao tu
-                      // day phai tiep tuc kiem NOI DUNG bang nhan/chu (Q2), khong kiem "co dinh danh".
-                      const identifier = identifierOf(node, label);
-                      return {target: {label}, attribute: 'label', attributeValue: label, role: node.getAttribute('role') || '',
+                      // Chi identifier duoc phep dai dien cho container co chu dich. Nhan tong
+                      // hop cua Form/group/generic khong duoc dua vao inventory de tick nham.
+                      if (CONTAINER_ROLES.has(role) || textLeafCount(node) > 1 || !uniqueLocator('label', label, elements)) return null;
+                      const identifier = semanticIdOf(node) || identifierOf(node, label);
+                      return {target: {label}, attribute: 'label', attributeValue: label, role: checkpointRoleOf(node),
                               ...(identifier ? {identifier} : {})};
                     }
                     const hint = node.getAttribute('placeholder');
-                    if (hint) return {target: {hint}, attribute: 'hint', attributeValue: hint, role: 'text_field'};
+                    if (hint && uniqueLocator('hint', hint, elements)) {
+                      const idHint = semanticIdOf(node) || identifierOf(node, '');
+                      return {target: {hint}, attribute: 'hint', attributeValue: hint, role: 'text_field',
+                              ...(idHint ? {identifier: idHint} : {})};
+                    }
                     const text = textOf(node);
-                    if (!text || textLeafCount(node) > 1 || text.length > MAX_TEXT_LOCATOR) return null;
-                    // Nut tim theo chu (vd "Luu") mang dinh danh o phan tu cha — cung chi de hien.
-                    const idChu = identifierOf(node, '');
-                    return {target: {text}, attribute: 'text', attributeValue: text, role: node.getAttribute('role') || 'text',
+                    if (!text || textLeafCount(node) > 1 || text.length > MAX_TEXT_LOCATOR
+                        || !uniqueLocator('text', text, elements)) return null;
+                    // Nut tim theo chu (vd "Luu") mang dinh danh o phan tu CHA — cung chi de hien.
+                    const idChu = semanticIdOf(node) || identifierOf(node, '');
+                    return {target: {text}, attribute: 'text', attributeValue: text, role: checkpointRoleOf(node),
                             ...(idChu ? {identifier: idChu} : {})};
                   }
                   // LIET KE thanh phan man hinh hien tai cho bang tick ben trang soan de.
@@ -575,13 +798,13 @@ public class GoldenRuntimeService {
                     // CHI quet ben trong flutter-view. Quet ca document se vo nham DOM cua
                     // extension trinh duyet (tu dien, dich thuat...) — nhung thanh phan do
                     // khong ton tai trong app, tick vao la capture oracle chet vi tim khong thay.
-                    const root = document.querySelector('flutter-view') || document.body;
+                    const elements = allSemanticElements();
                     // 'flt-semantics' bat buoc phai co: node CHU TRAN (tieu de man hinh,
                     // dong "Tong thang: ...") khong mang aria-label/role nao — thieu selector
                     // nay thi quet UI bo sot toan bo text tren man hinh.
-                    root.querySelectorAll('flt-semantics, [aria-label], [data-semantics-label], input, textarea, [role]').forEach(node => {
-                      if (!(node instanceof Element)) return;
-                      const state = semanticState(node);
+                    elements.forEach(node => {
+                      if (!node.matches('flt-semantics, [flt-semantics-identifier], [data-semantics-identifier], [data-semantic-id], [aria-label], [data-semantics-label], input, textarea, [role]')) return;
+                      const state = semanticState(node, elements);
                       if (!state) return;
                       const key = state.attribute + '=' + state.attributeValue;
                       if (seen.has(key)) return;
@@ -591,8 +814,51 @@ public class GoldenRuntimeService {
                     window.parent.postMessage({type: 'GOLDEN_RECORDER_INVENTORY', payload: {items}}, '*');
                   }
                   window.addEventListener('message', event => {
-                    if (event.data && event.data.type === COMMAND && event.data.action === 'snapshot_ui') inventory();
+                    if (!event.data || event.data.type !== COMMAND) return;
+                    if (event.data.action === 'perform_route_action') {
+                      chotEnterText();
+                      const routeAction = event.data.route_action || '';
+                      const uri = event.data.uri || '/';
+                      if (routeAction === 'boot_with_uri') {
+                        history.replaceState(history.state, '', browserRoute(uri));
+                        location.reload();
+                        return;
+                      }
+                      if (routeAction === 'open_uri') {
+                        history.pushState({}, '', browserRoute(uri));
+                        // Flutter Web RouteInformationProvider nhận thay đổi history qua
+                        // popstate. pushState tự nó không phát event nên phải phát rõ ràng.
+                        window.dispatchEvent(new PopStateEvent('popstate', {state: history.state}));
+                        sendRoute();
+                      }
+                      if (routeAction === 'browser_back') history.back();
+                      if (routeAction === 'browser_forward') history.forward();
+                      if (routeAction === 'reload') location.reload();
+                    }
+                    if (event.data.action === 'snapshot_ui') {
+                      chotEnterText();
+                      inventory();
+                    }
+                    if (event.data.action === 'flush_input') {
+                      const requestId = event.data.request_id || '';
+                      let done = false;
+                      const finish = () => {
+                        if (done) return;
+                        done = true;
+                        chotEnterText();
+                        window.parent.postMessage({type: FLUSHED, payload: {request_id: requestId}}, '*');
+                      };
+                      // Cho Flutter tối đa hai frame để đồng bộ value semantics. Tab nền
+                      // có thể không chạy rAF nên vẫn có fallback 250ms.
+                      const fallback = setTimeout(finish, 250);
+                      requestAnimationFrame(() => requestAnimationFrame(() => {
+                        clearTimeout(fallback);
+                        finish();
+                      }));
+                    }
                   });
+                  window.addEventListener('popstate', () => setTimeout(sendRoute, 0));
+                  window.addEventListener('hashchange', () => setTimeout(sendRoute, 0));
                   const enable = () => {
                     const placeholder = document.querySelector('flt-semantics-placeholder[aria-label="Enable accessibility"]');
                     if (placeholder) placeholder.click();
@@ -600,6 +866,7 @@ public class GoldenRuntimeService {
                   window.addEventListener('flutter-first-frame', () => setTimeout(enable, 100));
                   setTimeout(enable, 1000);
                   window.parent.postMessage({type: 'GOLDEN_RECORDER_READY'}, '*');
+                  sendRoute();
                 })();
                 </script>
                 """;

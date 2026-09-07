@@ -43,7 +43,10 @@ class GoldenRuntimeServiceTest {
         golden.setSha256("abc123");
         when(artifacts.active("suite-1", BehaviorArtifactType.GOLDEN_SOLUTION)).thenReturn(golden);
 
-        Path root = temp.resolve("suite-1").resolve("abc123");
+        // Thư mục runtime khoá theo SHA + RECORDER_BRIDGE_VERSION (content-addressed, xem
+        // runtimeVersion()), không phải chỉ SHA — gọi qua reflection để không hardcode version.
+        String runtimeVersion = ReflectionTestUtils.invokeMethod(service, "runtimeVersion", golden);
+        Path root = temp.resolve("suite-1").resolve(runtimeVersion);
         Files.createDirectories(root);
         Files.writeString(root.resolve("index.html"), "<html></html>", StandardCharsets.UTF_8);
         Files.writeString(root.resolve("flutter.js"), "console.log('ok')", StandardCharsets.UTF_8);
@@ -72,8 +75,26 @@ class GoldenRuntimeServiceTest {
         String html = Files.readString(index, StandardCharsets.UTF_8);
         assertThat(html).contains("GOLDEN_RECORDER_EVENT");
         assertThat(html).contains("GOLDEN_RECORDER_COMMAND");
+        assertThat(html).contains("GOLDEN_RECORDER_FLUSHED");
         assertThat(html).contains("snapshot_ui");
+        assertThat(html).contains("flush_input");
+        assertThat(html).contains("GOLDEN_RECORDER_ROUTE");
+        assertThat(html).contains("perform_route_action");
+        assertThat(html).contains("history.pushState");
+        assertThat(html).contains("history.back()");
+        assertThat(html).contains("new URL(raw, location.origin)");
+        assertThat(html).contains("parsed.search + parsed.hash");
+        assertThat(html).contains("compositionend");
+        assertThat(html).doesNotContain("setTimeout(chotEnterText, 700)");
         assertThat(html).contains("aria-label");
+        assertThat(html).contains("flt-semantics-identifier");
+        assertThat(html).contains("INTERACTIVE_ROLES");
+        assertThat(html).contains("CONTAINER_ROLES");
+        assertThat(html).contains("Khong ghi thao tac de tranh chon nham element cha");
+        assertThat(html).contains("uniqueLocator('semanticId', semanticId, elements)");
+        assertThat(html).contains("function spatialSemanticNode(event, mode, elements)");
+        assertThat(html).contains("Nhieu semantic control trung khop tai cung vi tri.");
+        assertThat(html).contains("if (ta.label && tb.label) return ta.label === tb.label");
         assertThat(html).doesNotContain("document.elementFromPoint");
     }
 
@@ -94,7 +115,7 @@ class GoldenRuntimeServiceTest {
                 "name: exam_project\nflutter:\n  uses-material-design: true\n",
                 StandardCharsets.UTF_8);
 
-        ReflectionTestUtils.invokeMethod(service, "prepareProject", source, target);
+        ReflectionTestUtils.invokeMethod(service, "prepareProject", "suite-1", source, target);
 
         assertThat(Files.readString(target.resolve("lib/main.dart"), StandardCharsets.UTF_8))
                 .contains("package:exam_project/models/user.dart")

@@ -65,6 +65,7 @@ public final class TestObservationRenderer {
             Map.entry("NUMBER_MISMATCH", "SIZE_MISMATCH"),
             Map.entry("STYLE_MISMATCH", "TEXT_STYLE_MISMATCH"),
             Map.entry("LABEL_MISMATCH", "SEMANTICS_MISMATCH"),
+            Map.entry("SCROLL_DIRECTION_MISMATCH", "SCROLL_DIRECTION_MISMATCH"),
             Map.entry("ENABLED_MISMATCH", "ENABLED_MISMATCH"));
 
     /**
@@ -194,6 +195,10 @@ public final class TestObservationRenderer {
             }
             case "ENABLED_MISMATCH" -> subject + " đang ở trạng thái "
                     + ("enabled".equals(text(obs.get("seen"))) ? "bấm được" : "không bấm được") + ".";
+            case "SCROLL_DIRECTION_MISMATCH" -> {
+                String seen = text(obs.get("seen"));
+                yield "đang cuộn theo chiều " + ("horizontal".equals(seen) ? "ngang" : "dọc") + ".";
+            }
             case "OVERFLOW" -> "giao diện bị tràn khung" + suffix + ".";
             case "LAYOUT_ERROR" -> "bố cục dựng không xong" + suffix + ".";
             case "BOOT_FAILED" -> "ứng dụng không mở được, chưa hiện được nội dung nào.";

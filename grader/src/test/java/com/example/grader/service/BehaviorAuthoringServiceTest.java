@@ -82,11 +82,11 @@ class BehaviorAuthoringServiceTest {
         String recordingId = String.valueOf(recording.get("id"));
         service.appendEvent(recordingId, Map.of(
                 "kind", "action", "action", "enter_text",
-                "target", Map.of("semanticId", "field.email"),
+                "target", Map.of("label", "Email", "hint", "example@gmail.com"),
                 "value", "invalid"));
         service.appendEvent(recordingId, Map.of(
                 "kind", "action", "action", "enter_text",
-                "target", Map.of("semanticId", "field.email"),
+                "target", Map.of("label", "Email"),
                 "value", "final@example.com"));
         service.appendEvent(recordingId, Map.of(
                 "kind", "action", "action", "tap",
@@ -98,20 +98,23 @@ class BehaviorAuthoringServiceTest {
 
         Map<String, Object> scenario = service.abstractRecording(recordingId, Map.of(
                 "scenario_code", "ADD_FINAL_USER"));
-        Map<?, ?> variables = (Map<?, ?>) scenario.get("variables");
-        assertTrue(variables.containsKey("field_email"));
-        assertTrue(variables.containsKey("field_email_2"));
+        // Hai enter_text liên tiếp vào cùng semantic control là một lần nhập logic:
+        // DOM Flutter có thể rebuild giữa chừng nhưng testcase chỉ replay giá trị cuối.
         List<?> steps = (List<?>) scenario.get("steps");
-        assertEquals("${field_email}", ((Map<?, ?>) steps.get(0)).get("value"));
-        assertEquals("${field_email_2}", ((Map<?, ?>) steps.get(1)).get("value"));
+        assertEquals(2, steps.size());
+        assertEquals("final@example.com", ((Map<?, ?>) steps.get(0)).get("value"));
+        assertEquals("tap", ((Map<?, ?>) steps.get(1)).get("action"));
 
+        // Row phải dùng ĐÚNG giá trị thật (không phải "${var}"): applyDerivedDatabaseCheckpoints
+        // giờ nâng checkpoint thành entity_consistency bằng cách so khớp literal giữa row DB và
+        // text đã thấy ở checkpoint UI (dòng "final@example.com" ở trên) — không biến hoá nữa.
         Map<String, Object> completed = service.applyDerivedDatabaseCheckpoints(
                 String.valueOf(scenario.get("id")),
                 List.of(Map.of(
                         "kind", "database_observation",
                         "table", "users",
                         "operation", "INSERT",
-                        "row", Map.of("email", "generated-final@example.test"))),
+                        "row", Map.of("email", "final@example.com"))),
                 "c".repeat(64));
         List<?> checkpoints = (List<?>) completed.get("checkpoints");
         Map<?, ?> consistency = checkpoints.stream()
@@ -119,8 +122,8 @@ class BehaviorAuthoringServiceTest {
                 .filter(item -> "entity_consistency".equals(item.get("kind")))
                 .findFirst().orElseThrow();
         assertEquals("cross_layer", consistency.get("scope"));
-        assertEquals(List.of("${field_email_2}"), consistency.get("ui_values"));
-        assertEquals("${field_email_2}", ((Map<?, ?>) consistency.get("row")).get("email"));
+        assertEquals(List.of("final@example.com"), consistency.get("ui_values"));
+        assertEquals("final@example.com", ((Map<?, ?>) consistency.get("row")).get("email"));
     }
 
     @Test
@@ -217,6 +220,41 @@ class BehaviorAuthoringServiceTest {
         assertEquals("boot", ((Map<?, ?>) steps.get(0)).get("action"));
         assertEquals(1, ((List<?>) scenario.get("checkpoints")).size());
         assertEquals("ABSTRACTED", recordingRepository.findById(recordingId).orElseThrow().getStatus().name());
+    }
+
+    @Test
+    void ch7ComponentEventsSurviveAbstractionIntoScenarioCheckpoints() {
+        // Bug thật gặp phải khi chấm thử 1 bài qua đúng luồng sản phẩm (record → stop →
+        // abstract): appendEvent lưu đúng 8 event component_* Chương 7 vào raw_trace, nhưng
+        // abstractRecording lọc checkpoint theo 1 danh sách kind cứng KHÔNG có 8 kind Ch.7 —
+        // rơi vào nhánh else im lặng, mất trắng, scenario sinh ra 0 tiêu chí Chương 7. Test
+        // này khoá lại đúng hành vi: mỗi kind Ch.7 phải còn nguyên trong checkpoints sau abstract.
+        Map<String, Object> golden = service.registerGoldenApp(Map.of(
+                "name", "Golden Ch7", "runtime_url", "http://localhost:9010", "ready", true));
+        Map<String, Object> suite = service.createSuite(Map.of(
+                "suite_code", "CH7_ABSTRACT", "name", "Ch7 abstract suite", "golden_app_id", golden.get("id")));
+        Map<String, Object> recording = service.startRecording(String.valueOf(suite.get("id")), Map.of(
+                "name", "Ch7 demo", "initial_state", Map.of("reset_storage", false)));
+        String recordingId = String.valueOf(recording.get("id"));
+        service.appendEvent(recordingId, Map.of(
+                "kind", "action", "action", "tap", "target", Map.of("label", "Mở demo Chương 7")));
+        service.appendEvent(recordingId, Map.of(
+                "kind", "component_stack_order", "target", Map.of("valueKey", "ch7.stack"),
+                "expect", Map.of("bottom_key", "ch7.stack.bottom", "top_key", "ch7.stack.top")));
+        service.appendEvent(recordingId, Map.of(
+                "kind", "component_table", "target", Map.of("valueKey", "ch7.table"),
+                "expect", Map.of("row_count", "3")));
+        service.stopRecording(recordingId, Map.of());
+
+        Map<String, Object> scenario = service.abstractRecording(recordingId, Map.of(
+                "scenario_code", "CH7_DEMO", "name", "Ch7 demo", "weight", 5.0));
+
+        List<?> checkpoints = (List<?>) scenario.get("checkpoints");
+        List<String> kinds = checkpoints.stream().map(item -> String.valueOf(((Map<?, ?>) item).get("kind"))).toList();
+        assertTrue(kinds.contains("component_stack_order"),
+                "component_stack_order phải còn trong checkpoints sau abstract, danh sách hiện có: " + kinds);
+        assertTrue(kinds.contains("component_table"),
+                "component_table phải còn trong checkpoints sau abstract, danh sách hiện có: " + kinds);
     }
 
     @Test
@@ -393,9 +431,9 @@ class BehaviorAuthoringServiceTest {
                 "scenario_code", "ADD_USER",
                 "weight", 3.0));
         assertEquals("ADD_USER", scenario.get("scenario_code"));
-        @SuppressWarnings("unchecked")
-        Map<String, Object> variables = (Map<String, Object>) scenario.get("variables");
-        assertTrue(variables.containsKey("field_uid"));
+        // Không còn biến hoá: giá trị "SV01" đã gõ được giữ nguyên trong step, không đổi thành "${...}".
+        List<?> steps = (List<?>) scenario.get("steps");
+        assertEquals("SV01", ((Map<?, ?>) steps.get(0)).get("value"));
         assertFalse(((List<?>) scenario.get("checkpoints")).isEmpty());
 
         // Production gọi bước này sau khi Docker replay Golden trên Hidden DB và
@@ -413,6 +451,57 @@ class BehaviorAuthoringServiceTest {
         Map<String, Object> plan = service.executionPlan(String.valueOf(suite.get("id")));
         assertEquals("1.0", plan.get("schema_version"));
         assertEquals(1, ((List<?>) plan.get("scenarios")).size());
+    }
+
+    @Test
+    void recapturingOracleAfterGoldenChangeUpdatesGoldenShaSoPublishSucceeds() {
+        // Bug thật gặp phải khi publish thử sau khi thay Golden Solution: recapture oracle
+        // của scenario ĐÃ CÓ SẴN qua applyDerivedDatabaseCheckpoints (đường updateScenario
+        // dùng, khác đường abstractRecording lần đầu) chỉ cập nhật nội dung/observation chứ
+        // KHÔNG đụng golden_sha256 — oracle mãi mãi "READY" nhưng trỏ sha Golden CŨ, nên
+        // publish() cứ báo "chưa có oracle READY khớp phiên bản Golden hiện tại" dù đã
+        // recapture bao nhiêu lần. Test khoá lại: truyền goldenSha256 mới phải cập nhật
+        // đúng, và publish() phải thành công sau đó.
+        Map<String, Object> golden = service.registerGoldenApp(Map.of(
+                "name", "Golden resha", "runtime_url", "http://localhost:9010", "ready", true));
+        Map<String, Object> suite = service.createSuite(Map.of(
+                "suite_code", "RESHA_AFTER_GOLDEN_CHANGE", "name", "Resha suite", "golden_app_id", golden.get("id")));
+        Map<String, Object> recording = service.startRecording(String.valueOf(suite.get("id")), Map.of("name", "Add user"));
+        String recordingId = String.valueOf(recording.get("id"));
+        service.appendEvent(recordingId, Map.of(
+                "kind", "action", "action", "tap", "target", Map.of("semanticId", "action.add")));
+        service.appendEvent(recordingId, Map.of(
+                "kind", "checkpoint", "action", "observe_ui",
+                "expect", Map.of("visible_texts", List.of("ok"), "no_exception", true)));
+        service.stopRecording(recordingId, Map.of());
+        Map<String, Object> scenario = service.abstractRecording(recordingId, Map.of(
+                "scenario_code", "RESHA_SCENARIO", "weight", 1.0));
+        String scenarioId = String.valueOf(scenario.get("id"));
+        service.applyDerivedDatabaseCheckpoints(scenarioId, List.of(), "a".repeat(64));
+
+        Map<String, Object> published = service.publish(String.valueOf(suite.get("id")));
+        assertEquals("PUBLISHED", published.get("status"));
+
+        // Mô phỏng đổi Golden Solution (như markGoldenSolutionReady làm khi upload version mới).
+        com.example.grader.entity.GoldenApp goldenRow = goldenAppRepository.findById(String.valueOf(golden.get("id"))).orElseThrow();
+        goldenRow.setArtifactSha256("b".repeat(64));
+        goldenAppRepository.save(goldenRow);
+
+        IllegalStateException blocked = assertThrows(IllegalStateException.class,
+                () -> service.publish(String.valueOf(suite.get("id"))));
+        assertTrue(blocked.getMessage().contains("oracle READY"),
+                "Sau khi đổi Golden mà chưa recapture, publish phải chặn lại: " + blocked.getMessage());
+
+        // Recapture với sha Golden MỚI — mô phỏng đúng những gì GoldenOracleCaptureService làm.
+        service.applyDerivedDatabaseCheckpoints(scenarioId, List.of(), "c".repeat(64), "b".repeat(64));
+
+        com.example.grader.entity.OracleSnapshot refreshed =
+                oracleRepository.findFirstByScenarioIdOrderByCreatedAtDesc(scenarioId).orElseThrow();
+        assertEquals("b".repeat(64), refreshed.getGoldenSha256(),
+                "Recapture phải cập nhật golden_sha256 sang phiên bản Golden vừa dùng để replay");
+
+        Map<String, Object> republished = service.publish(String.valueOf(suite.get("id")));
+        assertEquals("PUBLISHED", republished.get("status"));
     }
 
     @Test
@@ -625,5 +714,72 @@ class BehaviorAuthoringServiceTest {
         return new ObjectMapper().readValue(
                 scenarioRepository.findById(scenarioId).orElseThrow().getCheckpointsJson(),
                 new TypeReference<List<Map<String, Object>>>() {});
+    }
+
+    @Test
+    void recordsRouteActionsRouteStateAndRelativeLayoutWithoutCoordinates() {
+        Map<String, Object> golden = service.registerGoldenApp(Map.of(
+                "name", "Golden routing", "runtime_url", "http://localhost:9010", "ready", true));
+        Map<String, Object> suite = service.createSuite(Map.of(
+                "suite_code", "ROUTE_LAYOUT", "name", "Route and layout",
+                "golden_app_id", golden.get("id")));
+        Map<String, Object> recording = service.startRecording(String.valueOf(suite.get("id")), Map.of());
+        String recordingId = String.valueOf(recording.get("id"));
+
+        service.appendEvent(recordingId, Map.of(
+                "kind", "action", "action", "boot_with_uri", "uri", "/movies/42?tab=cast"));
+        service.appendEvent(recordingId, Map.of(
+                "kind", "action", "action", "browser_back"));
+        service.appendEvent(recordingId, Map.of(
+                "kind", "action", "action", "browser_forward"));
+        service.appendEvent(recordingId, Map.of(
+                "kind", "route_state", "expect", Map.of(
+                        "path", "/movies/42", "query", Map.of("tab", "cast"), "can_pop", true)));
+        service.appendEvent(recordingId, Map.of(
+                "kind", "layout_relation",
+                "target", Map.of("semanticId", "field.email"),
+                "relative_to", Map.of("semanticId", "action.save"),
+                "relation", "above", "tolerance_pct", 4));
+        service.stopRecording(recordingId, Map.of());
+
+        Map<String, Object> scenario = service.abstractRecording(recordingId, Map.of(
+                "scenario_code", "DETAIL_ROUTE"));
+        List<?> steps = (List<?>) scenario.get("steps");
+        assertEquals("boot_with_uri", ((Map<?, ?>) steps.get(0)).get("action"));
+        assertEquals("/movies/42?tab=cast", ((Map<?, ?>) steps.get(0)).get("uri"));
+        List<?> checkpoints = (List<?>) scenario.get("checkpoints");
+        assertEquals(List.of("route_state", "layout_relation"), checkpoints.stream()
+                .map(Map.class::cast).map(item -> item.get("kind")).toList());
+
+        Map<?, ?> layout = checkpoints.stream().map(Map.class::cast)
+                .filter(item -> "layout_relation".equals(item.get("kind"))).findFirst().orElseThrow();
+        assertEquals(1, service.applyCapturedLayout(String.valueOf(scenario.get("id")), Map.of(
+                String.valueOf(layout.get("id")), Map.of("relation", "same_row"))));
+        Map<String, Object> refreshedSuite = service.getSuite(String.valueOf(suite.get("id")));
+        Map<String, Object> refreshed = (Map<String, Object>) ((List<?>) refreshedSuite.get("scenarios")).get(0);
+        Map<?, ?> bakedLayout = ((List<?>) refreshed.get("checkpoints")).stream().map(Map.class::cast)
+                .filter(item -> "layout_relation".equals(item.get("kind"))).findFirst().orElseThrow();
+        assertEquals("same_row", ((Map<?, ?>) bakedLayout.get("expect")).get("relation"));
+    }
+
+    @Test
+    void rejectsUnsafeOrIncompleteRouteAndLayoutEvents() {
+        Map<String, Object> golden = service.registerGoldenApp(Map.of(
+                "name", "Golden invalid routing", "runtime_url", "http://localhost:9010", "ready", true));
+        Map<String, Object> suite = service.createSuite(Map.of(
+                "suite_code", "INVALID_ROUTE_LAYOUT", "name", "Invalid route and layout",
+                "golden_app_id", golden.get("id")));
+        Map<String, Object> recording = service.startRecording(String.valueOf(suite.get("id")), Map.of());
+        String recordingId = String.valueOf(recording.get("id"));
+
+        assertThrows(IllegalArgumentException.class, () -> service.appendEvent(recordingId, Map.of(
+                "kind", "action", "action", "open_uri", "uri", "file:///secret")));
+        assertThrows(IllegalArgumentException.class, () -> service.appendEvent(recordingId, Map.of(
+                "kind", "route_state", "expect", Map.of())));
+        assertThrows(IllegalArgumentException.class, () -> service.appendEvent(recordingId, Map.of(
+                "kind", "layout_relation", "target", Map.of("text", "A"), "relation", "above")));
+        service.appendEvent(recordingId, Map.of("kind", "action", "action", "boot"));
+        assertThrows(IllegalArgumentException.class, () -> service.appendEvent(recordingId, Map.of(
+                "kind", "action", "action", "boot_with_uri", "uri", "/too-late")));
     }
 }
