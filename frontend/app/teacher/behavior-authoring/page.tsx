@@ -298,7 +298,7 @@ function BehaviorAuthoringEditor() {
     direct: { name: string; version: string; protected: boolean }[];
     transitive: string[];
   } | null>(null);
-  const [moGoiKeoTheo, setMoGoiKeoTheo] = useState(false);
+  const [moGoiChoPhep, setMoGoiChoPhep] = useState(false);
   const [suite, setSuite] = useState<Suite | null>(null);
   const [availableSuites, setAvailableSuites] = useState<Suite[]>([]);
   const [recording, setRecording] = useState<Recording | null>(null);
@@ -453,6 +453,21 @@ function BehaviorAuthoringEditor() {
   const batTatPackage = (ten: string) => setAllowedPackages((current) => (GOI_LOI.includes(ten)
     ? current
     : current.includes(ten) ? current.filter((p) => p !== ten) : [...current, ten]));
+  // Thứ tự cố định cho cả hai cột: gói lõi, rồi thư viện khai thẳng trong ảnh chấm, rồi những
+  // gói kéo theo mà bộ đề ĐANG cho phép. Bấm một thẻ chỉ làm nó nhảy cột, thẻ khác đứng yên.
+  //
+  // Cố tình KHÔNG bày hết tám chục gói kéo theo: đó là ruột của Dart và của chính các thư viện
+  // trên (async, meta, collection...), bày ra thì cột khả dụng thành bãi rác và che mất mười
+  // mấy cái thật sự đáng cân nhắc. Gói kéo theo nào bộ đề đã lưu thì vẫn hiện để bỏ rồi chọn
+  // lại được; muốn thêm cái mới thì thêm ở trang "Thư viện chấm".
+  const thuTuGoi = [
+    ...GOI_LOI,
+    ...(goiCuaAnh?.direct || []).map((p) => p.name),
+    ...(goiCuaAnh?.transitive || []).filter((ten) => savedAllowedPackages.includes(ten)),
+    ...allowedPackages,
+  ].filter((ten, i, ds) => ds.indexOf(ten) === i);
+  const goiDangDung = thuTuGoi.filter((ten) => GOI_LOI.includes(ten) || allowedPackages.includes(ten));
+  const goiKhaDung = thuTuGoi.filter((ten) => !GOI_LOI.includes(ten) && !allowedPackages.includes(ten));
 
   useEffect(() => setRecorderReady(false), [previewUrl]);
 
@@ -1573,79 +1588,69 @@ function BehaviorAuthoringEditor() {
               </div>
             </div>
           </div>
-          <div className="mt-3">
-            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-              <span className="text-xs font-bold uppercase tracking-widest text-slate-500">
-                Package bài sinh viên được phép dùng
-              </span>
-              <span className="text-xs text-slate-400">
-                {allowedPackages.length} đang cho phép
-                {goiCuaAnh && !goiCuaAnh.imageRead && " · chưa đọc được ảnh chấm"}
-              </span>
-            </div>
-            {goiCuaAnh && !goiCuaAnh.imageRead && (
-              <p className="mb-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
-                Chưa đọc được danh sách thư viện của ảnh chấm (Docker chưa bật hoặc ảnh chưa build). Danh sách dưới là những gì bộ đề đang lưu.
-              </p>
-            )}
-            <div className="grid gap-1 sm:grid-cols-2 xl:grid-cols-3">
-              {(goiCuaAnh?.direct.length
-                ? goiCuaAnh.direct.map((p) => p.name)
-                : allowedPackages
-              ).map((ten) => {
-                const loi = GOI_LOI.includes(ten);
-                return (
-                  <label key={ten} className={`flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm ${loi ? "opacity-60" : "cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800"}`}>
-                    <input type="checkbox" checked={loi || allowedPackages.includes(ten)} disabled={loi} onChange={() => batTatPackage(ten)} />
-                    <span className="truncate font-mono text-xs">{ten}</span>
-                    {loi && <span className="ml-auto shrink-0 text-[10px] text-slate-400">lõi</span>}
-                  </label>
-                );
-              })}
-            </div>
-            {Boolean(goiCuaAnh?.transitive.length) && (
-              <div className="mt-2">
-                <button type="button" onClick={() => setMoGoiKeoTheo((v) => !v)} className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-indigo-500">
-                  <ChevronDown size={14} className={`transition-transform ${moGoiKeoTheo ? "" : "-rotate-90"}`} />
-                  {goiCuaAnh?.transitive.length} gói kéo theo
-                  {(() => {
-                    const dangBat = (goiCuaAnh?.transitive || []).filter((t) => allowedPackages.includes(t)).length;
-                    return dangBat > 0 ? ` · ${dangBat} đang cho phép` : "";
-                  })()}
-                </button>
-                {moGoiKeoTheo && (
-                  <div className="mt-1 grid max-h-56 gap-1 overflow-auto rounded-lg border border-dashed border-slate-300 p-2 sm:grid-cols-3 xl:grid-cols-4 dark:border-slate-700">
-                    {(goiCuaAnh?.transitive || []).map((ten) => (
-                      <label key={ten} className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs hover:bg-slate-100 dark:hover:bg-slate-800">
-                        <input type="checkbox" checked={allowedPackages.includes(ten)} onChange={() => batTatPackage(ten)} />
-                        <span className="truncate font-mono">{ten}</span>
-                      </label>
-                    ))}
+          {!suite && <><button onClick={createSuite} disabled={Boolean(busy)} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-3 font-bold text-white hover:bg-indigo-500 disabled:opacity-50">{busy === "create" ? <Loader2 className="animate-spin" size={18} /> : <Plus size={18} />} Tạo bộ chấm mới</button>{availableSuites.length > 0 && <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">{availableSuites.map((item) => <div key={item.id} className="relative rounded-xl border border-slate-200 transition hover:border-indigo-400 hover:bg-indigo-50/50 dark:border-slate-700 dark:hover:bg-indigo-950/20"><button onClick={() => void openSuite(item)} className="block w-full p-4 pr-14 text-left"><div className="flex items-center justify-between gap-2"><span className="font-bold">{item.name}</span><span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">{item.status}</span></div><p className="mt-1 font-mono text-xs text-indigo-500">{item.suite_code}</p><p className="mt-2 text-xs text-slate-500">Mã đề: {item.exam_id || "chưa gắn"}</p></button><button onClick={() => deleteSuite(item)} disabled={Boolean(busy)} title="Xóa bộ chấm" className="absolute bottom-3 right-3 rounded-lg border border-rose-300 p-2 text-rose-500 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-800 dark:hover:bg-rose-950"><Trash2 size={16} /></button></div>)}</div>}</>}
+        </section>
+
+          <section className="rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-900">
+            <button onClick={() => setMoGoiChoPhep((v) => !v)} className="flex w-full items-center gap-2 px-5 py-3 text-left">
+              <ChevronDown size={16} className={`shrink-0 text-slate-400 transition-transform ${moGoiChoPhep ? "" : "-rotate-90"}`} />
+              <h3 className="font-bold">Package bài sinh viên được phép dùng</h3>
+              <span className="text-xs text-slate-500">{allowedPackages.length} gói</span>
+              {allowedPackagesChanged && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-700 dark:bg-amber-950 dark:text-amber-300">chưa lưu</span>}
+            </button>
+            {moGoiChoPhep && <div className="border-t border-slate-200 px-5 py-4 dark:border-slate-700">
+              {goiCuaAnh && !goiCuaAnh.imageRead && (
+                <p className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
+                  Chưa đọc được thư viện của ảnh chấm (Docker chưa bật hoặc ảnh chưa build). Cột khả dụng vì thế đang trống; danh sách bên trái là những gì bộ đề đã lưu.
+                </p>
+              )}
+              <div className="grid gap-3 sm:grid-cols-2">
+                {([["dung", "Package được dùng", goiDangDung], ["kha", "Các package khả dụng", goiKhaDung]] as const).map(([ma, tieuDe, danhSach]) => (
+                  <div key={ma}>
+                    <p className="mb-1.5 text-xs font-bold uppercase tracking-widest text-slate-500">{tieuDe} ({danhSach.length})</p>
+                    <div className="flex min-h-24 flex-wrap content-start gap-1.5 rounded-xl border border-dashed border-slate-300 p-2 dark:border-slate-700">
+                      {danhSach.length === 0 && <span className="px-1 text-xs text-slate-400">trống</span>}
+                      {danhSach.map((ten) => {
+                        const loi = GOI_LOI.includes(ten);
+                        return (
+                          <button
+                            key={ten}
+                            type="button"
+                            disabled={loi}
+                            onClick={() => batTatPackage(ten)}
+                            title={loi ? "Gói lõi, bỏ đi thì không bài nào biên dịch được" : (ma === "dung" ? "Bấm để bỏ khỏi đề" : "Bấm để cho phép")}
+                            className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 font-mono text-xs ${loi
+                              ? "cursor-not-allowed bg-slate-100 text-slate-400 dark:bg-slate-800"
+                              : ma === "dung"
+                                ? "bg-indigo-100 font-semibold text-indigo-700 hover:bg-rose-100 hover:text-rose-700 dark:bg-indigo-950 dark:text-indigo-300"
+                                : "border border-slate-300 text-slate-500 hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-600 dark:text-slate-400"}`}
+                          >
+                            {ten}{loi && <span className="text-[10px]">lõi</span>}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
-                )}
+                ))}
               </div>
-            )}
-            <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
-              <p className="max-w-2xl text-xs text-slate-500">
-                Chỉ những gói tick ở đây mới được import trong bài; bài dùng gói khác bị chặn ngay trước khi
-                biên dịch và chấm 0đ. Danh sách lấy từ chính ảnh chấm nên tick gì cũng có thật. Sửa mục này
-                không làm mất oracle đã capture.
-              </p>
-              {suite && (
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+                <p className="max-w-2xl text-xs text-slate-500">
+                  Chỉ những gói bên trái mới được import trong bài; bài dùng gói khác bị chặn ngay trước khi biên dịch và
+                  chấm 0đ. Cột phải là thư viện có thật trong ảnh chấm, nên chọn gì cũng chạy được. Sửa mục này không làm
+                  mất oracle đã capture.
+                </p>
                 <button
                   type="button"
                   onClick={saveAllowedPackages}
                   disabled={!allowedPackagesChanged || !allowedPackages.length || Boolean(busy)}
-                  className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-indigo-400 px-3 py-2 text-sm font-bold text-indigo-600 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-40 dark:text-indigo-300 dark:hover:bg-indigo-950"
+                  className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-indigo-400 px-3 py-2 text-sm font-bold text-indigo-600 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-indigo-700 dark:text-indigo-300 dark:hover:bg-indigo-950/40"
                 >
                   {busy === "save-allowed-packages" ? <Loader2 size={16} className="animate-spin" /> : <ShieldCheck size={16} />}
                   Lưu package
                 </button>
-              )}
-            </div>
-          </div>
-          {!suite && <><button onClick={createSuite} disabled={Boolean(busy)} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-3 font-bold text-white hover:bg-indigo-500 disabled:opacity-50">{busy === "create" ? <Loader2 className="animate-spin" size={18} /> : <Plus size={18} />} Tạo bộ chấm mới</button>{availableSuites.length > 0 && <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">{availableSuites.map((item) => <div key={item.id} className="relative rounded-xl border border-slate-200 transition hover:border-indigo-400 hover:bg-indigo-50/50 dark:border-slate-700 dark:hover:bg-indigo-950/20"><button onClick={() => void openSuite(item)} className="block w-full p-4 pr-14 text-left"><div className="flex items-center justify-between gap-2"><span className="font-bold">{item.name}</span><span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">{item.status}</span></div><p className="mt-1 font-mono text-xs text-indigo-500">{item.suite_code}</p><p className="mt-2 text-xs text-slate-500">Mã đề: {item.exam_id || "chưa gắn"}</p></button><button onClick={() => deleteSuite(item)} disabled={Boolean(busy)} title="Xóa bộ chấm" className="absolute bottom-3 right-3 rounded-lg border border-rose-300 p-2 text-rose-500 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-800 dark:hover:bg-rose-950"><Trash2 size={16} /></button></div>)}</div>}</>}
-        </section>
+              </div>
+            </div>}
+          </section>
 
         {suite && <>
           <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">

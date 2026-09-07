@@ -1491,7 +1491,14 @@ public class ExamService {
             for (String raw : Files.readAllLines(pubspec, StandardCharsets.UTF_8)) {
                 String line = raw.replace("\t", "  ");
                 if (line.isBlank() || line.trim().startsWith("#")) continue;
-                if (!line.startsWith(" ")) { inDeps = line.split(":")[0].trim().equals("dependencies"); continue; }
+                // Đọc CẢ dev_dependencies: flutter_test nằm ở đó. Bỏ khối này thì trang thư viện
+                // bảo "flutter_test là gói lõi" mà không bày ra dòng nào, còn bảng tick bên soạn
+                // đề thì thiếu đúng gói mọi bài đều cần.
+                if (!line.startsWith(" ")) {
+                    String khoi = line.split(":")[0].trim();
+                    inDeps = khoi.equals("dependencies") || khoi.equals("dev_dependencies");
+                    continue;
+                }
                 if (!inDeps) continue;
                 java.util.regex.Matcher m = entry.matcher(line);
                 if (!m.find()) continue;
@@ -1500,7 +1507,10 @@ public class ExamService {
                 p.put("name", name);
                 boolean isBlock = val.isEmpty();                 // vd flutter: → sdk block ở dòng dưới
                 p.put("version", isBlock ? "(flutter sdk)" : val);
-                p.put("protected", isBlock || name.equals("flutter") || name.equals("flutter_test"));
+                // flutter_lints chỉ dùng cho phân tích mã, không import được trong bài — khoá
+                // luôn để không ai xóa nhầm rồi tưởng đã cấm được gì.
+                p.put("protected", isBlock || name.equals("flutter") || name.equals("flutter_test")
+                        || name.equals("flutter_lints"));
                 out.add(p);
             }
         } catch (Exception e) {
