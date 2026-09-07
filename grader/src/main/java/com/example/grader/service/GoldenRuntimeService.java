@@ -30,10 +30,12 @@ import java.util.zip.ZipFile;
 public class GoldenRuntimeService {
     private static final long MAX_EXPANDED_BYTES = 1_000L * 1024 * 1024;
     private static final int MAX_ZIP_ENTRIES = 20_000;
-    // v21: bảng tick giữ nhãn/chữ làm target và gửi kèm định danh để HIỆN (v20 đổi target
-    // sang định danh, làm tiêu chí thôi kiểm nội dung) · v20: locator duy nhất + chốt giá trị
-    // nhập theo ranh giới thao tác · v4: quét thành phần CHỈ trong flutter-view.
-    private static final String RECORDER_BRIDGE_VERSION = "input-identity-v21";
+    // v22: bảng tick KHÔNG loại thành phần lặp lại nữa, bày một dòng kèm số lượng (v20 vứt
+    // sạch nút Xóa của mọi dòng vì nhãn trùng nhau) · v21: bảng tick giữ nhãn/chữ làm target và
+    // gửi kèm định danh để HIỆN (v20 đổi target sang định danh, làm tiêu chí thôi kiểm nội
+    // dung) · v20: locator duy nhất + chốt giá trị nhập theo ranh giới thao tác · v4: quét
+    // thành phần CHỈ trong flutter-view.
+    private static final String RECORDER_BRIDGE_VERSION = "input-identity-v22";
 
     @Value("${grader.base-image:grading-base:latest}")
     private String baseImage;
@@ -302,7 +304,7 @@ public class GoldenRuntimeService {
                 Future<void> main() async {
                   WidgetsFlutterBinding.ensureInitialized();
                   // Dấu phiên bản để phân định bản build đang CHẠY với bản bị cache.
-                  debugPrint('recorder-entry input-identity-v21');
+                  debugPrint('recorder-entry input-identity-v22');
                   // Giữ handle sống suốt phiên để cây ngữ nghĩa luôn được dựng.
                   SemanticsBinding.instance.ensureSemantics();
                   // SQLite THẬT trên web + nạp hidden.db TRƯỚC khi app khởi động — đúng cách
@@ -437,8 +439,12 @@ public class GoldenRuntimeService {
                   function leafMost(nodes) {
                     return nodes.filter(node => !nodes.some(other => other !== node && node.contains(other)));
                   }
-                  function uniqueLocator(kind, value, elements = allSemanticElements()) {
-                    if (!value) return false;
+                  // Dem CO BAO NHIEU thanh phan mang cung mot khoa dinh vi. Tach rieng khoi
+                  // uniqueLocator vi hai cho can hai thu khac nhau: duong GHI THAO TAC can
+                  // "dung mot" (cham dai mot trong sau nut Xoa la ghi nham dong), con BANG TICK
+                  // can biet "co sau cai" de bay ra mot dong kem so luong.
+                  function soKhopLocator(kind, value, elements = allSemanticElements()) {
+                    if (!value) return 0;
                     const matches = [];
                     for (const node of elements) {
                       if (kind === 'semanticId' && semanticIdOf(node) === value) matches.push(node);
@@ -449,7 +455,10 @@ public class GoldenRuntimeService {
                       if (kind === 'hint' && (node.getAttribute('placeholder') || '') === value) matches.push(node);
                       if (kind === 'text' && textOf(node) === value) matches.push(node);
                     }
-                    return leafMost(matches).length === 1;
+                    return leafMost(matches).length;
+                  }
+                  function uniqueLocator(kind, value, elements = allSemanticElements()) {
+                    return soKhopLocator(kind, value, elements) === 1;
                   }
                   // Flutter Web gop labelText + hintText cua TextFormField vao chung 1
                   // aria-label, ngan cach boi mot ky tu xuong dong. Tach ra de khop
@@ -770,24 +779,32 @@ public class GoldenRuntimeService {
                     if (label && label !== 'Enable accessibility') {
                       // Chi identifier duoc phep dai dien cho container co chu dich. Nhan tong
                       // hop cua Form/group/generic khong duoc dua vao inventory de tick nham.
-                      if (CONTAINER_ROLES.has(role) || textLeafCount(node) > 1 || !uniqueLocator('label', label, elements)) return null;
+                      if (CONTAINER_ROLES.has(role) || textLeafCount(node) > 1) return null;
+                      // KHONG loai thanh phan lap lai. Nut Xoa cua moi dong danh sach mang cung
+                      // mot nhan nen phep kiem "dung mot" cua ban v20 vut sach chung khoi bang
+                      // tick — dung cai ma may cham nay da biet cham theo nhom (moi dong mot
+                      // cai, vi tri do tuong doi trong dong). Bay ra MOT dong kem so luong.
+                      const soNhan = soKhopLocator('label', label, elements);
+                      if (soNhan === 0) return null;
                       const identifier = semanticIdOf(node) || identifierOf(node, label);
                       return {target: {label}, attribute: 'label', attributeValue: label, role: checkpointRoleOf(node),
-                              ...(identifier ? {identifier} : {})};
+                              ...(soNhan > 1 ? {count: soNhan} : {}), ...(identifier ? {identifier} : {})};
                     }
                     const hint = node.getAttribute('placeholder');
-                    if (hint && uniqueLocator('hint', hint, elements)) {
+                    const soGoiY = soKhopLocator('hint', hint || '', elements);
+                    if (hint && soGoiY > 0) {
                       const idHint = semanticIdOf(node) || identifierOf(node, '');
                       return {target: {hint}, attribute: 'hint', attributeValue: hint, role: 'text_field',
-                              ...(idHint ? {identifier: idHint} : {})};
+                              ...(soGoiY > 1 ? {count: soGoiY} : {}), ...(idHint ? {identifier: idHint} : {})};
                     }
                     const text = textOf(node);
-                    if (!text || textLeafCount(node) > 1 || text.length > MAX_TEXT_LOCATOR
-                        || !uniqueLocator('text', text, elements)) return null;
+                    if (!text || textLeafCount(node) > 1 || text.length > MAX_TEXT_LOCATOR) return null;
+                    const soChu = soKhopLocator('text', text, elements);
+                    if (soChu === 0) return null;
                     // Nut tim theo chu (vd "Luu") mang dinh danh o phan tu CHA — cung chi de hien.
                     const idChu = semanticIdOf(node) || identifierOf(node, '');
                     return {target: {text}, attribute: 'text', attributeValue: text, role: checkpointRoleOf(node),
-                            ...(idChu ? {identifier: idChu} : {})};
+                            ...(soChu > 1 ? {count: soChu} : {}), ...(idChu ? {identifier: idChu} : {})};
                   }
                   // LIET KE thanh phan man hinh hien tai cho bang tick ben trang soan de.
                   // Truoc day lenh nay goi ham semanticState CHUA TON TAI — ReferenceError,

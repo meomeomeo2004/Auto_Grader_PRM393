@@ -365,7 +365,7 @@ function BehaviorAuthoringEditor() {
   const [scenarioWeight, setScenarioWeight] = useState(10);
   // Bảng tick thành phần giao diện — đổ về từ lệnh quét màn hình của bridge.
   // null = chưa quét; mảng = đang mở bảng tick.
-  const [uiInventory, setUiInventory] = useState<{ attribute: string; value: string; role: string; identifier: string; checked: boolean }[] | null>(null);
+  const [uiInventory, setUiInventory] = useState<{ attribute: string; value: string; role: string; identifier: string; count: number; checked: boolean }[] | null>(null);
   const [uiScreenName, setUiScreenName] = useState("");
   // Kiểm kê ICON của màn cuối luồng, do MÁY CHẤM đo lúc capture. Không quét được qua
   // DOM như bảng trên: nút chỉ có hình thì web không phơi aria-label nào, nên đúng những
@@ -1508,6 +1508,10 @@ function BehaviorAuthoringEditor() {
                 // Định danh recorder đọc được, chỉ để HIỆN. Không đưa vào target checkpoint: tiêu
                 // chí "màn hình có X" phải tiếp tục kiểm nội dung bằng nhãn/chữ (quyết định Q2).
                 identifier: typeof it.identifier === "string" ? it.identifier : "",
+                // Số thành phần mang cùng khoá này. Nút Xóa của mọi dòng danh sách gộp thành
+                // MỘT dòng ở đây; máy chấm biết chấm theo nhóm (mỗi dòng một cái, vị trí đo
+                // tương đối trong dòng) nên tick một lần là đủ cho cả sáu.
+                count: Number(it.count || 1),
                 // label/hint là thành phần ngữ nghĩa thật (nút, ô nhập) → tick sẵn. Chữ trần có
             // thể là DỮ LIỆU đang hiển thị chứ không phải khung màn hình — để giảng viên tự cân nhắc.
             checked: it.attribute === "semanticId" || it.attribute === "label" || it.attribute === "hint",
@@ -1704,6 +1708,7 @@ function BehaviorAuthoringEditor() {
                         <input type="checkbox" checked={it.checked} onChange={() => setUiInventory((prev) => prev ? prev.map((x, j) => (j === i ? { ...x, checked: !x.checked } : x)) : prev)} />
                         <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold ${it.attribute === "label" ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300" : it.attribute === "hint" ? "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300" : "bg-slate-100 text-slate-500 dark:bg-slate-800"}`}>{it.attribute}</span>
                         <span className="truncate">{it.value}</span>
+                        {it.count > 1 && <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-700 dark:bg-amber-950 dark:text-amber-300" title="Thành phần này lặp lại trên màn hình, thường là mỗi dòng danh sách một cái. Tick một lần là chấm cả nhóm: mỗi dòng phải có đúng một, vị trí đo tương đối trong dòng, màu đo trên mọi thể hiện.">×{it.count} · lặp</span>}
                         {it.identifier && <span className="shrink-0 rounded bg-teal-100 px-1.5 py-0.5 font-mono text-[10px] font-bold text-teal-700 dark:bg-teal-950 dark:text-teal-300" title="Định danh Semantics(identifier:) của thành phần. Checkpoint tạo từ đây vẫn kiểm nội dung bằng nhãn/chữ.">{it.identifier}</span>}
                         {it.role && <span className="ml-auto text-[10px] text-slate-400">{it.role}</span>}
                       </label>
