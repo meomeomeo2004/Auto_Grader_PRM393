@@ -1597,6 +1597,22 @@ function BehaviorAuthoringEditor() {
           {!suite && <><button onClick={createSuite} disabled={Boolean(busy)} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-3 font-bold text-white hover:bg-indigo-500 disabled:opacity-50">{busy === "create" ? <Loader2 className="animate-spin" size={18} /> : <Plus size={18} />} Tạo bộ chấm mới</button>{availableSuites.length > 0 && <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">{availableSuites.map((item) => <div key={item.id} className="relative rounded-xl border border-slate-200 transition hover:border-indigo-400 hover:bg-indigo-50/50 dark:border-slate-700 dark:hover:bg-indigo-950/20"><button onClick={() => void openSuite(item)} className="block w-full p-4 pr-14 text-left"><div className="flex items-center justify-between gap-2"><span className="font-bold">{item.name}</span><span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">{item.status}</span></div><p className="mt-1 font-mono text-xs text-indigo-500">{item.suite_code}</p><p className="mt-2 text-xs text-slate-500">Mã đề: {item.exam_id || "chưa gắn"}</p></button><button onClick={() => deleteSuite(item)} disabled={Boolean(busy)} title="Xóa bộ chấm" className="absolute bottom-3 right-3 rounded-lg border border-rose-300 p-2 text-rose-500 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-800 dark:hover:bg-rose-950"><Trash2 size={16} /></button></div>)}</div>}</>}
         </section>
 
+        {suite && <>
+          <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
+            <div className="mb-4 flex flex-wrap items-end justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-widest text-indigo-500">Bước 2</p><h2 className="text-xl font-bold">Bảy thành phần của bộ chấm</h2><p className="mt-1 text-sm text-slate-500">Chỉ cần tải Database phát sinh viên, Database ẩn và Golden Solution. Khi kết thúc record, hệ thống tự sinh Automation Record, Testcase Definition và replay Golden với Database ẩn để capture Output Database.</p></div><span className="text-sm font-semibold">{7 - (readiness?.missing.length || 0)}/7 hợp lệ</span></div>
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              {ARTIFACTS.map((item) => {
+                const current = activeByType[item.type]; const Icon = item.icon; const uploading = busy === `upload-${item.type}`;
+                return <div key={item.type} className={`relative rounded-xl border p-4 ${item.owner === "system" ? "border-violet-200 bg-violet-50/60 dark:border-violet-900 dark:bg-violet-950/20" : "border-slate-200 dark:border-slate-700"}`}>
+                  <div className="flex items-start justify-between"><Icon size={21} className={item.owner === "system" ? "text-violet-500" : "text-indigo-500"} />{current ? <CheckCircle2 size={19} className="text-emerald-500" /> : <Circle size={19} className="text-slate-300" />}</div>
+                  <h3 className="mt-3 font-bold">{item.title}</h3><p className="mt-1 min-h-10 text-xs text-slate-500">{item.hint}</p>
+                  {current && <p className="mt-2 truncate text-xs font-medium text-emerald-600" title={current.sha256}>{current.file_name} · v{current.version} · {bytes(current.size_bytes)}</p>}
+                  {item.owner === "teacher" ? <label className="mt-3 inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 text-xs font-bold hover:border-indigo-400 dark:border-slate-700">{uploading ? <Loader2 size={15} className="animate-spin" /> : <UploadCloud size={15} />} {current ? "Tạo version mới" : "Chọn file"}<input type="file" accept={item.accept} className="hidden" onChange={(e) => uploadArtifact(item.type, e.target.files?.[0])} /></label> : <span className="mt-3 inline-block rounded-lg bg-violet-100 px-3 py-2 text-xs font-bold text-violet-700 dark:bg-violet-900/50 dark:text-violet-200">Tự động sinh</span>}
+                </div>;
+              })}
+            </div>
+          </section>
+
           <section className="rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-900">
             <button onClick={() => setMoGoiChoPhep((v) => !v)} className="flex w-full items-center gap-2 px-5 py-3 text-left">
               <ChevronDown size={16} className={`shrink-0 text-slate-400 transition-transform ${moGoiChoPhep ? "" : "-rotate-90"}`} />
@@ -1664,22 +1680,6 @@ function BehaviorAuthoringEditor() {
                 </button>
               </div>
             </div>}
-          </section>
-
-        {suite && <>
-          <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
-            <div className="mb-4 flex flex-wrap items-end justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-widest text-indigo-500">Bước 2</p><h2 className="text-xl font-bold">Bảy thành phần của bộ chấm</h2><p className="mt-1 text-sm text-slate-500">Chỉ cần tải Database phát sinh viên, Database ẩn và Golden Solution. Khi kết thúc record, hệ thống tự sinh Automation Record, Testcase Definition và replay Golden với Database ẩn để capture Output Database.</p></div><span className="text-sm font-semibold">{7 - (readiness?.missing.length || 0)}/7 hợp lệ</span></div>
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-              {ARTIFACTS.map((item) => {
-                const current = activeByType[item.type]; const Icon = item.icon; const uploading = busy === `upload-${item.type}`;
-                return <div key={item.type} className={`relative rounded-xl border p-4 ${item.owner === "system" ? "border-violet-200 bg-violet-50/60 dark:border-violet-900 dark:bg-violet-950/20" : "border-slate-200 dark:border-slate-700"}`}>
-                  <div className="flex items-start justify-between"><Icon size={21} className={item.owner === "system" ? "text-violet-500" : "text-indigo-500"} />{current ? <CheckCircle2 size={19} className="text-emerald-500" /> : <Circle size={19} className="text-slate-300" />}</div>
-                  <h3 className="mt-3 font-bold">{item.title}</h3><p className="mt-1 min-h-10 text-xs text-slate-500">{item.hint}</p>
-                  {current && <p className="mt-2 truncate text-xs font-medium text-emerald-600" title={current.sha256}>{current.file_name} · v{current.version} · {bytes(current.size_bytes)}</p>}
-                  {item.owner === "teacher" ? <label className="mt-3 inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 text-xs font-bold hover:border-indigo-400 dark:border-slate-700">{uploading ? <Loader2 size={15} className="animate-spin" /> : <UploadCloud size={15} />} {current ? "Tạo version mới" : "Chọn file"}<input type="file" accept={item.accept} className="hidden" onChange={(e) => uploadArtifact(item.type, e.target.files?.[0])} /></label> : <span className="mt-3 inline-block rounded-lg bg-violet-100 px-3 py-2 text-xs font-bold text-violet-700 dark:bg-violet-900/50 dark:text-violet-200">Tự động sinh</span>}
-                </div>;
-              })}
-            </div>
           </section>
 
           <section className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)]">
