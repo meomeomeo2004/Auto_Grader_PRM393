@@ -299,6 +299,7 @@ function BehaviorAuthoringEditor() {
     transitive: string[];
   } | null>(null);
   const [moGoiChoPhep, setMoGoiChoPhep] = useState(false);
+  const [moGoiKeoTheo, setMoGoiKeoTheo] = useState(false);
   const [suite, setSuite] = useState<Suite | null>(null);
   const [availableSuites, setAvailableSuites] = useState<Suite[]>([]);
   const [recording, setRecording] = useState<Recording | null>(null);
@@ -453,21 +454,26 @@ function BehaviorAuthoringEditor() {
   const batTatPackage = (ten: string) => setAllowedPackages((current) => (GOI_LOI.includes(ten)
     ? current
     : current.includes(ten) ? current.filter((p) => p !== ten) : [...current, ten]));
-  // Thứ tự cố định cho cả hai cột: gói lõi, rồi thư viện khai thẳng trong ảnh chấm, rồi những
-  // gói kéo theo mà bộ đề ĐANG cho phép. Bấm một thẻ chỉ làm nó nhảy cột, thẻ khác đứng yên.
-  //
-  // Cố tình KHÔNG bày hết tám chục gói kéo theo: đó là ruột của Dart và của chính các thư viện
-  // trên (async, meta, collection...), bày ra thì cột khả dụng thành bãi rác và che mất mười
-  // mấy cái thật sự đáng cân nhắc. Gói kéo theo nào bộ đề đã lưu thì vẫn hiện để bỏ rồi chọn
-  // lại được; muốn thêm cái mới thì thêm ở trang "Thư viện chấm".
+  // TẤT CẢ gói có thể chọn, thứ tự cố định: lõi, thư viện khai thẳng trong ảnh, rồi gói kéo
+  // theo. Danh sách này KHÔNG phụ thuộc đang tick gì, nhờ vậy bỏ một thẻ là nó nhảy sang cột
+  // khả dụng chứ không biến mất — bỏ rồi chọn lại được ngay.
+  const tenKhaiThang = (goiCuaAnh?.direct || []).map((p) => p.name);
   const thuTuGoi = [
     ...GOI_LOI,
-    ...(goiCuaAnh?.direct || []).map((p) => p.name),
-    ...(goiCuaAnh?.transitive || []).filter((ten) => savedAllowedPackages.includes(ten)),
+    ...tenKhaiThang,
+    ...(goiCuaAnh?.transitive || []),
+    ...savedAllowedPackages,
     ...allowedPackages,
   ].filter((ten, i, ds) => ds.indexOf(ten) === i);
   const goiDangDung = thuTuGoi.filter((ten) => GOI_LOI.includes(ten) || allowedPackages.includes(ten));
-  const goiKhaDung = thuTuGoi.filter((ten) => !GOI_LOI.includes(ten) && !allowedPackages.includes(ten));
+  // Cột khả dụng mặc định chỉ bày thư viện của ảnh và gói bộ đề từng cho phép. Tám chục gói
+  // kéo theo còn lại là ruột của Dart và của chính mấy thư viện trên (async, meta, collection),
+  // bày hết thì che mất mười mấy cái thật sự đáng cân nhắc — gói vào một nút mở thêm.
+  const goiChuaDung = thuTuGoi.filter((ten) => !GOI_LOI.includes(ten) && !allowedPackages.includes(ten));
+  const goiKhaDung = moGoiKeoTheo
+    ? goiChuaDung
+    : goiChuaDung.filter((ten) => tenKhaiThang.includes(ten) || savedAllowedPackages.includes(ten));
+  const soKeoTheoAn = goiChuaDung.length - goiKhaDung.length;
 
   useEffect(() => setRecorderReady(false), [previewUrl]);
 
@@ -1625,11 +1631,19 @@ function BehaviorAuthoringEditor() {
                                 ? "bg-indigo-100 font-semibold text-indigo-700 hover:bg-rose-100 hover:text-rose-700 dark:bg-indigo-950 dark:text-indigo-300"
                                 : "border border-slate-300 text-slate-500 hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-600 dark:text-slate-400"}`}
                           >
-                            {ten}{loi && <span className="text-[10px]">lõi</span>}
+                            {ten}
+                            {loi && <span className="text-[10px]">lõi</span>}
+                            {!loi && tenKhaiThang.length > 0 && !tenKhaiThang.includes(ten)
+                              && <span className="text-[10px] opacity-60" title="Không khai trong pubspec của ảnh chấm nhưng vẫn import được vì đi kèm một thư viện khác. Vì thế danh sách này dài hơn trang Thư viện chấm.">kéo theo</span>}
                           </button>
                         );
                       })}
                     </div>
+                    {ma === "kha" && (soKeoTheoAn > 0 || moGoiKeoTheo) && (
+                      <button type="button" onClick={() => setMoGoiKeoTheo((v) => !v)} className="mt-1.5 text-xs text-slate-500 hover:text-indigo-500">
+                        {moGoiKeoTheo ? "Ẩn bớt gói kéo theo" : `Hiện thêm ${soKeoTheoAn} gói kéo theo`}
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
