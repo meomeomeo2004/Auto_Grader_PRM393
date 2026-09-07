@@ -6,7 +6,7 @@ import { useSearchParams } from "next/navigation";
 import SidebarLayout from "@/components/layout/SidebarLayout";
 import { API_BASE } from "@/lib/config";
 import {
-  Check, CheckCircle2, Circle, Code2, Copy, Database, FileArchive, FileJson,
+  Check, CheckCircle2, ChevronDown, Circle, Code2, Copy, Database, FileArchive, FileJson,
   Loader2, MonitorPlay, Pencil, Play, Plus, Radio, Send, ShieldCheck,
   Square, Trash2, UploadCloud, X, XCircle,
 } from "lucide-react";
@@ -350,6 +350,9 @@ function BehaviorAuthoringEditor() {
   const [databaseRow, setDatabaseRow] = useState("{}");
   const [databaseCount, setDatabaseCount] = useState("");
   const [currentRoute, setCurrentRoute] = useState("/");
+  // Khung "Thêm action" khai tay: đóng sẵn vì hầu hết thao tác ghi thẳng từ Golden App,
+  // chỉ mở khi cần chèn một bước mà bấm trên app không ghi ra được.
+  const [moThemAction, setMoThemAction] = useState(false);
   const [routeExpected, setRouteExpected] = useState("/");
   const [routeCanPop, setRouteCanPop] = useState("ignore");
   const [layoutFirstLocator, setLayoutFirstLocator] = useState("semanticId");
@@ -1763,18 +1766,22 @@ function BehaviorAuthoringEditor() {
               <div className="mt-2 grid gap-2 sm:grid-cols-2"><label className="text-xs font-semibold text-slate-500">Rộng màn (dp)<input type="number" min={240} value={viewportWidth} onChange={(e) => setViewportWidth(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label><label className="text-xs font-semibold text-slate-500">Cao màn (dp)<input type="number" min={320} value={viewportHeight} onChange={(e) => setViewportHeight(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label><label className="flex items-center gap-2 text-xs font-semibold text-slate-500 sm:col-span-2"><input type="checkbox" checked={cheDoToi} onChange={() => setCheDoToi((v) => !v)} /> Chấm hàm này ở chế độ tối <span className="font-normal">— engine đặt platformBrightness = dark trước khi boot; bài có darkTheme sẽ tự đổi, giá trị chuẩn màu/kiểu chữ đo ở chế độ tối. Khung Golden bên trên vẫn hiện sáng.</span></label></div>
               <p className="mt-2 text-xs font-semibold text-slate-600 dark:text-slate-300">Khung máy Android, tính bằng dp — cỡ mà Android Studio hiển thị cho máy ảo (Pixel: 412×915). Mọi phép chấm bố cục đều đo bằng dp nên không cần khai mật độ điểm ảnh.</p>
               {!recording ? <><button onClick={startRecording} disabled={!recordingInputsReady || Boolean(busy)} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-rose-600 px-4 py-2.5 font-bold text-white disabled:opacity-40"><Radio size={18} /> Bắt đầu record</button>{!recordingInputsReady && <p className="mt-2 text-xs text-amber-600">Cần đủ Database phát sinh viên, Database ẩn và Golden Solution.</p>}</> : <>
-                <div className="mt-5 rounded-xl border border-slate-200 p-4 dark:border-slate-700">
-                  <h3 className="font-bold">Thêm action</h3>
-                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                    <select value={action} onChange={(e) => setAction(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{ACTIONS.map((item) => <option key={item} value={item}>{item}</option>)}</select>
-                    {manualActionNeedsTarget && <select value={locator} onChange={(e) => setLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{item}</option>)}</select>}
-                    {manualActionNeedsTarget && <input value={locatorValue} onChange={(e) => setLocatorValue(e.target.value)} placeholder="Giá trị nhận diện semantic" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />}
-                    {(action === "enter_text" || manualActionNeedsUri) && <input value={inputValue} onChange={(e) => setInputValue(e.target.value)} placeholder={manualActionNeedsUri ? "URI/path, ví dụ /movies/42?tab=cast" : "Dữ liệu nhập"} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />}
-                  </div>
-                      <p className="mt-2 text-xs text-slate-500">Gõ chữ trong app chỉ được ghi là <b>cú chạm vào ô</b>; nội dung thì khai ở ô bên phải từng dòng trong danh sách dưới. Flutter Web tráo phần tử nhập giữa chừng nên đọc chữ từ trình duyệt không bao giờ chắc — khai tay thì chính xác tuyệt đối và nhìn thấy được trước khi sinh testcase.</p>
-                      {action === "drag" && <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-500"><span>Độ dời (dp):</span><label className="flex items-center gap-1">ngang <input type="number" step={10} value={keoX} onChange={(e) => setKeoX(Number(e.target.value))} className="w-20 rounded border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-600" /></label><label className="flex items-center gap-1">dọc <input type="number" step={10} value={keoY} onChange={(e) => setKeoY(Number(e.target.value))} className="w-20 rounded border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-600" /></label><span>— dương là sang phải / xuống dưới. Kéo dải trượt: chỉ cần ngang.</span></div>}
-                  <button onClick={() => appendAction()} className="mt-3 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-bold text-white"><Plus size={16} /> Thêm action</button>
-                  <p className="mt-2 text-xs text-slate-500">Route hiện tại của Golden: <code>{currentRoute}</code>. Reload trong runner phát lại RouteInformation hiện tại để kiểm khả năng phục hồi route; deep link native vẫn cần lane Android riêng.</p>
+                <div className="mt-5 rounded-xl border border-slate-200 dark:border-slate-700">
+                  <button onClick={() => setMoThemAction((v) => !v)} className="flex w-full items-center gap-2 px-4 py-2.5 text-left">
+                    <ChevronDown size={16} className={`shrink-0 text-slate-400 transition-transform ${moThemAction ? "" : "-rotate-90"}`} />
+                    <h3 className="font-bold">Thêm action</h3>
+                    <span className="text-xs text-slate-500">khai tay</span>
+                  </button>
+                  {moThemAction && <div className="border-t border-slate-200 px-4 py-3 dark:border-slate-700">
+                    <div className="grid gap-2 sm:grid-cols-2">
+                        <select value={action} onChange={(e) => setAction(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{ACTIONS.map((item) => <option key={item} value={item}>{item}</option>)}</select>
+                        {manualActionNeedsTarget && <select value={locator} onChange={(e) => setLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{item}</option>)}</select>}
+                        {manualActionNeedsTarget && <input value={locatorValue} onChange={(e) => setLocatorValue(e.target.value)} placeholder="Giá trị nhận diện semantic" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />}
+                        {(action === "enter_text" || manualActionNeedsUri) && <input value={inputValue} onChange={(e) => setInputValue(e.target.value)} placeholder={manualActionNeedsUri ? "URI/path, ví dụ /movies/42?tab=cast" : "Dữ liệu nhập"} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />}
+                    </div>
+                          {action === "drag" && <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-500"><span>Độ dời (dp):</span><label className="flex items-center gap-1">ngang <input type="number" step={10} value={keoX} onChange={(e) => setKeoX(Number(e.target.value))} className="w-20 rounded border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-600" /></label><label className="flex items-center gap-1">dọc <input type="number" step={10} value={keoY} onChange={(e) => setKeoY(Number(e.target.value))} className="w-20 rounded border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-600" /></label></div>}
+                    <button onClick={() => appendAction()} className="mt-3 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-bold text-white"><Plus size={16} /> Thêm action</button>
+                  </div>}
                 </div>
                 <div className="mt-3 rounded-xl border border-slate-200 p-4 dark:border-slate-700">
                   <div className="flex items-center justify-between gap-3">
