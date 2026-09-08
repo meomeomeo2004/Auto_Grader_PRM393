@@ -7,7 +7,7 @@ import SidebarLayout from "@/components/layout/SidebarLayout";
 import AiAuthorPanel from "@/components/testcases/AiAuthorPanel";
 import { API_BASE } from "@/lib/config";
 import {
-  Check, CheckCircle2, Circle, Code2, Copy, Database, FileArchive, FileJson,
+  Check, CheckCircle2, ChevronDown, Circle, Code2, Copy, Database, FileArchive, FileJson,
   Loader2, MonitorPlay, Pencil, Play, Plus, Radio, Send, ShieldCheck,
   Square, Trash2, UploadCloud, X, XCircle,
 } from "lucide-react";
@@ -55,11 +55,13 @@ const DEFAULT_ALLOWED_PACKAGES = [
 ];
 
 const ACTIONS = [
-  "boot", "boot_with_uri", "tap", "enter_text", "clear_text", "scroll", "back",
+  "boot", "boot_with_uri", "tap", "enter_text", "clear_text", "scroll", "drag", "back",
   "open_uri", "browser_back", "browser_forward", "reload", "restart",
   "wait_until", "wait_for_route",
 ];
-const LOCATORS = ["semanticId", "valueKey", "label", "hint", "text"];
+// Bỏ hẳn "valueKey" khỏi danh sách chọn: đề chỉ còn MỘT hệ định danh. Engine vẫn đọc
+// được khoá cũ để bộ đề đã ra không chết, nhưng không mời ai khai thêm cái mới.
+const LOCATORS = ["semanticId", "label", "hint", "text", "text_prefix", "tooltip"];
 const ACTION_LABELS: Record<string, string> = {
   boot: "Khởi động app",
   boot_with_uri: "Khởi động tại đường dẫn",
@@ -67,6 +69,7 @@ const ACTION_LABELS: Record<string, string> = {
   enter_text: "Nhập nội dung",
   clear_text: "Xóa nội dung",
   scroll: "Cuộn",
+  drag: "Kéo",
   back: "Quay lại",
   open_uri: "Mở đường dẫn",
   browser_back: "Trình duyệt quay lại",
@@ -80,14 +83,9 @@ const ACTION_LABELS: Record<string, string> = {
   observe_route: "Kiểm tra đường dẫn",
   observe_layout: "Kiểm tra bố cục",
 };
-const LOCATOR_LABELS: Record<string, string> = {
-  semanticId: "Semantic ID",
-  valueKey: "Value key",
-  label: "Nhãn",
-  hint: "Gợi ý",
-  text: "Nội dung",
-};
-
+// Chữ hiển thị cho từng cách định vị. Giá trị gửi đi giữ nguyên; chỉ đổi chữ để không ai
+// tưởng "semanticId" là ValueKey: máy chấm tìm nó bằng Semantics(identifier:), còn ValueKey
+// thì recorder không bao giờ thấy (không ra tới DOM) nên chỉ dùng được khi gõ tay ở đây.
 function asJsonMap(value: unknown): JsonMap {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonMap : {};
 }
@@ -112,6 +110,7 @@ function summarizeExpectation(value: unknown): string {
   if (typeof expect.route === "string") parts.push(`Route: ${expect.route}`);
   return parts.join(" · ") || (Object.keys(expect).length ? "Có dữ liệu kỳ vọng" : "");
 }
+
 const SEMANTIC_ROLES = [
   ["generic", "Không kiểm tra loại"],
   ["text_field", "Ô nhập liệu"],
@@ -124,6 +123,87 @@ const SEMANTIC_ROLES = [
   ["link", "Liên kết"],
 ] as const;
 
+const LOCATOR_LABELS: Record<string, string> = {
+  semanticId: "định danh — Semantics(identifier:)",
+  valueKey: "ValueKey (recorder không thấy, chỉ gõ tay)",
+  label: "nhãn — Semantics(label:)",
+  hint: "gợi ý ô nhập — hintText",
+  text: "chữ hiển thị",
+  text_prefix: "chữ bắt đầu bằng",
+  tooltip: "tooltip",
+};
+
+/** Lam tron ve ba chu so thap phan — don vi nho nhat cua moi phep chia diem. */
+const lamTron = (v: number) => Math.round(v * 1000) / 1000;
+
+// Loại widget hay gặp nhất trong đề Flutter — gợi ý thôi, gõ tên khác vẫn chạy vì
+// engine so bằng TÊN kiểu chứ không tra bảng cứng.
+const WIDGET_GOI_Y = [
+  "Switch", "SwitchListTile", "Checkbox", "CheckboxListTile",
+  "Radio<String>", "RadioListTile<String>", "Slider",
+  "FilterChip", "ChoiceChip", "TextField", "Icon", "Image",
+  "BottomNavigationBar", "NavigationBar", "SegmentedButton<int>",
+  "FilledButton", "ElevatedButton", "TextButton", "OutlinedButton",
+  "IconButton", "FloatingActionButton", "Text",
+];
+
+// Thuoc tinh tra ve MAU thi so bang phep so mau (sai so theo kenh R/G/B). Danh sach
+// nay phai khop `_laThuocTinhMau` trong exam_test.dart.
+const laThuocTinhMau = (ma: string) =>
+  ma === "color" || ma === "app_bar_background" || ma.startsWith("color_scheme.");
+
+// Bốn mặt của kiểu chữ. Đọc từ đoạn văn bản THẬT SỰ ĐƯỢC VẼ nên bắt được cả chữ
+// thừa kế từ theme (không đặt style trên widget) lẫn chữ đặt style thẳng.
+const MAT_KIEU_CHU: Array<[string, string]> = [
+  ["font_size", "Cỡ chữ"],
+  ["font_weight", "Độ đậm (400, 700…)"],
+  ["font_family", "Tên phông"],
+  ["color", "Màu chữ"],
+];
+
+// Giá trị đọc được từ bảng chủ đề của app.
+const GIA_TRI_CHU_DE: Array<[string, string]> = [
+  ["color_scheme.primary", "Màu chính (primary)"],
+  ["color_scheme.onPrimary", "Màu chữ trên nền chính (onPrimary)"],
+  ["color_scheme.primaryContainer", "Nền phụ của màu chính (primaryContainer)"],
+  ["color_scheme.secondary", "Màu phụ (secondary)"],
+  ["color_scheme.tertiary", "Màu thứ ba (tertiary)"],
+  ["color_scheme.error", "Màu báo lỗi (error)"],
+  ["color_scheme.surface", "Màu nền mặt (surface)"],
+  ["color_scheme.onSurface", "Màu chữ trên nền mặt (onSurface)"],
+  ["color_scheme.outline", "Màu viền (outline)"],
+  ["use_material3", "Có bật Material 3 không"],
+  ["brightness", "Chế độ sáng hay tối"],
+  ["font_family", "Phông chữ toàn app"],
+  ["app_bar_background", "Màu nền thanh tiêu đề"],
+  ["app_bar_center_title", "Thanh tiêu đề có căn giữa không"],
+  ["text_theme.titleLarge.font_size", "Cấp titleLarge — cỡ chữ"],
+  ["text_theme.titleLarge.font_weight", "Cấp titleLarge — độ đậm"],
+  ["text_theme.bodyMedium.font_size", "Cấp bodyMedium — cỡ chữ"],
+  ["text_theme.bodyMedium.font_weight", "Cấp bodyMedium — độ đậm"],
+  ["text_theme.labelSmall.font_size", "Cấp labelSmall — cỡ chữ"],
+  ["text_theme.labelSmall.font_weight", "Cấp labelSmall — độ đậm"],
+];
+
+// Thuộc tính engine biết đọc. Danh sách này phải khớp bảng trắng trong
+// _docThuocTinhWidget của exam_test.dart — lệch là tiêu chí nổ lúc capture.
+const THUOC_TINH_WIDGET: Array<[string, string]> = [
+  ["ton_tai", "Chỉ cần đúng loại widget này (dùng cho \"phải dùng nút X\")"],
+  ["value", "Giá trị — công tắc, ô tick, dải trượt, nội dung chữ"],
+  ["da_chon", "Đang được chọn — chip, radio"],
+  ["group_value", "Lựa chọn đang active của nhóm radio"],
+  ["min", "Dải trượt — giá trị nhỏ nhất"],
+  ["max", "Dải trượt — giá trị lớn nhất"],
+  ["divisions", "Dải trượt — số nấc chia"],
+  ["keyboard_type", "Ô nhập — loại bàn phím (number, text, multiline…)"],
+  ["obscure_text", "Ô nhập — có che chữ như mật khẩu không"],
+  ["max_lines", "Ô nhập — số dòng tối đa"],
+  ["icon_code", "Icon — đúng biểu tượng nào"],
+  ["image_source", "Ảnh — đường dẫn asset hoặc URL"],
+  ["current_index", "Thanh điều hướng — đang ở tab thứ mấy"],
+  ["enabled", "Đang bật hay bị khóa — nút, ô nhập, công tắc"],
+  ["noi_dung", "Ô nhập — chữ đang có sẵn trong ô"],
+];
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -212,7 +292,15 @@ function BehaviorAuthoringEditor() {
   const [runtimeUrl, setRuntimeUrl] = useState("");
   const [databaseName, setDatabaseName] = useState("");
   const [allowedPackages, setAllowedPackages] = useState<string[]>(DEFAULT_ALLOWED_PACKAGES);
-  const [packageDraft, setPackageDraft] = useState("");
+  // Danh sách package CÓ THẬT trong ảnh chấm, đọc từ pubspec.lock của ảnh. Bảng tick dựng từ
+  // đây nên người ra đề không gõ được tên không tồn tại — thứ mà thêm vào cũng chẳng cài gì.
+  const [goiCuaAnh, setGoiCuaAnh] = useState<{
+    imageRead: boolean;
+    direct: { name: string; version: string; protected: boolean }[];
+    transitive: string[];
+  } | null>(null);
+  const [moGoiChoPhep, setMoGoiChoPhep] = useState(false);
+  const [moGoiKeoTheo, setMoGoiKeoTheo] = useState(false);
   const [suite, setSuite] = useState<Suite | null>(null);
   const [availableSuites, setAvailableSuites] = useState<Suite[]>([]);
   const [recording, setRecording] = useState<Recording | null>(null);
@@ -230,12 +318,15 @@ function BehaviorAuthoringEditor() {
   const [locator, setLocator] = useState("semanticId");
   const [locatorValue, setLocatorValue] = useState("");
   const [inputValue, setInputValue] = useState("");
+  // Do doi cho `drag`, tinh bang dp. Mac dinh keo ngang 80 — du de doi mot Slider
+  // 10 nac di hai nac (do o sa ban), va khong am tham keo doc.
+  const [keoX, setKeoX] = useState(80);
+  const [keoY, setKeoY] = useState(0);
   const [checkpointText, setCheckpointText] = useState("");
   const [thuGon, setThuGon] = useState(false);
   const [uiGroupWeight, setUiGroupWeight] = useState(0);
   const [viTriWeight, setViTriWeight] = useState(0);
   const [mauWeight, setMauWeight] = useState(0);
-  const [mauAppWeight, setMauAppWeight] = useState(0);
   const daKhoiTaoDiemUi = useRef(false);
   const [chiaDiemId, setChiaDiemId] = useState("");
   const [chiaDiemHam, setChiaDiemHam] = useState(0);
@@ -243,7 +334,7 @@ function BehaviorAuthoringEditor() {
   const [chiaDiemCha, setChiaDiemCha] = useState<Record<string, string>>({});
   const [hiddenCheckpointText, setHiddenCheckpointText] = useState("");
   const [checkpointMode, setCheckpointMode] = useState<"ui" | "database" | "route" | "layout">("ui");
-  const [uiCheckpointType, setUiCheckpointType] = useState<"text" | "component" | "no_exception">("text");
+  const [uiCheckpointType, setUiCheckpointType] = useState<"text" | "component" | "widget_state" | "text_style" | "theme_value" | "no_overflow" | "no_exception">("text");
   const [checkpointLocator, setCheckpointLocator] = useState("semanticId");
   const [checkpointLocatorValue, setCheckpointLocatorValue] = useState("");
   const [checkpointVisible, setCheckpointVisible] = useState(true);
@@ -251,11 +342,26 @@ function BehaviorAuthoringEditor() {
   const [checkpointValue, setCheckpointValue] = useState("");
   const [checkpointEnabled, setCheckpointEnabled] = useState("ignore");
   const [checkpointChecked, setCheckpointChecked] = useState("ignore");
+  const [wsLocator, setWsLocator] = useState("label");
+  const [wsLocatorValue, setWsLocatorValue] = useState("");
+  const [wsWidget, setWsWidget] = useState("");
+  const [wsProperty, setWsProperty] = useState("value");
+  const [tsLocator, setTsLocator] = useState("text");
+  const [tsLocatorValue, setTsLocatorValue] = useState("");
+  const [tsProperty, setTsProperty] = useState("font_size");
+  const [tvProperty, setTvProperty] = useState("color_scheme.primary");
+  // Sai so CHI danh cho thuoc tinh mau. Co chu, do dam, bat/tat deu la con so nguoi
+  // ra de quy dinh chu khong phai phep do co nhieu, nen so tuyet doi — them % vao do
+  // chi tao cho de lot bai sai.
+  const [saiSoMau, setSaiSoMau] = useState(20);
   const [databaseTable, setDatabaseTable] = useState("");
   const [databaseOperation, setDatabaseOperation] = useState("READ");
   const [databaseRow, setDatabaseRow] = useState("{}");
   const [databaseCount, setDatabaseCount] = useState("");
   const [currentRoute, setCurrentRoute] = useState("/");
+  // Khung "Thêm action" khai tay: đóng sẵn vì hầu hết thao tác ghi thẳng từ Golden App,
+  // chỉ mở khi cần chèn một bước mà bấm trên app không ghi ra được.
+  const [moThemAction, setMoThemAction] = useState(false);
   const [routeExpected, setRouteExpected] = useState("/");
   const [routeCanPop, setRouteCanPop] = useState("ignore");
   const [layoutFirstLocator, setLayoutFirstLocator] = useState("semanticId");
@@ -271,8 +377,15 @@ function BehaviorAuthoringEditor() {
   const [scenarioWeight, setScenarioWeight] = useState(10);
   // Bảng tick thành phần giao diện — đổ về từ lệnh quét màn hình của bridge.
   // null = chưa quét; mảng = đang mở bảng tick.
-  const [uiInventory, setUiInventory] = useState<{ attribute: string; value: string; role: string; checked: boolean }[] | null>(null);
+  const [uiInventory, setUiInventory] = useState<{ attribute: string; value: string; role: string; identifier: string; count: number; checked: boolean }[] | null>(null);
   const [uiScreenName, setUiScreenName] = useState("");
+  // Kiểm kê ICON của màn cuối luồng, do MÁY CHẤM đo lúc capture. Không quét được qua
+  // DOM như bảng trên: nút chỉ có hình thì web không phơi aria-label nào, nên đúng những
+  // nút cần chấm lại là những nút "Quét thành phần UI" không thấy.
+  const [iconInventory, setIconInventory] = useState<
+    { icon: string; count: number; perRow: boolean; buttonType: string; checked: boolean }[] | null
+  >(null);
+  const [iconScenario, setIconScenario] = useState<{ id: string; ma: string; checkpoints: JsonMap[] } | null>(null);
   // Chấm VỊ TRÍ và MÀU của từng thành phần đã tick. Sai số mặc định 5%: vị trí tính theo
   // % chiều rộng/cao màn hình, màu tính theo % của 255 trên từng kênh R/G/B.
   const [viTriOn, setViTriOn] = useState(true);
@@ -281,8 +394,6 @@ function BehaviorAuthoringEditor() {
   const [mauSaiSo, setMauSaiSo] = useState(5);
   // Màu chủ đạo của app — MỘT dòng cho cả màn, đọc thẳng ColorScheme. Sai số rộng hơn
   // hẳn màu thành phần vì phép đo này chính xác tuyệt đối, không có nhiễu để chống.
-  const [mauAppOn, setMauAppOn] = useState(true);
-  const [mauAppSaiSo, setMauAppSaiSo] = useState(20);
   // Khung máy Android tầm trung (Pixel): 412×915 dp. Sinh viên làm bài trên máy ảo
   // Android nên đây là khung DUY NHẤT còn ý nghĩa; khung desktop đã bỏ hẳn.
   //
@@ -290,6 +401,8 @@ function BehaviorAuthoringEditor() {
   // theo % chiều rộng/cao), nên mật độ không đổi một điểm nào — nó chỉ quyết định ảnh
   // bằng chứng nét tới đâu và nặng bao nhiêu. Để cố định 1 cho ảnh gọn.
   const [viewportWidth, setViewportWidth] = useState(412);
+  // Chấm ở chế độ tối: cờ nằm TRONG object viewport nên đi qua mọi tầng như rộng/cao màn.
+  const [cheDoToi, setCheDoToi] = useState(false);
   const [viewportHeight, setViewportHeight] = useState(915);
   const [codePreview, setCodePreview] = useState<CodePreview | null>(null);
   const [previewFileName, setPreviewFileName] = useState("");
@@ -337,15 +450,31 @@ function BehaviorAuthoringEditor() {
   const allowedPackagesChanged = Boolean(
     suite && JSON.stringify([...allowedPackages].sort()) !== JSON.stringify([...savedAllowedPackages].sort()),
   );
-  const packageSuggestions = DEFAULT_ALLOWED_PACKAGES.filter((pkg) => !allowedPackages.includes(pkg));
-
-  const addPackage = (raw: string) => {
-    const names = raw.split(",").map((p) => p.trim()).filter(Boolean);
-    if (!names.length) return;
-    setAllowedPackages((current) => [...current, ...names.filter((n) => !current.includes(n))]);
-    setPackageDraft("");
-  };
-  const removePackage = (name: string) => setAllowedPackages((current) => current.filter((p) => p !== name));
+  // flutter và flutter_test là lõi: bỏ chúng đi thì không bài nào biên dịch nổi.
+  const GOI_LOI = ["flutter", "flutter_test"];
+  const batTatPackage = (ten: string) => setAllowedPackages((current) => (GOI_LOI.includes(ten)
+    ? current
+    : current.includes(ten) ? current.filter((p) => p !== ten) : [...current, ten]));
+  // TẤT CẢ gói có thể chọn, thứ tự cố định: lõi, thư viện khai thẳng trong ảnh, rồi gói kéo
+  // theo. Danh sách này KHÔNG phụ thuộc đang tick gì, nhờ vậy bỏ một thẻ là nó nhảy sang cột
+  // khả dụng chứ không biến mất — bỏ rồi chọn lại được ngay.
+  const tenKhaiThang = (goiCuaAnh?.direct || []).map((p) => p.name);
+  const thuTuGoi = [
+    ...GOI_LOI,
+    ...tenKhaiThang,
+    ...(goiCuaAnh?.transitive || []),
+    ...savedAllowedPackages,
+    ...allowedPackages,
+  ].filter((ten, i, ds) => ds.indexOf(ten) === i);
+  const goiDangDung = thuTuGoi.filter((ten) => GOI_LOI.includes(ten) || allowedPackages.includes(ten));
+  // Cột khả dụng mặc định chỉ bày thư viện của ảnh và gói bộ đề từng cho phép. Tám chục gói
+  // kéo theo còn lại là ruột của Dart và của chính mấy thư viện trên (async, meta, collection),
+  // bày hết thì che mất mười mấy cái thật sự đáng cân nhắc — gói vào một nút mở thêm.
+  const goiChuaDung = thuTuGoi.filter((ten) => !GOI_LOI.includes(ten) && !allowedPackages.includes(ten));
+  const goiKhaDung = moGoiKeoTheo
+    ? goiChuaDung
+    : goiChuaDung.filter((ten) => tenKhaiThang.includes(ten) || savedAllowedPackages.includes(ten));
+  const soKeoTheoAn = goiChuaDung.length - goiKhaDung.length;
 
   useEffect(() => setRecorderReady(false), [previewUrl]);
 
@@ -400,10 +529,14 @@ function BehaviorAuthoringEditor() {
         || "",
     );
     setDatabaseName(contractName);
+    void api<JsonMap>("/grading-env/importable-packages").then((data) => setGoiCuaAnh({
+      imageRead: Boolean(data.image_read),
+      direct: Array.isArray(data.direct) ? (data.direct as { name: string; version: string; protected: boolean }[]) : [],
+      transitive: Array.isArray(data.transitive) ? (data.transitive as string[]) : [],
+    })).catch(() => setGoiCuaAnh({ imageRead: false, direct: [], transitive: [] }));
     setAllowedPackages(Array.isArray(suiteData.runtime_config?.allowed_packages)
       ? (suiteData.runtime_config.allowed_packages as unknown[]).map(String)
       : DEFAULT_ALLOWED_PACKAGES);
-    setPackageDraft("");
     if (suiteData.golden_app_id) {
       const golden = await api<GoldenApp>(`/behavior-authoring/golden-apps/${suiteData.golden_app_id}`);
       const hasUploadedGolden = artifactData.some((item) => item.active && item.type === "GOLDEN_SOLUTION");
@@ -553,7 +686,7 @@ function BehaviorAuthoringEditor() {
     setEditingScenarioId(null);
     resetRecorderTransport();
     const created = await api<Recording>(`/behavior-authoring/suites/${suite.id}/recordings`, {
-      method: "POST", body: JSON.stringify({ name: scenarioName, viewport: { width: viewportWidth, height: viewportHeight, device_pixel_ratio: 1 }, initial_state: { reset_storage: true } }),
+      method: "POST", body: JSON.stringify({ name: scenarioName, viewport: { width: viewportWidth, height: viewportHeight, device_pixel_ratio: 1, brightness: cheDoToi ? "dark" : "light" }, initial_state: { reset_storage: true } }),
     });
     activeRecordingId.current = created.id;
     acceptsRecorderEvents.current = created.status === "ACTIVE";
@@ -638,7 +771,7 @@ function BehaviorAuthoringEditor() {
       setError("Phiên record không còn nhận thao tác — hãy tải lại trang để nối lại phiên.");
       return;
     }
-    const targetNeeded = ["tap", "enter_text", "clear_text", "scroll", "wait_until"].includes(action);
+    const targetNeeded = ["tap", "enter_text", "clear_text", "scroll", "drag", "wait_until"].includes(action);
     const uriNeeded = ["boot_with_uri", "open_uri", "wait_for_route"].includes(action);
     if (!payload && targetNeeded && !locatorValue.trim()) {
       setError(`Action ${action} cần giá trị nhận diện semantic.`);
@@ -652,6 +785,7 @@ function BehaviorAuthoringEditor() {
       kind: "action",
       stage: "ACTION",
       action,
+      ...(action === "drag" ? { delta: { x: Number(keoX) || 0, y: Number(keoY) || 0 } } : {}),
       target: targetNeeded ? { [locator]: locatorValue.trim() } : {},
       attribute: targetNeeded ? locator : "none",
       attributeValue: targetNeeded ? locatorValue.trim() : "",
@@ -736,27 +870,7 @@ function BehaviorAuthoringEditor() {
     });
   };
 
-  /** Chia `total` điểm cho `n` dòng theo bội 0,25; phần dư dồn vào dòng cuối để tổng khớp tuyệt đối. */
 
-  /**
-   * Lưu các thành phần đã tick thành tiêu chí giao diện trên phiên ghi hiện tại.
-   *
-   * BA MẶT TÁCH RỜI, mỗi mặt một nhóm điểm riêng: NỘI DUNG (có mặt trên màn hình),
-   * VỊ TRÍ (tâm thành phần so với Golden) và MÀU SẮC (màu chính so với Golden).
-   * Tách ra vì một lỗi chỉ nên trừ đúng phần nó sai: tô lệch màu thì mất điểm màu chứ
-   * không mất điểm nội dung.
-   *
-   * Vì sao KHÔNG còn nút "so bố cục với ảnh chuẩn": phép so cả màn bằng pixel tính luôn
-   * nền trắng nên màn hình càng trống càng được điểm. Đo thật trên 19 bài của SP27 cho
-   * thấy xếp hạng bị đảo — app SAI HẲN ĐỀ được 90,1% còn bài làm ĐÚNG chỉ 88,7%.
-   * Không ngưỡng nào cứu được, nên bỏ hẳn thay vì chỉnh số.
-   *
-   * Giá trị chuẩn của vị trí và màu KHÔNG gõ tay: engine tự đo trên Golden lúc capture
-   * oracle rồi nướng vào tiêu chí.
-   *
-   * Tiêu chí neo vào TRẠNG THÁI CUỐI của luồng đang ghi — muốn chấm màn nào, đưa app tới
-   * màn đó rồi quét.
-   */
   const saveUiCriteria = () => {
     const recordingId = activeRecordingId.current;
     const chosen = (uiInventory || []).filter((it) => it.checked);
@@ -810,26 +924,60 @@ function BehaviorAuthoringEditor() {
         }
       }
 
-      // MÀU CHỦ ĐẠO — một dòng duy nhất, không nhân theo thành phần: nó là màu của cả
-      // app chứ không của riêng widget nào. Bù điểm mù của màu từng thành phần: đo thật
-      // trên SP27 cho thấy app sai hẳn bảng màu chỉ mất 4/16 tiêu chí màu, vì 12 thành
-      // phần còn lại chỉ có viền hoặc chữ nên vốn gần giống nhau ở mọi bảng màu.
-      if (mauAppOn && Number(mauAppWeight) > 0) {
-        await api(`/behavior-authoring/recordings/${recordingId}/events`, {
-          method: "POST",
-          body: JSON.stringify({
-            kind: "theme_color", checkpoint: true, stage: "ASSERT", action: "observe_ui",
-            browser: "flutter_tester",
-            weight: Math.round(Number(mauAppWeight) * 4) / 4,
-            tolerance_pct: Math.min(50, Math.max(0.5, Number(mauAppSaiSo))),
-            name: `${screen} — dùng đúng màu chủ đạo của đề`,
-            ui_group: { id: "G_UI_" + slug + "_MAU", name: `Giao diện — ${screen.toLowerCase()} (màu sắc)` },
-          }),
-        });
-        daLuu++;
-      }
       setUiInventory(null);
       setNotice(`Đã lưu ${daLuu} tiêu chí giao diện cho ${chosen.length} thành phần của màn "${screen}".`);
+      await refresh(suite.id);
+    });
+  };
+
+  const maMan = (ten: string) => ten.normalize("NFD").replace(/[̀-ͯ]/g, "")
+    .replace(/đ/g, "d").replace(/Đ/g, "D").replace(/[^a-zA-Z0-9]+/g, "_").toUpperCase().replace(/^_+|_+$/g, "");
+
+  // Thêm tiêu chí cho các ICON vừa kiểm kê. Khác đường trên ở chỗ KHÔNG đi qua phiên
+  // record (lúc này phiên đã đóng): ghi thẳng vào checkpoints của scenario, backend tự
+  // chạy lại capture để nướng vị trí, màu và luật lặp.
+  const luuTieuChiIcon = () => {
+    if (!suite || !iconScenario) return;
+    const chon = (iconInventory || []).filter((it) => it.checked);
+    if (chon.length === 0) { setError("Chưa tick icon nào để chấm."); return; }
+    run("icon-criteria", async () => {
+      const man = uiScreenName.trim() || "Màn hình";
+      const slug = maMan(man);
+      const cu = iconScenario.checkpoints;
+      // Số thứ tự tiếp theo: id checkpoint phải duy nhất trong scenario vì oracle nối
+      // vào chính id đó.
+      let so = cu.reduce((m, c) => Math.max(m, Number(String(c.id || "").replace(/\D+/g, "")) || 0), 0);
+      const cacMat = [
+        { bat: true, kind: "component_present", hau: "", nhan: "có", diem: uiGroupWeight, saiSo: 0 },
+        { bat: viTriOn, kind: "component_position", hau: "_VITRI", nhan: "đúng vị trí", diem: viTriWeight, saiSo: viTriSaiSo },
+        { bat: mauOn, kind: "component_color", hau: "_MAU", nhan: "đúng màu", diem: mauWeight, saiSo: mauSaiSo },
+      ].filter((m) => m.bat && Number(m.diem) > 0);
+
+      const them: JsonMap[] = [];
+      for (const mat of cacMat) {
+        const diemDong = chiaDeu(Number(mat.diem), chon.length);
+        chon.forEach((it, i) => {
+          so += 1;
+          them.push({
+            id: `checkpoint_${so}`, kind: mat.kind, checkpoint: true, stage: "ASSERT",
+            action: "observe_ui", browser: "flutter_tester",
+            target: { icon: it.icon }, visible: true,
+            attribute: "icon", attributeValue: it.icon, valueType: "string", value: "",
+            name: `${man} — ${mat.nhan} icon ${it.icon}`, weight: diemDong[i],
+            ...(mat.saiSo > 0 ? { tolerance_pct: Math.min(50, Math.max(0.5, Number(mat.saiSo))) } : {}),
+            ui_group: {
+              id: "G_UI_" + slug + mat.hau,
+              name: `Giao diện — ${man}${mat.hau === "" ? "" : mat.hau === "_VITRI" ? " (vị trí)" : " (màu sắc)"}`,
+            },
+          });
+        });
+      }
+      await api(`/behavior-authoring/scenarios/${iconScenario.id}`, {
+        method: "PUT", body: JSON.stringify({ checkpoints: [...cu, ...them] }),
+      });
+      setIconInventory(null);
+      setIconScenario(null);
+      setNotice(`Đã thêm ${them.length} tiêu chí icon và capture lại oracle. Icon lặp theo dòng được chấm ở mọi dòng.`);
       await refresh(suite.id);
     });
   };
@@ -844,11 +992,10 @@ function BehaviorAuthoringEditor() {
     const laChot = kind !== "action" && kind !== "";
     return tong + (laChot ? (Number(ev.weight) || 1) : 0);
   }, 0);
-  const diemUiConLai = Math.max(0, Math.round((scenarioWeight - diemChotDaGhi) * 4) / 4);
-  const tongCacMuc = Math.round((uiGroupWeight
+  const diemUiConLai = Math.max(0, lamTron(scenarioWeight - diemChotDaGhi));
+  const tongCacMuc = lamTron(uiGroupWeight
     + (viTriOn ? viTriWeight : 0)
-    + (mauOn ? mauWeight : 0)
-    + (mauAppOn ? mauAppWeight : 0)) * 4) / 4;
+    + (mauOn ? mauWeight : 0));
   const vuotMucUi = tongCacMuc - diemUiConLai > 0.001;
 
   // Mo bang quet la chia deu phan con lai cho cac muc dang bat — KHONG fix cung con so
@@ -856,24 +1003,35 @@ function BehaviorAuthoringEditor() {
   useEffect(() => {
     if (uiInventory && !daKhoiTaoDiemUi.current) {
       daKhoiTaoDiemUi.current = true;
-      const soMuc = 1 + (viTriOn ? 1 : 0) + (mauOn ? 1 : 0) + (mauAppOn ? 1 : 0);
-      const phan = Math.max(0.25, Math.round(diemUiConLai / soMuc * 4) / 4);
-      setViTriWeight(viTriOn ? phan : 0);
-      setMauWeight(mauOn ? phan : 0);
-      setMauAppWeight(mauAppOn ? phan : 0);
-      setUiGroupWeight(Math.max(0.25, Math.round((diemUiConLai - phan * (soMuc - 1)) * 4) / 4));
+      const soMuc = 1 + (viTriOn ? 1 : 0) + (mauOn ? 1 : 0);
+      // Dung chinh chiaDeu de bang quet va bang Chia diem khong bao gio lech nhau.
+      const phan = chiaDeu(diemUiConLai, soMuc);
+      let k = 0;
+      setUiGroupWeight(phan[k++]);
+      setViTriWeight(viTriOn ? phan[k++] : 0);
+      setMauWeight(mauOn ? phan[k++] : 0);
     }
     if (!uiInventory) daKhoiTaoDiemUi.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uiInventory]);
 
-  // Chia deu diem mot MUC xuong cac thanh phan duoc tick (bac 0.25, du don dong cuoi).
+  // Chia deu THAT: bac 0,001, phan du rai tung phan nghin MOT cho cac dong dau nen
+  // chenh lech giua dong nang nhat va nhe nhat toi da 0,001. Truoc day lam tron ve
+  // 0,25 roi don HET phan du vao dong cuoi — chia 10 cho 3 ra 3,25/3,25/3,5, dong
+  // cuoi vo co nang hon han.
   const chiaDeu = (total: number, n: number) => {
-    const mot = Math.max(0.25, Math.round(total / n * 4) / 4);
-    const ra = Array.from({ length: n }, () => mot);
-    ra[n - 1] = Math.max(0.25, Math.round((total - mot * (n - 1)) * 4) / 4);
-    return ra;
+    if (n <= 0) return [];
+    const nghin = Math.max(n, Math.round(total * 1000)); // moi dong it nhat 0,001
+    const moi = Math.floor(nghin / n);
+    const du = nghin - moi * n;
+    return Array.from({ length: n }, (_, i) => lamTron((moi + (i < du ? 1 : 0)) / 1000));
   };
+
+  // Bước gõ chữ chưa khai giá trị: replay sẽ gõ chuỗi rỗng và mọi tiêu chí phía sau
+  // trượt theo, nên khoá nút sinh testcase cho tới khi điền đủ.
+  const buocThieuGiaTri = (recording?.raw_trace || []).filter(
+    (ev) => String(ev.action || "") === "enter_text" && !String(ev.value || "").trim(),
+  ).length;
 
   // Ngan sach 100 diem cua ca bo cham: luat tinh + trong so tung ham + tieu chi
   // giao dien (mang diem TUYET DOI, cong rieng — khong an vao trong so ham).
@@ -882,7 +1040,7 @@ function BehaviorAuthoringEditor() {
   const diemTungHam = (suite?.scenarios || []).map((sc) => (
     { code: String(sc.scenario_code || ""), diem: Number(sc.weight) || 0 }
   ));
-  const diemDaCho = Math.round((diemTinh + diemTungHam.reduce((t, x) => t + x.diem, 0)) * 4) / 4;
+  const diemDaCho = lamTron(diemTinh + diemTungHam.reduce((t, x) => t + x.diem, 0));
   const diemNganSachConLai = Math.max(0, 100 - diemDaCho);
 
   const chanTrongSoHam = (v: number) => {
@@ -900,13 +1058,70 @@ function BehaviorAuthoringEditor() {
     const componentReady = Boolean(checkpointLocatorValue.trim());
     if (uiCheckpointType === "text" && !textReady) { setError("Cần nhập text mong đợi cho checkpoint."); return; }
     if (uiCheckpointType === "component" && !componentReady) { setError("Cần nhập giá trị nhận diện thành phần cho checkpoint."); return; }
+    if (uiCheckpointType === "widget_state" && !wsWidget.trim()) { setError("Cần chọn loại widget cần đọc trạng thái."); return; }
+    if (uiCheckpointType === "text_style" && !tsLocatorValue.trim()) { setError("Cần nhập dòng chữ cần đo kiểu chữ."); return; }
+    if (uiCheckpointType === "widget_state" && !wsLocatorValue.trim() && wsProperty !== "ton_tai") { setError("Cần nhập giá trị nhận diện để biết đọc widget nào."); return; }
     if (!recordingId || !acceptsRecorderEvents.current || recording?.status !== "ACTIVE" || !suite) {
       setError("Phiên record không còn nhận checkpoint — hãy tải lại trang để nối lại phiên.");
       return;
     }
     run("record-checkpoint", async () => {
-      await requestRecorderFlush();
-      await awaitRecorderEvents();
+          // Chốt giá trị nhập còn chờ trước khi ghi checkpoint: thứ tự phải đúng như
+          // người soạn thấy trên màn (luật của bản v20).
+          await requestRecorderFlush();
+          await awaitRecorderEvents();
+      // TRẠNG THÁI WIDGET đi đường riêng: nó không mô tả "có gì trên màn hình" mà đọc
+      // một giá trị thật bên trong widget, nên hình dạng event khác hẳn ba loại kia.
+      if (uiCheckpointType === "widget_state") {
+        const nhan = THUOC_TINH_WIDGET.find(([ma]) => ma === wsProperty)?.[1] ?? wsProperty;
+        await api(`/behavior-authoring/recordings/${recordingId}/events`, {
+          method: "POST",
+          body: JSON.stringify({
+            kind: "widget_state", stage: "ASSERT", action: "observe_ui", browser: "flutter_tester",
+            target: wsLocatorValue.trim() ? { [wsLocator]: wsLocatorValue.trim() } : {},
+            widget: wsWidget.trim(),
+            property: wsProperty,
+            name: `${wsWidget.trim()}${wsLocatorValue.trim() ? ` "${wsLocatorValue.trim()}"` : ""} — ${nhan}`,
+          }),
+        });
+        await refresh(suite.id);
+        setWsLocatorValue("");
+        return;
+      }
+      // KIỂU CHỮ và CHỦ ĐỀ: cùng khuôn "đọc một giá trị rồi so", giá trị chuẩn do hệ
+      // thống tự đo trên Golden lúc sinh testcase.
+      if (uiCheckpointType === "no_overflow") {
+        await api(`/behavior-authoring/recordings/${recordingId}/events`, {
+          method: "POST",
+          body: JSON.stringify({
+            kind: "no_overflow", stage: "ASSERT", action: "observe_ui", browser: "flutter_tester",
+            name: "Cả luồng không vỡ bố cục",
+          }),
+        });
+        await refresh(suite.id);
+        return;
+      }
+      if (uiCheckpointType === "text_style" || uiCheckpointType === "theme_value") {
+        const laChu = uiCheckpointType === "text_style";
+        const bang = laChu ? MAT_KIEU_CHU : GIA_TRI_CHU_DE;
+        const ma = laChu ? tsProperty : tvProperty;
+        const nhan = bang.find(([k]) => k === ma)?.[1] ?? ma;
+        await api(`/behavior-authoring/recordings/${recordingId}/events`, {
+          method: "POST",
+          body: JSON.stringify({
+            kind: uiCheckpointType, stage: "ASSERT", action: "observe_ui", browser: "flutter_tester",
+            target: laChu ? { [tsLocator]: tsLocatorValue.trim() } : {},
+            property: ma,
+            ...(laThuocTinhMau(ma)
+              ? { tolerance_pct: Math.min(50, Math.max(0.5, Number(saiSoMau))) }
+              : {}),
+            name: laChu ? `Chữ "${tsLocatorValue.trim()}" — ${nhan}` : `Chủ đề app — ${nhan}`,
+          }),
+        });
+        await refresh(suite.id);
+        setTsLocatorValue("");
+        return;
+      }
       const event: JsonMap = {
         kind: "checkpoint", stage: "ASSERT", action: "observe_ui", browser: "flutter_tester",
         attribute: uiCheckpointType === "component" ? checkpointLocator : uiCheckpointType,
@@ -943,9 +1158,28 @@ function BehaviorAuthoringEditor() {
         body: JSON.stringify(event),
       });
       await refresh(suite.id);
-      setCheckpointText(""); setHiddenCheckpointText(""); setCheckpointLocatorValue("");
-      setCheckpointValue(""); setCheckpointEnabled("ignore"); setCheckpointChecked("ignore");
+      setCheckpointText(""); setHiddenCheckpointText("");
     });
+  };
+
+  /**
+   * Khai giá trị nhập cho một bước gõ chữ.
+   *
+   * Đây là nguồn sự thật duy nhất cho nội dung gõ: recorder chỉ ghi được cú chạm vào ô,
+   * còn đọc chữ từ DOM của Flutter Web đã hỏng đủ ba kiểu (cắt cụt, mất trắng, nhầm ô)
+   * vì Flutter tráo phần tử input giữa chừng và xoá value khi rời ô.
+   */
+  const suaGiaTriEvent = async (sequence: number, value: string) => {
+    const recordingId = activeRecordingId.current;
+    if (!recordingId || !suite) return;
+    try {
+      await api(`/behavior-authoring/recordings/${recordingId}/events/${sequence}`, {
+        method: "PUT", body: JSON.stringify({ value }),
+      });
+      await refresh(suite.id);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
   };
 
   const deleteRecordedEvent = (sequence: number) => {
@@ -1032,7 +1266,7 @@ function BehaviorAuthoringEditor() {
             viewports: [
               // device_pixel_ratio để cố định 1: chấm bố cục đo bằng dp nên mật độ không
               // đổi điểm, chỉ làm ảnh bằng chứng nặng thêm.
-              { width: viewportWidth, height: viewportHeight, device_pixel_ratio: 1, name: "phone" },
+              { width: viewportWidth, height: viewportHeight, device_pixel_ratio: 1, name: "phone", brightness: cheDoToi ? "dark" : "light" },
             ],
           }),
         });
@@ -1041,13 +1275,34 @@ function BehaviorAuthoringEditor() {
         resetRecorderTransport();
         await refresh(suite.id);
         setEditingScenarioId(null);
+            // Số bước vừa nhận định danh từ Golden (Gói 2): 0 nghĩa là Golden chưa gắn
+            // Semantics(identifier:) hoặc mọi bước đã có sẵn — cả hai đều không phải lỗi.
+            const soDinhDanh = Number(sinhXong.identifier_step_count || 0);
+            const duoiDinhDanh = soDinhDanh > 0 ? ` Đã nướng định danh vào ${soDinhDanh} bước.` : "";
+            // Icon máy chấm nhìn thấy ở màn cuối luồng — mở bảng tick ngay, vì đây là lần duy
+            // nhất trong luồng soạn đề mà thông tin này tồn tại.
+            const dsIcon = Array.isArray(sinhXong.icons) ? (sinhXong.icons as JsonMap[]) : [];
+            if (dsIcon.length > 0 && sinhXong.id) {
+              setIconScenario({
+                id: String(sinhXong.id),
+                ma: String(sinhXong.scenario_code || sinhXong.name || ""),
+                checkpoints: Array.isArray(sinhXong.checkpoints) ? (sinhXong.checkpoints as JsonMap[]) : [],
+              });
+              setIconInventory(dsIcon.map((it) => ({
+                icon: String(it.icon || ""),
+                count: Number(it.count || 1),
+                perRow: Boolean(it.per_row),
+                buttonType: String(it.button_type || ""),
+                checked: false,
+              })));
+            }
         if (sinhXong.capture_warning) {
           // Sinh testcase THÀNH CÔNG nhưng có mùi hỏng-im-lặng — phải đỏ để không bị bỏ qua.
           setError(`Đã sinh testcase, NHƯNG: ${String(sinhXong.capture_warning)}`);
         } else {
-          setNotice(editingScenarioId
+          setNotice((editingScenarioId
             ? "Đã cập nhật scenario, replay Golden trên Database ẩn và tạo lại oracle."
-            : "Đã replay Golden trên Database ẩn, sinh Output Database, oracle và testcase-definition.json.");
+            : "Đã replay Golden trên Database ẩn, sinh Output Database, oracle và testcase-definition.json.") + duoiDinhDanh);
         }
       } catch (caught) {
         // Flush/lưu event lỗi trước khi backend /stop thì phiên vẫn ACTIVE và phải cho
@@ -1076,9 +1331,16 @@ function BehaviorAuthoringEditor() {
   });
 
   const publish = () => suite && run("publish", async () => {
-    await api(`/behavior-authoring/suites/${suite.id}/publish`, { method: "POST" });
+    const daPublish = await api<JsonMap>(`/behavior-authoring/suites/${suite.id}/publish`, { method: "POST" });
     await refresh(suite.id);
-    setNotice("Bộ chấm đã publish và materialize thành runner có thể dùng khi chấm batch.");
+    // Độ phủ định danh toàn bộ đề (backend đếm lúc publish): chỉ để biết, không chặn.
+    const phu = (daPublish.identifier_coverage || {}) as JsonMap;
+    const co = Number(phu.steps_with_identifier || 0);
+    const tong = Number(phu.steps_total || 0);
+    const duoi = tong > 0
+      ? ` Định danh: ${co}/${tong} bước${co < tong ? "; bước còn lại được tìm bằng nhãn/chữ." : "."}`
+      : "";
+    setNotice("Bộ chấm đã publish và materialize thành runner có thể dùng khi chấm batch." + duoi);
   });
 
   const validateGolden = () => suite && run("validate-golden", async () => {
@@ -1119,17 +1381,25 @@ function BehaviorAuthoringEditor() {
     const tongThoMo = hanhViMo.reduce((t, c) => t + (bang[String(c.id)] || 1), 0);
     const tongHam = Number(item.weight) || 1;
     if (hanhViMo.length > 0 && tongThoMo > 0) {
-      let daGan = 0;
-      hanhViMo.forEach((c, i) => {
-        const id = String(c.id);
-        if (i === hanhViMo.length - 1) {
-          bang[id] = Math.max(0.25, Math.round((tongHam - daGan) * 4) / 4);
-        } else {
-          const eff = Math.max(0.25, Math.round((tongHam * (bang[id] || 1) / tongThoMo) * 4) / 4);
-          bang[id] = eff;
-          daGan += eff;
-        }
-      });
+      // Chua ai chia (trong so tho deu bang nhau) -> chia deu that. Da chia roi ->
+      // quy doi theo ty le, phan du rai deu chu khong don het vao dong cuoi.
+      const deuNhau = hanhViMo.every((c) => (bang[String(c.id)] || 1) === (bang[String(hanhViMo[0].id)] || 1));
+      if (deuNhau) {
+        const phan = chiaDeu(tongHam, hanhViMo.length);
+        hanhViMo.forEach((c, i) => { bang[String(c.id)] = phan[i]; });
+      } else {
+        const nghin = Math.round(tongHam * 1000);
+        const tho = hanhViMo.map((c) => bang[String(c.id)] || 1);
+        const san = tho.map((w) => Math.floor(nghin * w / tongThoMo));
+        let du = nghin - san.reduce((t, x) => t + x, 0);
+        // Rai phan du cho cac dong co phan le lon nhat — chia Hare/Niemeyer, sai so
+        // toi da 0,001 mot dong thay vi don het vao mot cho.
+        const le = tho
+          .map((w, i) => ({ i, le: nghin * w / tongThoMo - san[i] }))
+          .sort((a, b) => b.le - a.le);
+        for (let j = 0; j < le.length && du > 0; j++, du--) san[le[j].i] += 1;
+        hanhViMo.forEach((c, i) => { bang[String(c.id)] = lamTron(Math.max(0.001, san[i]) / 1000); });
+      }
     }
     setChiaDiemChot(bang);
     setChiaDiemCha(cha);
@@ -1247,7 +1517,14 @@ function BehaviorAuthoringEditor() {
           .filter((it: JsonMap) => typeof it?.attribute === "string" && typeof it?.attributeValue === "string")
           .map((it: JsonMap) => ({
             attribute: String(it.attribute), value: String(it.attributeValue), role: String(it.role || ""),
-            // semanticId/label/hint là thành phần ngữ nghĩa thật (nút, ô nhập) → tick sẵn. Chữ trần có
+                // Định danh recorder đọc được, chỉ để HIỆN. Không đưa vào target checkpoint: tiêu
+                // chí "màn hình có X" phải tiếp tục kiểm nội dung bằng nhãn/chữ (quyết định Q2).
+                identifier: typeof it.identifier === "string" ? it.identifier : "",
+                // Số thành phần mang cùng khoá này. Nút Xóa của mọi dòng danh sách gộp thành
+                // MỘT dòng ở đây; máy chấm biết chấm theo nhóm (mỗi dòng một cái, vị trí đo
+                // tương đối trong dòng) nên tick một lần là đủ cho cả sáu.
+                count: Number(it.count || 1),
+                // label/hint là thành phần ngữ nghĩa thật (nút, ô nhập) → tick sẵn. Chữ trần có
             // thể là DỮ LIỆU đang hiển thị chứ không phải khung màn hình — để giảng viên tự cân nhắc.
             checked: it.attribute === "semanticId" || it.attribute === "label" || it.attribute === "hint",
           })));
@@ -1278,7 +1555,7 @@ function BehaviorAuthoringEditor() {
   }, [recording, runtimeOrigin]);
 
   return (
-    <SidebarLayout activePath="/teacher/archive" title="Quản lý bộ chấm Golden" subtitle="Record thao tác thật, trừu tượng hóa hành vi và replay tự động trên bài sinh viên" contentClassName="!max-w-none">
+    <SidebarLayout activePath="/teacher/archive" title="Quản lý bộ chấm Golden" contentClassName="!max-w-none">
       <div className="mx-auto max-w-[1500px] space-y-5 p-6 text-slate-800 dark:text-slate-100">
         {mounted && suite && createPortal(
           <div className={`fixed right-0 top-1/3 z-40 flex items-start transition-transform ${thuGon ? "translate-x-[13.5rem]" : ""}`}>
@@ -1287,10 +1564,10 @@ function BehaviorAuthoringEditor() {
               <p className="text-xs font-bold uppercase tracking-widest text-slate-500">Ngân sách điểm</p>
               <p className={`mt-1 text-2xl font-bold ${diemDaCho > 100 ? "text-rose-600" : diemDaCho === 100 ? "text-emerald-600" : "text-slate-800 dark:text-slate-100"}`}>{diemDaCho}<span className="text-sm font-medium text-slate-400"> / 100</span></p>
               {diemDaCho < 100 && <p className="text-xs text-amber-600">còn {diemNganSachConLai}đ chưa phân bổ</p>}
-              {diemDaCho > 100 && <p className="text-xs font-bold text-rose-600">VƯỢT NGÂN SÁCH {Math.round((diemDaCho - 100) * 4) / 4}đ</p>}
+              {diemDaCho > 100 && <p className="text-xs font-bold text-rose-600">VƯỢT NGÂN SÁCH {lamTron(diemDaCho - 100)}đ</p>}
               <div className="mt-2 max-h-48 space-y-1 overflow-auto border-t border-slate-200 pt-2 text-xs dark:border-slate-700">
                 {diemTinh > 0 && <div className="flex justify-between"><span className="text-slate-500">Luật tĩnh</span><b>{diemTinh}đ</b></div>}
-                {diemTungHam.map((x) => <div key={x.code} className="flex justify-between gap-2"><span className="truncate text-slate-500">{x.code}</span><b className="shrink-0">{Math.round(x.diem * 4) / 4}đ</b></div>)}
+                {diemTungHam.map((x) => <div key={x.code} className="flex justify-between gap-2"><span className="truncate text-slate-500">{x.code}</span><b className="shrink-0">{lamTron(x.diem)}đ</b></div>)}
               </div>
             </div>
           </div>,
@@ -1318,65 +1595,6 @@ function BehaviorAuthoringEditor() {
               </div>
             </div>
           </div>
-          <div className="mt-3">
-            <label className="mb-1 block text-xs font-bold uppercase tracking-widest text-slate-500" htmlFor="golden-allowed-packages">
-              Package được phép dùng trong bài sinh viên
-            </label>
-            <div className="flex min-w-0 flex-wrap items-center gap-1.5 rounded-xl border border-slate-300 bg-transparent px-3 py-2 focus-within:border-indigo-500 dark:border-slate-700">
-              {allowedPackages.map((pkg) => (
-                <span key={pkg} className="inline-flex items-center gap-1 rounded-full bg-indigo-100 py-1 pl-3 pr-1.5 font-mono text-xs font-semibold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">
-                  {pkg}
-                  <button type="button" onClick={() => removePackage(pkg)} title={`Bỏ ${pkg}`} className="rounded-full p-0.5 text-indigo-400 hover:bg-indigo-200 hover:text-indigo-800 dark:hover:bg-indigo-900 dark:hover:text-indigo-100">
-                    <X size={12} />
-                  </button>
-                </span>
-              ))}
-              <input
-                id="golden-allowed-packages"
-                value={packageDraft}
-                onChange={(e) => setPackageDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === ",") { e.preventDefault(); addPackage(packageDraft); }
-                  else if (e.key === "Backspace" && !packageDraft && allowedPackages.length) removePackage(allowedPackages[allowedPackages.length - 1]);
-                }}
-                onBlur={() => packageDraft.trim() && addPackage(packageDraft)}
-                placeholder={allowedPackages.length ? "Thêm package, Enter để xác nhận" : "flutter, flutter_test, flutter_riverpod, sqflite, ..."}
-                className="min-w-[160px] flex-1 bg-transparent px-1 py-1 font-mono text-sm outline-none"
-              />
-            </div>
-            {packageSuggestions.length > 0 && (
-              <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                <span className="text-xs text-slate-400">Gợi ý bấm thêm nhanh:</span>
-                {packageSuggestions.map((pkg) => (
-                  <button
-                    key={pkg}
-                    type="button"
-                    onClick={() => addPackage(pkg)}
-                    className="inline-flex items-center gap-1 rounded-full border border-dashed border-slate-300 px-2.5 py-0.5 font-mono text-xs text-slate-500 hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-700 dark:hover:border-indigo-500"
-                  >
-                    <Plus size={10} /> {pkg}
-                  </button>
-                ))}
-              </div>
-            )}
-            <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
-              <p className="max-w-2xl text-xs text-slate-500">
-                Thiếu package nào đang dùng thật (ví dụ flutter_riverpod) sẽ bị chặn ở bước preflight và chấm 0đ dù
-                code đúng. Sửa mục này không làm mất oracle đã capture — không cần record/replay lại.
-              </p>
-              {suite && (
-                <button
-                  type="button"
-                  onClick={saveAllowedPackages}
-                  disabled={!allowedPackagesChanged || !allowedPackages.length || Boolean(busy)}
-                  className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-indigo-400 px-3 py-2 text-sm font-bold text-indigo-600 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-40 dark:text-indigo-300 dark:hover:bg-indigo-950"
-                >
-                  {busy === "save-allowed-packages" ? <Loader2 size={16} className="animate-spin" /> : <ShieldCheck size={16} />}
-                  Lưu package
-                </button>
-              )}
-            </div>
-          </div>
           {!suite && <><button onClick={createSuite} disabled={Boolean(busy)} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-3 font-bold text-white hover:bg-indigo-500 disabled:opacity-50">{busy === "create" ? <Loader2 className="animate-spin" size={18} /> : <Plus size={18} />} Tạo bộ chấm mới</button>{availableSuites.length > 0 && <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">{availableSuites.map((item) => <div key={item.id} className="relative rounded-xl border border-slate-200 transition hover:border-indigo-400 hover:bg-indigo-50/50 dark:border-slate-700 dark:hover:bg-indigo-950/20"><button onClick={() => void openSuite(item)} className="block w-full p-4 pr-14 text-left"><div className="flex items-center justify-between gap-2"><span className="font-bold">{item.name}</span><span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">{item.status}</span></div><p className="mt-1 font-mono text-xs text-indigo-500">{item.suite_code}</p><p className="mt-2 text-xs text-slate-500">Mã đề: {item.exam_id || "chưa gắn"}</p></button><button onClick={() => deleteSuite(item)} disabled={Boolean(busy)} title="Xóa bộ chấm" className="absolute bottom-3 right-3 rounded-lg border border-rose-300 p-2 text-rose-500 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-800 dark:hover:bg-rose-950"><Trash2 size={16} /></button></div>)}</div>}</>}
         </section>
 
@@ -1402,6 +1620,75 @@ function BehaviorAuthoringEditor() {
             </div>
           </section>
 
+          <section className="rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-900">
+            <button onClick={() => setMoGoiChoPhep((v) => !v)} className="flex w-full items-center gap-2 px-5 py-3 text-left">
+              <ChevronDown size={16} className={`shrink-0 text-slate-400 transition-transform ${moGoiChoPhep ? "" : "-rotate-90"}`} />
+              <h3 className="font-bold">Package bài sinh viên được phép dùng</h3>
+              <span className="text-xs text-slate-500">{allowedPackages.length} gói</span>
+              {allowedPackagesChanged && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-700 dark:bg-amber-950 dark:text-amber-300">chưa lưu</span>}
+            </button>
+            {moGoiChoPhep && <div className="border-t border-slate-200 px-5 py-4 dark:border-slate-700">
+              {goiCuaAnh && !goiCuaAnh.imageRead && (
+                <p className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
+                  Chưa đọc được thư viện của ảnh chấm (Docker chưa bật hoặc ảnh chưa build). Cột khả dụng vì thế đang trống; danh sách bên trái là những gì bộ đề đã lưu.
+                </p>
+              )}
+              <div className="grid gap-3 sm:grid-cols-2">
+                {([["dung", "Package được dùng", goiDangDung], ["kha", "Các package khả dụng", goiKhaDung]] as const).map(([ma, tieuDe, danhSach]) => (
+                  <div key={ma}>
+                    <p className="mb-1.5 text-xs font-bold uppercase tracking-widest text-slate-500">{tieuDe} ({danhSach.length})</p>
+                    <div className="flex min-h-24 flex-wrap content-start gap-1.5 rounded-xl border border-dashed border-slate-300 p-2 dark:border-slate-700">
+                      {danhSach.length === 0 && <span className="px-1 text-xs text-slate-400">trống</span>}
+                      {danhSach.map((ten) => {
+                        const loi = GOI_LOI.includes(ten);
+                        return (
+                          <button
+                            key={ten}
+                            type="button"
+                            disabled={loi}
+                            onClick={() => batTatPackage(ten)}
+                            title={loi ? "Gói lõi, bỏ đi thì không bài nào biên dịch được" : (ma === "dung" ? "Bấm để bỏ khỏi đề" : "Bấm để cho phép")}
+                            className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 font-mono text-xs ${loi
+                              ? "cursor-not-allowed bg-slate-100 text-slate-400 dark:bg-slate-800"
+                              : ma === "dung"
+                                ? "bg-indigo-100 font-semibold text-indigo-700 hover:bg-rose-100 hover:text-rose-700 dark:bg-indigo-950 dark:text-indigo-300"
+                                : "border border-slate-300 text-slate-500 hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-600 dark:text-slate-400"}`}
+                          >
+                            {ten}
+                            {loi && <span className="text-[10px]">lõi</span>}
+                            {!loi && tenKhaiThang.length > 0 && !tenKhaiThang.includes(ten)
+                              && <span className="text-[10px] opacity-60" title="Không khai trong pubspec của ảnh chấm nhưng vẫn import được vì đi kèm một thư viện khác. Vì thế danh sách này dài hơn trang Thư viện chấm.">kéo theo</span>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {ma === "kha" && (soKeoTheoAn > 0 || moGoiKeoTheo) && (
+                      <button type="button" onClick={() => setMoGoiKeoTheo((v) => !v)} className="mt-1.5 text-xs text-slate-500 hover:text-indigo-500">
+                        {moGoiKeoTheo ? "Ẩn bớt gói kéo theo" : `Hiện thêm ${soKeoTheoAn} gói kéo theo`}
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+                <p className="max-w-2xl text-xs text-slate-500">
+                  Chỉ những gói bên trái mới được import trong bài; bài dùng gói khác bị chặn ngay trước khi biên dịch và
+                  chấm 0đ. Cột phải là thư viện có thật trong ảnh chấm, nên chọn gì cũng chạy được. Sửa mục này không làm
+                  mất oracle đã capture.
+                </p>
+                <button
+                  type="button"
+                  onClick={saveAllowedPackages}
+                  disabled={!allowedPackagesChanged || !allowedPackages.length || Boolean(busy)}
+                  className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-indigo-400 px-3 py-2 text-sm font-bold text-indigo-600 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-indigo-700 dark:text-indigo-300 dark:hover:bg-indigo-950/40"
+                >
+                  {busy === "save-allowed-packages" ? <Loader2 size={16} className="animate-spin" /> : <ShieldCheck size={16} />}
+                  Lưu package
+                </button>
+              </div>
+            </div>}
+          </section>
+
           <section className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)]">
             <div className="min-w-0 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
               <p className="text-xs font-bold uppercase tracking-widest text-indigo-500">Bước 3</p><h2 className="text-xl font-bold">Thao tác trên Golden App</h2>
@@ -1415,40 +1702,31 @@ function BehaviorAuthoringEditor() {
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-sm font-bold">Tiêu chí giao diện — tick thành phần được tính điểm</span>
                     <label className="flex items-center gap-1 text-sm">Điểm hiện diện
-                      <input type="number" min={0.25} step={0.25} value={uiGroupWeight} onChange={(e) => setUiGroupWeight(Math.max(0, Number(e.target.value)))} className="w-20 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-600" />
+                      <input type="number" min={0.001} step={0.001} value={uiGroupWeight} onChange={(e) => setUiGroupWeight(Math.max(0, Number(e.target.value)))} className="w-20 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-600" />
                     </label>
                     <input value={uiScreenName} onChange={(e) => setUiScreenName(e.target.value)} placeholder="Tên màn (vd: Màn danh sách)" className="rounded-lg border border-slate-300 px-2 py-1 text-sm dark:border-slate-600 dark:bg-slate-800" />
                     <span className={`text-xs font-bold ${vuotMucUi ? "text-rose-600" : "text-slate-500"}`}>Đã chia {tongCacMuc}/{diemUiConLai}đ của hàm{vuotMucUi ? " — VƯỢT, hạ bớt mới lưu được" : ""}</span>
                     <button onClick={saveUiCriteria} disabled={Boolean(busy) || vuotMucUi || !uiInventory.some((it) => it.checked)} className="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-bold text-white disabled:opacity-40">
-                      Lưu {uiInventory.filter((it) => it.checked).length * (1 + (viTriOn ? 1 : 0) + (mauOn ? 1 : 0)) + (mauAppOn ? 1 : 0)} tiêu chí
+                      Lưu {uiInventory.filter((it) => it.checked).length * (1 + (viTriOn ? 1 : 0) + (mauOn ? 1 : 0))} tiêu chí
                     </button>
                     <button onClick={() => setUiInventory(null)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-bold text-slate-600 dark:border-slate-600 dark:text-slate-300">Đóng</button>
                   </div>
                   <label className="mt-2 flex cursor-pointer flex-wrap items-center gap-2 rounded-lg border border-dashed border-emerald-400 px-2 py-1.5 text-sm dark:border-emerald-700">
                     <input type="checkbox" checked={viTriOn} onChange={() => setViTriOn((v) => !v)} />
                     <span className="font-bold">Chấm vị trí từng thành phần</span>
-                    <span className="text-[11px] text-slate-500">(so tâm thành phần với Golden; sai số tính theo % chiều rộng/cao màn — 8% ≈ {Math.round(viewportWidth * 0.08)}dp ngang, {Math.round(viewportHeight * 0.08)}dp dọc trên khung {viewportWidth}×{viewportHeight}. Đo thật trên SP27: 5% và 8% cho kết quả y hệt, 12% thì bài bố cục sai bắt đầu lọt)</span>
+                    <span className="text-[11px] text-slate-500">(so tâm thành phần với Golden; sai số tính theo % chiều rộng/cao màn)</span>
                     <span className="ml-auto flex items-center gap-1 text-xs">
-                      <input type="number" min={0.25} step={0.25} value={viTriWeight} onChange={(e) => setViTriWeight(Math.max(0, Number(e.target.value)))} className="w-16 rounded border border-slate-300 bg-transparent px-1.5 py-0.5 dark:border-slate-600" /> điểm ·
+                      <input type="number" min={0.001} step={0.001} value={viTriWeight} onChange={(e) => setViTriWeight(Math.max(0, Number(e.target.value)))} className="w-16 rounded border border-slate-300 bg-transparent px-1.5 py-0.5 dark:border-slate-600" /> điểm ·
                       sai số <input type="number" min={0.5} max={50} step={0.5} value={viTriSaiSo} onChange={(e) => setViTriSaiSo(Number(e.target.value))} className="w-14 rounded border border-slate-300 px-1.5 py-0.5 dark:border-slate-600 dark:bg-slate-800" />%
                     </span>
                   </label>
                   <label className="mt-1 flex cursor-pointer flex-wrap items-center gap-2 rounded-lg border border-dashed border-emerald-400 px-2 py-1.5 text-sm dark:border-emerald-700">
                     <input type="checkbox" checked={mauOn} onChange={() => setMauOn((v) => !v)} />
                     <span className="font-bold">Chấm màu từng thành phần</span>
-                    <span className="text-[11px] text-slate-500">(so màu chính với Golden; sai số tính theo % của 255 trên từng kênh R/G/B — 5% bắt được cả lệch một nấc Material shade, xanh-vs-tím lệch tới 30%)</span>
+                    <span className="text-[11px] text-slate-500">(so màu chính với Golden; sai số tính theo % của 255 trên từng kênh R/G/B)</span>
                     <span className="ml-auto flex items-center gap-1 text-xs">
-                      <input type="number" min={0.25} step={0.25} value={mauWeight} onChange={(e) => setMauWeight(Math.max(0, Number(e.target.value)))} className="w-16 rounded border border-slate-300 bg-transparent px-1.5 py-0.5 dark:border-slate-600" /> điểm ·
+                      <input type="number" min={0.001} step={0.001} value={mauWeight} onChange={(e) => setMauWeight(Math.max(0, Number(e.target.value)))} className="w-16 rounded border border-slate-300 bg-transparent px-1.5 py-0.5 dark:border-slate-600" /> điểm ·
                       sai số <input type="number" min={0.5} max={50} step={0.5} value={mauSaiSo} onChange={(e) => setMauSaiSo(Number(e.target.value))} className="w-14 rounded border border-slate-300 px-1.5 py-0.5 dark:border-slate-600 dark:bg-slate-800" />%
-                    </span>
-                  </label>
-                  <label className="mt-1 flex cursor-pointer flex-wrap items-center gap-2 rounded-lg border border-dashed border-emerald-400 px-2 py-1.5 text-sm dark:border-emerald-700">
-                    <input type="checkbox" checked={mauAppOn} onChange={() => setMauAppOn((v) => !v)} />
-                    <span className="font-bold">Chấm màu chủ đạo của app</span>
-                    <span className="text-[11px] text-slate-500">(MỘT dòng cho cả màn, đọc thẳng ColorScheme nên chính xác tuyệt đối — sai số rộng là để tha sắc độ lân cận cùng họ màu, không phải để chống nhiễu; đo thật: xanh-vs-tím lệch 40%)</span>
-                    <span className="ml-auto flex items-center gap-1 text-xs">
-                      <input type="number" min={0.25} step={0.25} value={mauAppWeight} onChange={(e) => setMauAppWeight(Math.max(0, Number(e.target.value)))} className="w-16 rounded border border-slate-300 bg-transparent px-1.5 py-0.5 dark:border-slate-600" /> điểm ·
-                      sai số <input type="number" min={0.5} max={50} step={0.5} value={mauAppSaiSo} onChange={(e) => setMauAppSaiSo(Number(e.target.value))} className="w-14 rounded border border-slate-300 px-1.5 py-0.5 dark:border-slate-600 dark:bg-slate-800" />%
                     </span>
                   </label>
                   <div className="mt-2 grid max-h-56 gap-1 overflow-auto pr-1">
@@ -1457,40 +1735,76 @@ function BehaviorAuthoringEditor() {
                         <input type="checkbox" checked={it.checked} onChange={() => setUiInventory((prev) => prev ? prev.map((x, j) => (j === i ? { ...x, checked: !x.checked } : x)) : prev)} />
                         <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold ${it.attribute === "label" ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300" : it.attribute === "hint" ? "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300" : "bg-slate-100 text-slate-500 dark:bg-slate-800"}`}>{it.attribute}</span>
                         <span className="truncate">{it.value}</span>
+                        {it.count > 1 && <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-700 dark:bg-amber-950 dark:text-amber-300" title="Thành phần này lặp lại trên màn hình, thường là mỗi dòng danh sách một cái. Tick một lần là chấm cả nhóm: mỗi dòng phải có đúng một, vị trí đo tương đối trong dòng, màu đo trên mọi thể hiện.">×{it.count} · lặp</span>}
+                        {it.identifier && <span className="shrink-0 rounded bg-teal-100 px-1.5 py-0.5 font-mono text-[10px] font-bold text-teal-700 dark:bg-teal-950 dark:text-teal-300" title="Định danh Semantics(identifier:) của thành phần. Checkpoint tạo từ đây vẫn kiểm nội dung bằng nhãn/chữ.">{it.identifier}</span>}
                         {it.role && <span className="ml-auto text-[10px] text-slate-400">{it.role}</span>}
                       </label>
                     ))}
                   </div>
-                  <p className="mt-2 text-[11px] text-slate-500">
-                    Nút và ô nhập (label/hint) được tick sẵn. Chữ trần (text) có thể là dữ liệu đang hiển thị — chỉ tick khi nó là khung màn hình
-                    (tiêu đề, nhãn cố định). Tiêu chí neo vào trạng thái cuối của luồng đang ghi: đưa app tới đúng màn cần chấm rồi mới quét.
-                  </p>
                 </div>
               )}
               {previewUrl ? <div className="mt-4 w-full overflow-auto rounded-xl border border-slate-300 bg-slate-100 p-3 dark:border-slate-700 dark:bg-slate-950"><iframe ref={goldenFrame} title="Golden App" src={previewUrl} style={{ width: Math.min(viewportWidth, 900), minWidth: Math.min(viewportWidth, 900), height: Math.min(viewportHeight, 700) }} className="mx-auto block rounded-lg border border-slate-300 bg-white dark:border-slate-700" /></div> : <div className="mt-4 flex h-[300px] flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 text-center dark:border-slate-700"><MonitorPlay size={42} className="text-slate-400" /><p className="mt-3 font-bold">Golden Solution chưa được build để thao tác</p><p className="mt-1 max-w-md text-sm text-slate-500">Upload Golden ZIP rồi bấm “Build & mở Golden”. Hệ thống tự host app và ghi click/nhập liệu bằng semantic locator.</p></div>}
             </div>
 
             <div ref={authoringPanel} className="min-w-0 scroll-mt-24 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
-              <div className="flex items-center justify-between"><div><p className="text-xs font-bold uppercase tracking-widest text-indigo-500">Bước 4</p><h2 className="text-xl font-bold">Record → Abstract</h2></div>{recording ? <span className={`flex items-center gap-2 text-sm font-bold ${recording.status === "ACTIVE" ? "text-rose-500" : "text-amber-500"}`}><span className={`h-2 w-2 rounded-full ${recording.status === "ACTIVE" ? "animate-pulse bg-rose-500" : "bg-amber-500"}`} /> {recording.status === "ACTIVE" ? "Đang ghi" : "Chờ sinh testcase"}</span> : <span className="text-sm text-slate-500">Chưa ghi</span>}</div>
-              {editingScenarioId && recording && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-indigo-300 bg-indigo-50 px-4 py-3 text-sm dark:border-indigo-800 dark:bg-indigo-950/30"><div><p className="font-bold text-indigo-700 dark:text-indigo-300">Đang sửa scenario {scenarioCode}</p><p className="mt-1 text-xs text-slate-600 dark:text-slate-300">Toàn bộ bước cũ đã nằm trong danh sách bên dưới. Hãy thao tác thêm trên Golden App hoặc dùng các form thêm action/checkpoint; có thể xóa từng bước cũ.</p></div><button onClick={cancelActiveRecording} disabled={Boolean(busy)} className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-bold disabled:opacity-40 dark:border-slate-700">Hủy sửa</button></div>}
-              <div className="mt-4 grid gap-3 sm:grid-cols-3"><input value={scenarioCode} disabled={Boolean(editingScenarioId)} onChange={(e) => setScenarioCode(e.target.value)} placeholder="Mã luồng (vd: ADD, EDIT, FILTER_ALL)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700" /><input value={scenarioName} onChange={(e) => setScenarioName(e.target.value)} placeholder="Tên luồng (vd: Thêm khoản chi)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><input type="number" min={0.1} step={0.5} value={scenarioWeight} onChange={(e) => setScenarioWeight(chanTrongSoHam(Number(e.target.value)))} aria-label="Trọng số scenario" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /></div>
-              <div className="mt-2 grid gap-2 sm:grid-cols-2"><label className="text-xs font-semibold text-slate-500">Rộng màn (dp)<input type="number" min={240} value={viewportWidth} onChange={(e) => setViewportWidth(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label><label className="text-xs font-semibold text-slate-500">Cao màn (dp)<input type="number" min={320} value={viewportHeight} onChange={(e) => setViewportHeight(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label></div>
-              <p className="mt-2 text-xs font-semibold text-slate-600 dark:text-slate-300">Khung máy Android, tính bằng dp — cỡ mà Android Studio hiển thị cho máy ảo (Pixel: 412×915). Mọi phép chấm bố cục đều đo bằng dp nên không cần khai mật độ điểm ảnh.</p>
-              {!recording ? <><button onClick={startRecording} disabled={!recordingInputsReady || Boolean(busy)} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-rose-600 px-4 py-2.5 font-bold text-white disabled:opacity-40"><Radio size={18} /> Bắt đầu record</button>{!recordingInputsReady && <p className="mt-2 text-xs text-amber-600">Cần đủ Database phát sinh viên, Database ẩn và Golden Solution.</p>}</> : <>
-                <div className="mt-5 rounded-xl border border-slate-200 p-4 dark:border-slate-700">
-                  <h3 className="font-bold">Thêm action</h3>
-                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                    <select value={action} onChange={(e) => setAction(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{ACTIONS.map((item) => <option key={item} value={item}>{item}</option>)}</select>
-                    {manualActionNeedsTarget && <select value={locator} onChange={(e) => setLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{item}</option>)}</select>}
-                    {manualActionNeedsTarget && <input value={locatorValue} onChange={(e) => setLocatorValue(e.target.value)} placeholder="Giá trị nhận diện semantic" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />}
-                    {(action === "enter_text" || manualActionNeedsUri) && <input value={inputValue} onChange={(e) => setInputValue(e.target.value)} placeholder={manualActionNeedsUri ? "URI/path, ví dụ /movies/42?tab=cast" : "Dữ liệu nhập"} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />}
+              <div className="flex items-center justify-between"><div><p className="text-xs font-bold uppercase tracking-widest text-indigo-500">Bước 4</p><h2 className="text-xl font-bold">Record → Abstract</h2></div>{editingScenarioId && <span className="mr-3 rounded-full bg-indigo-100 px-2.5 py-1 text-xs font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300" title="Đang sửa một scenario đã có. Bước cũ nằm sẵn trong danh sách dưới; bấm Hủy sửa ở hàng nút cuối để thoát.">Đang sửa {scenarioCode || "scenario"}</span>}{recording ? <span className={`flex items-center gap-2 text-sm font-bold ${recording.status === "ACTIVE" ? "text-rose-500" : "text-amber-500"}`}><span className={`h-2 w-2 rounded-full ${recording.status === "ACTIVE" ? "animate-pulse bg-rose-500" : "bg-amber-500"}`} /> {recording.status === "ACTIVE" ? "RECORDING" : "Chờ sinh testcase"}</span> : <span className="text-sm text-slate-500">Chưa ghi</span>}</div>
+              {iconInventory && iconScenario && (
+                <div className="mt-4 rounded-xl border border-teal-300 bg-teal-50/40 p-3 dark:border-teal-800 dark:bg-teal-950/20">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-bold">Icon máy chấm thấy ở luồng {iconScenario.ma} — tick icon được tính điểm</span>
+                    <input value={uiScreenName} onChange={(e) => setUiScreenName(e.target.value)} placeholder="Tên màn (vd: Màn danh sách)" className="rounded-lg border border-slate-300 px-2 py-1 text-sm dark:border-slate-600 dark:bg-slate-800" />
+                    <button onClick={luuTieuChiIcon} disabled={Boolean(busy) || !iconInventory.some((it) => it.checked)} className="rounded-lg bg-teal-600 px-3 py-1.5 text-sm font-bold text-white disabled:opacity-40">
+                      Thêm {iconInventory.filter((it) => it.checked).length * (1 + (viTriOn ? 1 : 0) + (mauOn ? 1 : 0))} tiêu chí
+                    </button>
+                    <button onClick={() => { setIconInventory(null); setIconScenario(null); }} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-bold text-slate-600 dark:border-slate-600 dark:text-slate-300">Đóng</button>
                   </div>
-                  <button onClick={() => appendAction()} className="mt-3 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-bold text-white"><Plus size={16} /> Thêm action</button>
-                  <p className="mt-2 text-xs text-slate-500">Route hiện tại của Golden: <code>{currentRoute}</code>. Reload trong runner phát lại RouteInformation hiện tại để kiểm khả năng phục hồi route; deep link native vẫn cần lane Android riêng.</p>
+                  <p className="mt-2 text-[11px] text-slate-500">
+                    Dành cho nút chỉ có hình (Thêm, Xóa): chấm đúng icon, đúng chỗ, đúng màu mà KHÔNG bắt sinh viên gắn nhãn ngữ nghĩa chỉ để máy tìm.
+                    Bảng này do máy chấm đo trên cây widget lúc capture, không phải quét DOM — nút không nhãn thì DOM web không thấy.
+                    Icon lặp ở mỗi dòng danh sách được chấm ở <b>mọi dòng</b>: thiếu một dòng là trượt, còn vị trí đo tương đối trong dòng nên dòng đầu và dòng cuối cùng một chuẩn.
+                  </p>
+                  <div className="mt-2 grid max-h-56 gap-1 overflow-auto pr-1">
+                    {iconInventory.map((it, i) => (
+                      <label key={it.icon} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 text-sm hover:bg-teal-100/60 dark:hover:bg-teal-900/30">
+                        <input type="checkbox" checked={it.checked} onChange={() => setIconInventory((prev) => prev ? prev.map((x, j) => (j === i ? { ...x, checked: !x.checked } : x)) : prev)} />
+                        <span className="rounded bg-teal-100 px-1.5 py-0.5 font-mono text-[10px] font-bold text-teal-700 dark:bg-teal-950 dark:text-teal-300">icon</span>
+                        <span className="truncate font-mono">{it.icon}</span>
+                        {it.count > 1 && (
+                          <span title="Icon này xuất hiện nhiều lần. Có 'lặp theo dòng' nghĩa là mỗi dòng danh sách đúng một cái — máy sẽ chấm đủ mọi dòng." className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+                            ×{it.count}{it.perRow ? " · lặp theo dòng" : ""}
+                          </span>
+                        )}
+                        {it.buttonType && <span className="ml-auto text-[10px] text-slate-400">{it.buttonType}</span>}
+                      </label>
+                    ))}
+                  </div>
+                  <p className="mt-2 text-[11px] text-slate-500">Ba mặt (có mặt · vị trí · màu) và số điểm lấy theo đúng các ô đã đặt ở bảng “Quét thành phần UI”. Lưu xong hệ thống tự capture lại để đo giá trị chuẩn.</p>
+                </div>
+              )}
+              <div className="mt-4 grid gap-3 sm:grid-cols-3"><input value={scenarioCode} disabled={Boolean(editingScenarioId)} onChange={(e) => setScenarioCode(e.target.value)} placeholder="Mã luồng (vd: ADD, EDIT, FILTER_ALL)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700" /><input value={scenarioName} onChange={(e) => setScenarioName(e.target.value)} placeholder="Tên luồng (vd: Thêm khoản chi)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><input type="number" min={0.1} step={0.5} value={scenarioWeight} onChange={(e) => setScenarioWeight(chanTrongSoHam(Number(e.target.value)))} aria-label="Trọng số scenario" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /></div>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2"><label className="text-xs font-semibold text-slate-500">Rộng màn (dp)<input type="number" min={240} value={viewportWidth} onChange={(e) => setViewportWidth(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label><label className="text-xs font-semibold text-slate-500">Cao màn (dp)<input type="number" min={320} value={viewportHeight} onChange={(e) => setViewportHeight(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-slate-800 dark:border-slate-700 dark:text-slate-100" /></label><label className="flex items-center gap-2 text-xs font-semibold text-slate-500 sm:col-span-2"><input type="checkbox" checked={cheDoToi} onChange={() => setCheDoToi((v) => !v)} /> Chấm hàm này ở chế độ tối <span className="font-normal">— engine đặt platformBrightness = dark trước khi boot; bài có darkTheme sẽ tự đổi, giá trị chuẩn màu/kiểu chữ đo ở chế độ tối. Khung Golden bên trên vẫn hiện sáng.</span></label></div>
+              <p className="mt-2 text-xs font-semibold text-slate-600 dark:text-slate-300">Khung máy Android, tính bằng dp. Mọi phép chấm bố cục đều đo bằng dp nên không cần pixel.</p>
+              {!recording ? <><button onClick={startRecording} disabled={!recordingInputsReady || Boolean(busy)} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-rose-600 px-4 py-2.5 font-bold text-white disabled:opacity-40"><Radio size={18} /> Bắt đầu record</button>{!recordingInputsReady && <p className="mt-2 text-xs text-amber-600">Cần đủ Database phát sinh viên, Database ẩn và Golden Solution.</p>}</> : <>
+                <div className="mt-5 rounded-xl border border-slate-200 dark:border-slate-700">
+                  <button onClick={() => setMoThemAction((v) => !v)} className="flex w-full items-center gap-2 px-4 py-2.5 text-left">
+                    <ChevronDown size={16} className={`shrink-0 text-slate-400 transition-transform ${moThemAction ? "" : "-rotate-90"}`} />
+                    <h3 className="font-bold">Thêm action</h3>
+                    <span className="text-xs text-slate-500">khai tay</span>
+                  </button>
+                  {moThemAction && <div className="border-t border-slate-200 px-4 py-3 dark:border-slate-700">
+                    <div className="grid gap-2 sm:grid-cols-2">
+                        <select value={action} onChange={(e) => setAction(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{ACTIONS.map((item) => <option key={item} value={item}>{item}</option>)}</select>
+                        {manualActionNeedsTarget && <select value={locator} onChange={(e) => setLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{item}</option>)}</select>}
+                        {manualActionNeedsTarget && <input value={locatorValue} onChange={(e) => setLocatorValue(e.target.value)} placeholder="Giá trị nhận diện semantic" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />}
+                        {(action === "enter_text" || manualActionNeedsUri) && <input value={inputValue} onChange={(e) => setInputValue(e.target.value)} placeholder={manualActionNeedsUri ? "URI/path, ví dụ /movies/42?tab=cast" : "Dữ liệu nhập"} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />}
+                    </div>
+                          {action === "drag" && <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-500"><span>Độ dời (dp):</span><label className="flex items-center gap-1">ngang <input type="number" step={10} value={keoX} onChange={(e) => setKeoX(Number(e.target.value))} className="w-20 rounded border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-600" /></label><label className="flex items-center gap-1">dọc <input type="number" step={10} value={keoY} onChange={(e) => setKeoY(Number(e.target.value))} className="w-20 rounded border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-600" /></label></div>}
+                    <button onClick={() => appendAction()} className="mt-3 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-bold text-white"><Plus size={16} /> Thêm action</button>
+                  </div>}
                 </div>
                 <div className="mt-3 rounded-xl border border-slate-200 p-4 dark:border-slate-700">
                   <div className="flex items-center justify-between gap-3">
-                    <div><h3 className="font-bold">Thêm checkpoint</h3><p className="text-xs text-slate-500">Mỗi checkpoint trở thành một đầu điểm độc lập. Điểm và ràng buộc chia ở bảng &quot;Chia điểm&quot; trên thẻ hàm, sau khi sinh testcase.</p></div>
+                    <div><h3 className="font-bold">Thêm checkpoint</h3></div>
                     <div className="flex rounded-lg bg-slate-100 p-1 text-xs font-bold dark:bg-slate-800">
                       <button onClick={() => setCheckpointMode("ui")} className={`rounded-md px-3 py-1.5 ${checkpointMode === "ui" ? "bg-white text-indigo-600 shadow dark:bg-slate-700" : "text-slate-500"}`}>UI</button>
                       <button onClick={() => setCheckpointMode("database")} className={`rounded-md px-3 py-1.5 ${checkpointMode === "database" ? "bg-white text-indigo-600 shadow dark:bg-slate-700" : "text-slate-500"}`}>Database</button>
@@ -1500,9 +1814,13 @@ function BehaviorAuthoringEditor() {
                   </div>
                   {checkpointMode === "ui" ? (
                     <div className="mt-3 space-y-2">
-                      <select value={uiCheckpointType} onChange={(e) => setUiCheckpointType(e.target.value as "text" | "component" | "no_exception")} className="w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">
+                      <select value={uiCheckpointType} onChange={(e) => setUiCheckpointType(e.target.value as "text" | "component" | "widget_state" | "text_style" | "theme_value" | "no_overflow" | "no_exception")} className="w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">
                         <option value="text">Nội dung text xuất hiện / không xuất hiện</option>
                         <option value="component">Thành phần UI và trạng thái semantic</option>
+                        <option value="widget_state">Trạng thái thật bên trong widget</option>
+                        <option value="text_style">Kiểu chữ của một dòng chữ</option>
+                        <option value="theme_value">Bảng chủ đề của app (màu, phông, Material 3)</option>
+                        <option value="no_overflow">Không vỡ bố cục (RenderFlex overflow)</option>
                         <option value="no_exception">Luồng không phát sinh exception</option>
                       </select>
                       {uiCheckpointType === "text" && <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
@@ -1525,6 +1843,39 @@ function BehaviorAuthoringEditor() {
                         </div>
                         <p className="text-xs text-slate-500">Có thể chỉ kiểm tra sự tồn tại, hoặc kiểm tra thêm đúng loại widget, giá trị, enabled và checked.</p>
                       </div>}
+                      {uiCheckpointType === "widget_state" && <div className="space-y-2">
+                        <p className="text-xs text-slate-500">Đọc một giá trị thật bên trong widget: công tắc đang bật hay tắt, dải trượt bao nhiêu, ô nhập có dùng bàn phím số không, nút có đúng loại không. Giá trị chuẩn do hệ thống tự đo trên bài Golden lúc sinh testcase — không phải gõ tay.</p>
+                        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-[auto_1.2fr_1.2fr_1.6fr_auto]">
+                          <select value={wsLocator} onChange={(e) => setWsLocator(e.target.value)} title="Cách nhận diện điểm neo trên màn hình" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{LOCATOR_LABELS[item] || item}</option>)}</select>
+                          <input value={wsLocatorValue} onChange={(e) => setWsLocatorValue(e.target.value)} placeholder="Chữ hoặc nhãn để tìm" className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />
+                          <input list="ds-widget" value={wsWidget} onChange={(e) => setWsWidget(e.target.value)} placeholder="Loại widget, ví dụ Slider" title="Tên kiểu widget mang giá trị cần đọc. Hệ thống tìm cả bên trong lẫn bao quanh điểm neo." className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />
+                          <datalist id="ds-widget">{WIDGET_GOI_Y.map((w) => <option key={w} value={w} />)}</datalist>
+                          <select value={wsProperty} onChange={(e) => setWsProperty(e.target.value)} className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{THUOC_TINH_WIDGET.map(([ma, nhan]) => <option key={ma} value={ma}>{nhan}</option>)}</select>
+                          <button onClick={appendUiCheckpoint} title="Lưu tiêu chí trạng thái" className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white"><Check size={16} /></button>
+                        </div>
+                      </div>}
+                      {uiCheckpointType === "text_style" && <div className="space-y-2">
+                        <p className="text-xs text-slate-500">Đo kiểu chữ thật sự được vẽ, nên bắt được cả chữ thừa kế từ theme lẫn chữ đặt style thẳng trên widget. Cỡ chữ và độ đậm so tuyệt đối; màu chữ so theo sai số 20% như mọi tiêu chí màu.</p>
+                        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-[auto_1.6fr_1.4fr_auto]">
+                          <select value={tsLocator} onChange={(e) => setTsLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{LOCATOR_LABELS[item] || item}</option>)}</select>
+                          <input value={tsLocatorValue} onChange={(e) => setTsLocatorValue(e.target.value)} placeholder="Dòng chữ cần đo" className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />
+                          <select value={tsProperty} onChange={(e) => setTsProperty(e.target.value)} className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{MAT_KIEU_CHU.map(([ma, nhan]) => <option key={ma} value={ma}>{nhan}</option>)}</select>
+                          {laThuocTinhMau(tsProperty) && <label className="flex items-center gap-1 whitespace-nowrap text-xs text-slate-500">sai số <input type="number" min={0.5} max={50} step={0.5} value={saiSoMau} onChange={(e) => setSaiSoMau(Number(e.target.value))} className="w-14 rounded border border-slate-300 bg-transparent px-1.5 py-1 dark:border-slate-600" />%</label>}
+                          <button onClick={appendUiCheckpoint} title="Lưu tiêu chí kiểu chữ" className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white"><Check size={16} /></button>
+                        </div>
+                      </div>}
+                      {uiCheckpointType === "theme_value" && <div className="space-y-2">
+                        <p className="text-xs text-slate-500">Đọc thẳng bảng chủ đề trong cây widget — không lấy mẫu pixel, nên đây là đúng giá trị bài làm khai. Không cần chỉ thành phần nào vì chủ đề là của cả app. Sai số chỉ hiện với thuộc tính màu; cỡ chữ, độ đậm và bật/tắt đều so tuyệt đối.</p>
+                        <div className="grid gap-2 sm:grid-cols-[1fr_auto_auto]">
+                          <select value={tvProperty} onChange={(e) => setTvProperty(e.target.value)} className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{GIA_TRI_CHU_DE.map(([ma, nhan]) => <option key={ma} value={ma}>{nhan}</option>)}</select>
+                          {laThuocTinhMau(tvProperty) && <label className="flex items-center gap-1 whitespace-nowrap text-xs text-slate-500">sai số <input type="number" min={0.5} max={50} step={0.5} value={saiSoMau} onChange={(e) => setSaiSoMau(Number(e.target.value))} className="w-14 rounded border border-slate-300 bg-transparent px-1.5 py-1 dark:border-slate-600" />%</label>}
+                          <button onClick={appendUiCheckpoint} title="Lưu tiêu chí chủ đề" className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white"><Check size={16} /></button>
+                        </div>
+                      </div>}
+                      {uiCheckpointType === "no_overflow" && <div className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2 text-sm dark:bg-slate-800">
+                        <span>Đạt khi không màn nào trong luồng bị tràn (sọc vàng-đen). Từ nay tràn bố cục <b>không còn làm chết cả hàm</b> — nó chỉ trượt đúng tiêu chí này.</span>
+                        <button onClick={appendUiCheckpoint} title="Lưu tiêu chí không vỡ bố cục" className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white"><Check size={16} /></button>
+                      </div>}
                       {uiCheckpointType === "no_exception" && <div className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2 text-sm dark:bg-slate-800">
                         <span>Checkpoint pass khi luồng chạy tới đây mà ứng dụng không ném exception.</span>
                         <button onClick={appendUiCheckpoint} title="Lưu checkpoint không exception" className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white"><Check size={16} /></button>
@@ -1541,7 +1892,6 @@ function BehaviorAuthoringEditor() {
                         <textarea value={databaseRow} onChange={(e) => setDatabaseRow(e.target.value)} rows={2} placeholder={'Row JSON, ví dụ {"uid":"SV01"}'} className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-xs dark:border-slate-700" />
                         <button onClick={appendDatabaseCheckpoint} title="Luu checkpoint database" className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white"><Check size={16} /></button>
                       </div>
-                      <p className="text-xs text-slate-500">Mục này dùng để bổ sung assertion DB có chủ đích. Dù bỏ qua, hệ thống vẫn tự replay Golden, so Hidden DB với Output DB và tách INSERT/UPDATE/DELETE thành checkpoint độc lập. Nếu checkpoint UI và row SQLite cùng chứa giá trị nhập cuối, hệ thống tự gộp thành checkpoint đối chiếu Input → UI → Database.</p>
                     </div>
                   ) : checkpointMode === "route" ? (
                     <div className="mt-3 space-y-2">
@@ -1576,44 +1926,55 @@ function BehaviorAuthoringEditor() {
                   const sequence = Number(item.sequence || index + 1);
                   const actionCode = String(item.action || item.kind || "event");
                   const target = asJsonMap(item.target);
-                  const locator = ["semanticId", "valueKey", "label", "hint", "text"]
-                    .map((key) => ({ key, value: readableValue(target[key]) }))
-                    .find((entry) => entry.value.trim().length > 0);
-                  const targetHint = readableValue(target.hint);
-                  const inputValue = readableValue(item.value);
+                  const laThaoTac = String(item.kind || "") === "action";
+                  // Định danh hiện thành huy hiệu riêng, KHÔNG in kèm nhãn dự phòng: đó là thứ
+                  // máy chấm dùng để tìm, nhìn một cái là biết bước này đã được neo chắc chưa.
+                  const dinhDanh = readableValue(target.semantic_id || target.semanticId);
+                  // Chuỗi người soạn NHÌN THẤY trên màn (nhãn, chữ, gợi ý...). Bỏ hai khoá định
+                  // danh ra khỏi danh sách này để khỏi in hai lần cùng một giá trị.
+                  const nhinThay = ["label", "text", "hint", "text_prefix", "tooltip", "valueKey"]
+                    .map((key) => readableValue(target[key]))
+                    .find((value) => value.trim().length > 0) || "";
+                  const laGoChu = String(item.action || "") === "enter_text";
+                  const giaTri = readableValue(item.value);
                   const delta = asJsonMap(item.delta);
                   const deltaText = Object.keys(delta).length
                     ? `x: ${readableValue(delta.x) || "0"}, y: ${readableValue(delta.y) || "0"}`
                     : "";
                   const expectation = summarizeExpectation(item.expect);
-                  const technicalDetail = JSON.stringify(item, null, 2);
+                  // Giá trị nhập CHỈ có nghĩa với thao tác. Checkpoint UI cũng mang `value` bằng
+                  // chính chuỗi chữ cần kiểm, in ra là lặp y hệt dòng "Kỳ vọng" ngay dưới.
+                  const hienGiaTri = laThaoTac && (laGoChu || giaTri.trim().length > 0);
                   return <div key={sequence} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs dark:border-slate-700 dark:bg-slate-800/80">
                     <div className="flex items-center gap-2">
                       <span className="flex h-6 min-w-6 shrink-0 items-center justify-center rounded-full bg-indigo-100 px-1.5 font-mono font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">{sequence}</span>
-                      <span className="font-bold text-slate-800 dark:text-slate-100">{ACTION_LABELS[actionCode] || actionCode}</span>
-                      <code className="rounded bg-slate-200 px-1.5 py-0.5 text-[10px] text-slate-500 dark:bg-slate-700 dark:text-slate-400">{actionCode}</code>
-                      <button onClick={() => deleteRecordedEvent(sequence)} disabled={Boolean(busy)} title="Xóa thao tác/checkpoint này" className="ml-auto rounded-md p-1.5 text-rose-500 hover:bg-rose-100 disabled:opacity-40 dark:hover:bg-rose-950"><Trash2 size={15} /></button>
+                      <span className="shrink-0 font-bold text-slate-800 dark:text-slate-100">{ACTION_LABELS[actionCode] || actionCode}</span>
+                      <code className="shrink-0 rounded bg-slate-200 px-1.5 py-0.5 text-[10px] text-slate-500 dark:bg-slate-700 dark:text-slate-400">{actionCode}</code>
+                      {dinhDanh && <span className="shrink-0 rounded bg-teal-100 px-1.5 py-0.5 font-mono text-[10px] font-bold text-teal-700 dark:bg-teal-950 dark:text-teal-300" title="Định danh Semantics(identifier:) — máy chấm tìm bằng nó trước, nhãn/chữ cạnh bên là đường lui.">{dinhDanh}</span>}
+                      {laThaoTac && !dinhDanh && Object.keys(target).length > 0 && <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-700 dark:bg-amber-950 dark:text-amber-300" title="Bước này còn tìm bằng nhãn/chữ. Gắn Semantics(identifier:) vào Golden rồi Sinh lại testcase là máy nướng vào.">chưa có định danh</span>}
+                      {nhinThay && <span className="min-w-0 flex-1 truncate text-slate-500 dark:text-slate-400" title={nhinThay}>{nhinThay}</span>}
+                      <button onClick={() => deleteRecordedEvent(sequence)} disabled={Boolean(busy)} title="Xóa thao tác/checkpoint này" className="ml-auto shrink-0 rounded-md p-1.5 text-rose-500 hover:bg-rose-50 disabled:opacity-40 dark:hover:bg-rose-950/40"><Trash2 size={14} /></button>
                     </div>
-                    {(locator || inputValue || deltaText || expectation) && <div className="mt-2 grid gap-1.5 pl-8 text-slate-600 dark:text-slate-300">
-                      {locator && <div className="flex min-w-0 items-start gap-2">
-                        <span className="w-20 shrink-0 text-slate-400">Đích</span>
-                        <span className="min-w-0 break-words font-semibold text-slate-700 dark:text-slate-200">{locator.value}</span>
-                        <span className="shrink-0 rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-semibold text-slate-500 dark:bg-slate-700 dark:text-slate-300">{LOCATOR_LABELS[locator.key] || locator.key}</span>
+                    {(hienGiaTri || deltaText || expectation) && <div className="mt-2 grid gap-1.5 pl-8 text-slate-600 dark:text-slate-300">
+                      {hienGiaTri && <div className="flex min-w-0 items-start gap-2">
+                        <span className="w-20 shrink-0 text-slate-400">Giá trị nhập</span>
+                        {laGoChu ? <input
+                          defaultValue={String(item.value || "")}
+                          placeholder="Gõ nội dung cho ô này"
+                          title="Nội dung sẽ được gõ vào ô này lúc chấm. Sửa ở đây nếu recorder ghi chưa đúng."
+                          onBlur={(e) => { const v = e.target.value; if (v !== String(item.value || "")) void suaGiaTriEvent(sequence, v); }}
+                          onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                          className={`w-64 shrink-0 rounded border bg-transparent px-2 py-1 ${String(item.value || "").trim() ? "border-slate-300 dark:border-slate-600" : "border-amber-400"}`}
+                        /> : <span className="min-w-0 break-words font-semibold text-slate-700 dark:text-slate-200">{giaTri}</span>}
                       </div>}
-                      {targetHint && locator?.key !== "hint" && targetHint !== locator?.value && <div className="flex min-w-0 items-start gap-2"><span className="w-20 shrink-0 text-slate-400">Gợi ý</span><span className="min-w-0 break-words">{targetHint}</span></div>}
-                      {inputValue && <div className="flex min-w-0 items-start gap-2"><span className="w-20 shrink-0 text-slate-400">Giá trị nhập</span><span className="min-w-0 break-words rounded-md bg-indigo-50 px-2 py-0.5 font-semibold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300">{inputValue}</span></div>}
                       {deltaText && <div className="flex min-w-0 items-start gap-2"><span className="w-20 shrink-0 text-slate-400">Độ cuộn</span><span>{deltaText}</span></div>}
                       {expectation && <div className="flex min-w-0 items-start gap-2"><span className="w-20 shrink-0 text-slate-400">Kỳ vọng</span><span className="min-w-0 break-words">{expectation}</span></div>}
                     </div>}
-                    <details className="group mt-2 pl-8 text-slate-500">
-                      <summary className="w-fit cursor-pointer select-none text-[11px] hover:text-indigo-500">Chi tiết kỹ thuật</summary>
-                      <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-slate-950 p-3 text-[11px] leading-5 text-slate-300">{technicalDetail}</pre>
-                    </details>
                   </div>;
                 })}</div>
                 {recording.status === "STOPPED" && error && <div className="mt-4 rounded-xl border border-rose-300 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-200">Không thể sinh testcase: {error}. Phiên vẫn được giữ để bạn thử lại hoặc hủy.</div>}
-                <div className="mt-4 flex flex-wrap gap-2"><button onClick={stopAndAbstract} disabled={Boolean(busy)} className="inline-flex items-center gap-2 rounded-xl bg-slate-800 px-4 py-2.5 font-bold text-white disabled:opacity-40 dark:bg-slate-700">{busy === "record-stop" ? <Loader2 size={17} className="animate-spin" /> : <Square size={17} />} {busy === "record-stop" ? "Đang replay Golden và sinh Output DB…" : recording.status === "STOPPED" ? "Thử sinh testcase lại" : editingScenarioId ? "Lưu sửa đổi và sinh lại testcase" : "Dừng, capture oracle và sinh testcase"}</button><button onClick={cancelActiveRecording} disabled={Boolean(busy)} className="rounded-xl border border-rose-300 px-4 py-2.5 font-bold text-rose-600 disabled:opacity-40 dark:border-rose-900">{editingScenarioId ? "Hủy sửa" : "Hủy record"}</button></div>
-                <p className="mt-2 text-xs text-slate-500">Bước này có thể mất vài phút vì chạy chính Golden Solution trong Docker bằng Hidden DB; không cần tự xuất hoặc tải Output DB.</p>
+                {buocThieuGiaTri > 0 && <p className="mt-3 rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-200">Còn {buocThieuGiaTri} bước gõ chữ chưa khai nội dung (ô viền đỏ ở trên). Điền xong mới sinh được testcase — nếu để trống, lúc chấm sẽ gõ chuỗi rỗng và mọi tiêu chí phía sau trượt theo.</p>}
+                <div className="mt-4 flex flex-wrap gap-2"><button onClick={stopAndAbstract} disabled={Boolean(busy) || buocThieuGiaTri > 0} className="inline-flex items-center gap-2 rounded-xl bg-slate-800 px-4 py-2.5 font-bold text-white disabled:opacity-40 dark:bg-slate-700">{busy === "record-stop" ? <Loader2 size={17} className="animate-spin" /> : <Square size={17} />} {busy === "record-stop" ? "Đang replay Golden và sinh Output DB…" : recording.status === "STOPPED" ? "Thử sinh testcase lại" : editingScenarioId ? "Lưu sửa đổi và sinh lại testcase" : "Dừng, capture oracle và sinh testcase"}</button><button onClick={cancelActiveRecording} disabled={Boolean(busy)} className="rounded-xl border border-rose-300 px-4 py-2.5 font-bold text-rose-600 disabled:opacity-40 dark:border-rose-900">{editingScenarioId ? "Cancel" : "Cancel"}</button></div>
               </>}
             </div>
           </section>
@@ -1662,7 +2023,6 @@ function BehaviorAuthoringEditor() {
                 );
               })}
             </div>
-            <p className="mt-3 text-xs text-slate-500">Nhóm điểm: các luật kiến trúc gộp vào «Kiến trúc mã nguồn», luật lint vào «Chất lượng mã nguồn» — hiện đúng như vậy trong lịch sử chấm và file Excel. Lưu xong phải <b>publish lại</b> thì bộ đề mới mang luật mới.</p>
           </section>}
 
           <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
@@ -1694,7 +2054,16 @@ function BehaviorAuthoringEditor() {
             <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
               {/* Các hàm chứa ref phía dưới chỉ chạy trong onClick, không chạy trong render. */}
               {/* eslint-disable-next-line react-hooks/refs */}
-              {(suite.scenarios || []).map((item, index) => <div key={String(item.id || index)} className="rounded-xl border border-slate-200 px-4 py-3 dark:border-slate-700"><div className="flex items-center justify-between gap-2"><span className="font-bold">{String(item.name || item.scenario_code)}</span><span className="rounded-full bg-indigo-100 px-2 py-1 text-xs font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">{String(item.weight)} điểm</span></div><p className="mt-1 font-mono text-[11px] text-indigo-500">{String(item.scenario_code || "")}</p><p className="mt-2 text-xs text-slate-500">{Array.isArray(item.steps) ? item.steps.length : 0} action · {Array.isArray(item.checkpoints) ? item.checkpoints.length : 0} checkpoint</p>{chiaDiemId === String(item.id) && (() => {
+              {(suite.scenarios || []).map((item, index) => <div key={String(item.id || index)} className="rounded-xl border border-slate-200 px-4 py-3 dark:border-slate-700"><div className="flex items-center justify-between gap-2"><span className="font-bold">{String(item.name || item.scenario_code)}</span><span className="rounded-full bg-indigo-100 px-2 py-1 text-xs font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">{String(item.weight)} điểm</span></div><p className="mt-1 font-mono text-[11px] text-indigo-500">{String(item.scenario_code || "")}</p>{(() => {
+                // Độ phủ định danh của kịch bản: bước có target mà chưa có định danh vẫn chấm được
+                // bằng nhãn, nhưng người soạn cần thấy để biết kịch bản nào chưa hưởng định danh
+                // (gắn vào Golden rồi "Sinh lại testcase" là máy nướng vào, không ghi hình lại).
+                const steps = Array.isArray(item.steps) ? (item.steps as JsonMap[]) : [];
+                const coTarget = steps.filter((st) => st && typeof st === "object" && Object.keys((st.target as JsonMap) || {}).length > 0);
+                const coId = coTarget.filter((st) => { const t = (st.target as JsonMap) || {}; return Boolean(t.semantic_id || t.semanticId); });
+                const du = coTarget.length > 0 && coId.length === coTarget.length;
+                return <p className="mt-2 text-xs text-slate-500">{steps.length} action · {Array.isArray(item.checkpoints) ? item.checkpoints.length : 0} checkpoint{coTarget.length > 0 && <> · <span className={du ? "font-bold text-teal-600 dark:text-teal-300" : "font-bold text-amber-600 dark:text-amber-300"} title={du ? "Mọi bước đều có định danh Semantics(identifier:)." : "Bước chưa có định danh được tìm bằng nhãn/chữ. Gắn Semantics(identifier:) vào Golden rồi Sinh lại testcase để máy nướng vào."}>{coId.length}/{coTarget.length} bước có định danh</span></>}</p>;
+              })()}{chiaDiemId === String(item.id) && (() => {
                   const chots = Array.isArray(item.checkpoints) ? item.checkpoints as JsonMap[] : [];
                   const hanhVi = chots;
                   const tongHanhVi = hanhVi.reduce((t, c) => t + (chiaDiemChot[String(c.id)] ?? 1), 0);
@@ -1716,10 +2085,15 @@ function BehaviorAuthoringEditor() {
                     const thay_ = Array.isArray(exp.visible_texts) ? exp.visible_texts.filter(Boolean) : [];
                     const an = Array.isArray(exp.hidden_texts) ? exp.hidden_texts.filter(Boolean) : [];
                     if (thay_.length) phan.push(`phải thấy: ${thay_.join(" · ")}`);
+                    const tienTo = Array.isArray(exp.visible_text_prefixes) ? exp.visible_text_prefixes.filter(Boolean) : [];
+                    if (tienTo.length) phan.push(`bắt đầu bằng: ${tienTo.join(" · ")}`);
                     if (an.length) phan.push(`không được thấy: ${an.join(" · ")}`);
                     if (c.table) phan.push(`bảng ${String(c.table)} · ${String(c.operation || "")}${c.count !== undefined ? ` · tổng row ${String(c.count)}` : ""}`);
                     if (c.row && Object.keys(c.row as JsonMap).length) phan.push(`row: ${JSON.stringify(c.row)}`);
                     if (c.target && Object.keys(c.target as JsonMap).length) phan.push(`target: ${JSON.stringify(c.target)}`);
+                    if (c.widget) phan.push(`đọc ${String(c.property || "")} của ${String(c.widget)}`);
+                    else if (c.property) phan.push(`đọc ${String(c.property)}`);
+                    if ((c.expect as JsonMap)?.value !== undefined) phan.push(`giá trị chuẩn: ${String((c.expect as JsonMap).value)}`);
                     if (c.tolerance_pct !== undefined) phan.push(`sai số: ${String(c.tolerance_pct)}%`);
                     return phan.join("\n");
                   };
@@ -1735,7 +2109,7 @@ function BehaviorAuthoringEditor() {
                           <option value="">độc lập</option>
                           {chots.filter((k) => !cam.has(String(k.id))).map((k) => <option key={String(k.id)} value={String(k.id)}>↳ {String(k.id)}</option>)}
                         </select>
-                        <input type="number" min={0.25} step={0.25} value={w} onChange={(e) => setChiaDiemChot({ ...chiaDiemChot, [id]: Math.max(0.25, Number(e.target.value)) })} className="w-16 shrink-0 rounded border border-slate-300 bg-transparent px-1.5 py-0.5 dark:border-slate-600" />
+                        <input type="number" min={0.001} step={0.001} value={w} onChange={(e) => setChiaDiemChot({ ...chiaDiemChot, [id]: Math.max(0.001, lamTron(Number(e.target.value))) })} className="w-16 shrink-0 rounded border border-slate-300 bg-transparent px-1.5 py-0.5 dark:border-slate-600" />
                       </div>
                       {conCua(id).map((k) => dong(k, false, sau + 1))}
                     </div>;
@@ -1745,8 +2119,8 @@ function BehaviorAuthoringEditor() {
                       <input type="number" min={0.5} step={0.5} value={chiaDiemHam} onChange={(e) => setChiaDiemHam(Math.max(0.5, Number(e.target.value)))} className="w-20 rounded border border-slate-300 bg-transparent px-1.5 py-0.5 dark:border-slate-600" />
                     </label>
                     {dsGoc.map((c) => dong(c, false, 0))}
-                    {hanhVi.length > 0 && Math.abs(tongHanhVi - chiaDiemHam) > 0.01 && <p className="text-[11px] font-bold text-rose-600">Đã chia {Math.round(tongHanhVi * 100) / 100}/{chiaDiemHam}đ — tổng điểm checkpoint phải bằng đúng điểm của hàm mới lưu được.</p>}
-                    <button onClick={() => luuChiaDiem(item)} disabled={Boolean(busy) || (hanhVi.length > 0 && Math.abs(tongHanhVi - chiaDiemHam) > 0.01)} className="w-full rounded-lg bg-indigo-600 px-2.5 py-1.5 text-xs font-bold text-white disabled:opacity-40">
+                    {hanhVi.length > 0 && Math.abs(tongHanhVi - chiaDiemHam) > 0.0005 && <p className="text-[11px] font-bold text-rose-600">Đã chia {lamTron(tongHanhVi)}/{chiaDiemHam}đ — tổng điểm checkpoint phải bằng đúng điểm của hàm mới lưu được.</p>}
+                    <button onClick={() => luuChiaDiem(item)} disabled={Boolean(busy) || (hanhVi.length > 0 && Math.abs(tongHanhVi - chiaDiemHam) > 0.0005)} className="w-full rounded-lg bg-indigo-600 px-2.5 py-1.5 text-xs font-bold text-white disabled:opacity-40">
                       {busy === "chia-diem" ? "Đang lưu (đổi điểm checkpoint sẽ capture lại ~1 phút)…" : "Lưu chia điểm"}
                     </button>
                   </div>;

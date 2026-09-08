@@ -30,7 +30,12 @@ import java.util.zip.ZipFile;
 public class GoldenRuntimeService {
     private static final long MAX_EXPANDED_BYTES = 1_000L * 1024 * 1024;
     private static final int MAX_ZIP_ENTRIES = 20_000;
-    private static final String RECORDER_BRIDGE_VERSION = "input-identity-v20";
+    // v22: bảng tick KHÔNG loại thành phần lặp lại nữa, bày một dòng kèm số lượng (v20 vứt
+    // sạch nút Xóa của mọi dòng vì nhãn trùng nhau) · v21: bảng tick giữ nhãn/chữ làm target và
+    // gửi kèm định danh để HIỆN (v20 đổi target sang định danh, làm tiêu chí thôi kiểm nội
+    // dung) · v20: locator duy nhất + chốt giá trị nhập theo ranh giới thao tác · v4: quét
+    // thành phần CHỈ trong flutter-view.
+    private static final String RECORDER_BRIDGE_VERSION = "input-identity-v22";
 
     @Value("${grader.base-image:grading-base:latest}")
     private String baseImage;
@@ -299,7 +304,7 @@ public class GoldenRuntimeService {
                 Future<void> main() async {
                   WidgetsFlutterBinding.ensureInitialized();
                   // Dấu phiên bản để phân định bản build đang CHẠY với bản bị cache.
-                  debugPrint('recorder-entry input-identity-v20');
+                  debugPrint('recorder-entry input-identity-v22');
                   // Giữ handle sống suốt phiên để cây ngữ nghĩa luôn được dựng.
                   SemanticsBinding.instance.ensureSemantics();
                   // SQLite THẬT trên web + nạp hidden.db TRƯỚC khi app khởi động — đúng cách
@@ -434,8 +439,12 @@ public class GoldenRuntimeService {
                   function leafMost(nodes) {
                     return nodes.filter(node => !nodes.some(other => other !== node && node.contains(other)));
                   }
-                  function uniqueLocator(kind, value, elements = allSemanticElements()) {
-                    if (!value) return false;
+                  // Dem CO BAO NHIEU thanh phan mang cung mot khoa dinh vi. Tach rieng khoi
+                  // uniqueLocator vi hai cho can hai thu khac nhau: duong GHI THAO TAC can
+                  // "dung mot" (cham dai mot trong sau nut Xoa la ghi nham dong), con BANG TICK
+                  // can biet "co sau cai" de bay ra mot dong kem so luong.
+                  function soKhopLocator(kind, value, elements = allSemanticElements()) {
+                    if (!value) return 0;
                     const matches = [];
                     for (const node of elements) {
                       if (kind === 'semanticId' && semanticIdOf(node) === value) matches.push(node);
@@ -446,7 +455,10 @@ public class GoldenRuntimeService {
                       if (kind === 'hint' && (node.getAttribute('placeholder') || '') === value) matches.push(node);
                       if (kind === 'text' && textOf(node) === value) matches.push(node);
                     }
-                    return leafMost(matches).length === 1;
+                    return leafMost(matches).length;
+                  }
+                  function uniqueLocator(kind, value, elements = allSemanticElements()) {
+                    return soKhopLocator(kind, value, elements) === 1;
                   }
                   // Flutter Web gop labelText + hintText cua TextFormField vao chung 1
                   // aria-label, ngan cach boi mot ky tu xuong dong. Tach ra de khop
@@ -563,6 +575,27 @@ public class GoldenRuntimeService {
                   // song song cùng một việc). JS lấy bản khai sau, tức bản semanticState(node)
                   // bên dưới — nên khối trên là code chết, và ai đảo thứ tự là inventory() vỡ
                   // câm bằng ReferenceError. Giữ lại splitLabelHint vì semanticNode() đang dùng.
+                  // DINH DANH (Semantics identifier) cua chinh node, hoac cua to tien "wrapper tran"
+                  // gan nhat: cha CHUA CO nhan, hoac mang DUNG nhan cua node (Semantics(label) boc
+                  // ngoai chip lap lai nhan cua chip). Gap cha co nhan KHAC la thuc the khac (nut
+                  // Xoa nam trong dong danh sach) -> dung, khong nhan nham dinh danh cua dong.
+                  // Do GD0 4/9/2026 tren ban web dung bang chinh script nay: dong ListTile, nut
+                  // Xoa, FAB mang id ngay tren phan tu co aria-label; o nhap va nut "Luu" mang id
+                  // o phan tu CHA cua INPUT / cua nut. Cung luat voi _docDinhDanhTaiDich ben engine
+                  // de dinh danh ghi luc soan va dinh danh engine tim luc cham la MOT.
+                  function identifierOf(node, nhanCuaNode) {
+                    let cur = node;
+                    for (let buoc = 0; cur instanceof Element && buoc < 5; buoc++) {
+                      const id = cur.getAttribute('flt-semantics-identifier');
+                      if (id) return id;
+                      const cha = cur.parentElement;
+                      if (!cha) break;
+                      const nhanCha = cha.getAttribute('aria-label') || '';
+                      if (nhanCha && nhanCha !== nhanCuaNode) break;
+                      cur = cha;
+                    }
+                    return '';
+                  }
                   function semanticNode(event, mode = 'tap') {
                     lastReject = '';
                     const path = (event.composedPath ? event.composedPath() : [])
@@ -735,27 +768,43 @@ public class GoldenRuntimeService {
                   // Phan loai MOT node thanh locator ma engine cham tim lai duoc, DUNG thu tu
                   // uu tien cua semanticNode (semanticId -> label -> hint -> text). Dong bo hai ham nay la
                   // bat buoc: item duoc tick phai tro vao dung widget ma luc replay tim thay.
+                  // BANG TICK khac duong ghi thao tac: target phai la NHAN/CHU, khong phai
+                  // dinh danh. Tieu chi sinh ra tu day co viec kiem NOI DUNG ("man hinh co
+                  // dong chu X"); doi target sang dinh danh la tieu chi chi con kiem "co gan
+                  // dinh danh", khong ai kiem chu nua (quyet dinh Q2 ke hoach Dinh danh).
+                  // Dinh danh van duoc doc va gui kem, nhung nam NGOAI target — chi de hien.
                   function semanticState(node, elements) {
-                    const semanticId = semanticIdOf(node);
-                    if (semanticId && uniqueLocator('semanticId', semanticId, elements)) {
-                      return {target: {semanticId}, attribute: 'semanticId', attributeValue: semanticId, role: checkpointRoleOf(node)};
-                    }
                     const role = roleOf(node);
                     const label = node.getAttribute('aria-label') || node.getAttribute('data-semantics-label');
                     if (label && label !== 'Enable accessibility') {
                       // Chi identifier duoc phep dai dien cho container co chu dich. Nhan tong
                       // hop cua Form/group/generic khong duoc dua vao inventory de tick nham.
-                      if (CONTAINER_ROLES.has(role) || textLeafCount(node) > 1 || !uniqueLocator('label', label, elements)) return null;
-                      return {target: {label}, attribute: 'label', attributeValue: label, role: checkpointRoleOf(node)};
+                      if (CONTAINER_ROLES.has(role) || textLeafCount(node) > 1) return null;
+                      // KHONG loai thanh phan lap lai. Nut Xoa cua moi dong danh sach mang cung
+                      // mot nhan nen phep kiem "dung mot" cua ban v20 vut sach chung khoi bang
+                      // tick — dung cai ma may cham nay da biet cham theo nhom (moi dong mot
+                      // cai, vi tri do tuong doi trong dong). Bay ra MOT dong kem so luong.
+                      const soNhan = soKhopLocator('label', label, elements);
+                      if (soNhan === 0) return null;
+                      const identifier = semanticIdOf(node) || identifierOf(node, label);
+                      return {target: {label}, attribute: 'label', attributeValue: label, role: checkpointRoleOf(node),
+                              ...(soNhan > 1 ? {count: soNhan} : {}), ...(identifier ? {identifier} : {})};
                     }
                     const hint = node.getAttribute('placeholder');
-                    if (hint && uniqueLocator('hint', hint, elements)) {
-                      return {target: {hint}, attribute: 'hint', attributeValue: hint, role: 'text_field'};
+                    const soGoiY = soKhopLocator('hint', hint || '', elements);
+                    if (hint && soGoiY > 0) {
+                      const idHint = semanticIdOf(node) || identifierOf(node, '');
+                      return {target: {hint}, attribute: 'hint', attributeValue: hint, role: 'text_field',
+                              ...(soGoiY > 1 ? {count: soGoiY} : {}), ...(idHint ? {identifier: idHint} : {})};
                     }
                     const text = textOf(node);
-                    if (!text || textLeafCount(node) > 1 || text.length > MAX_TEXT_LOCATOR
-                        || !uniqueLocator('text', text, elements)) return null;
-                    return {target: {text}, attribute: 'text', attributeValue: text, role: checkpointRoleOf(node)};
+                    if (!text || textLeafCount(node) > 1 || text.length > MAX_TEXT_LOCATOR) return null;
+                    const soChu = soKhopLocator('text', text, elements);
+                    if (soChu === 0) return null;
+                    // Nut tim theo chu (vd "Luu") mang dinh danh o phan tu CHA — cung chi de hien.
+                    const idChu = semanticIdOf(node) || identifierOf(node, '');
+                    return {target: {text}, attribute: 'text', attributeValue: text, role: checkpointRoleOf(node),
+                            ...(soChu > 1 ? {count: soChu} : {}), ...(idChu ? {identifier: idChu} : {})};
                   }
                   // LIET KE thanh phan man hinh hien tai cho bang tick ben trang soan de.
                   // Truoc day lenh nay goi ham semanticState CHUA TON TAI — ReferenceError,

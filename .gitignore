@@ -89,3 +89,6 @@ mysql_data/
 fixtures/result-json-v2/submissions/*/.dart_tool/
 fixtures/result-json-v2/submissions/*/.flutter-plugins-dependencies
 fixtures/result-json-v2/submissions/*/pubspec.lock
+
+# Ghi chu rieng cho tro ly AI tren may nay, khong day len kho chung.
+/CLAUDE.md

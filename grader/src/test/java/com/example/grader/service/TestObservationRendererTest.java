@@ -111,6 +111,13 @@ class TestObservationRendererTest {
     }
 
     @Test
+    void reportsScrollDirectionMismatch() {
+        assertEquals("Chiều cuộn danh sách: đang cuộn theo chiều ngang.",
+                TestObservationRenderer.render("Chiều cuộn danh sách",
+                        obs("kind", "SCROLL_DIRECTION_MISMATCH", "seen", "horizontal")));
+    }
+
+    @Test
     void distinguishesTheTwoNotRunCauses() {
         assertTrue(TestObservationRenderer.render("A", obs("kind", "NOT_RUN_BOOT"))
                 .contains("ứng dụng không mở được"));
@@ -215,7 +222,7 @@ class TestObservationRendererTest {
         // Danh sách lấy TỪ CHÍNH lớp đó (`renderableKinds`), không chép tay: chép tay thì thêm
         // `kind` mới mà quên sửa test là test vẫn xanh — đúng lỗ hổng đang muốn bịt.
         Set<String> kinds = TestObservationRenderer.renderableKinds();
-        assertEquals(17, kinds.size(), "SPEC quan sát khai 17 kind: " + kinds);
+        assertEquals(18, kinds.size(), "SPEC quan sát khai 18 kind: " + kinds);
         Set<String> noCode = TestObservationRenderer.kindsWithoutCode();
         for (String kind : kinds) {
             assertNotNull(TestObservationRenderer.render("Yêu cầu X", obs("kind", kind)), kind);

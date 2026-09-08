@@ -373,9 +373,19 @@ public class BehaviorSuiteMaterializer {
      */
     private static final java.util.Set<String> ABSOLUTE_WEIGHT_KINDS =
             java.util.Set.of("component_present", "component_position", "layout_relation", "component_color",
-                    "theme_color", "screen_match");
+                    "theme_color", "screen_match",
+                    // Ch.7 — cùng lý lẽ với component_present: mỗi tiêu chí là MỘT khẳng
+                    // định nhị phân về một widget cụ thể, không phải một bước trong luồng
+                    // hành vi nên không nên bị pha loãng theo trọng số scenario.
+                    "component_scroll_direction", "component_scroll_to_end", "component_stack_order",
+                    "component_indexed_switch", "component_bottom_sheet", "component_table",
+                    "component_sliver_collapse", "component_expanded");
     private static final java.util.Set<String> SINGLE_VIEWPORT_KINDS =
             java.util.Set.of("route_state");
+    private static final java.util.Set<String> CH7_KINDS = java.util.Set.of(
+            "component_scroll_direction", "component_scroll_to_end", "component_stack_order",
+            "component_indexed_switch", "component_bottom_sheet", "component_table",
+            "component_sliver_collapse", "component_expanded");
 
     private List<Map<String, Object>> expandCases(Map<String, Object> plan, String suiteCode) {
         List<Map<String, Object>> out = new ArrayList<>();
@@ -480,6 +490,7 @@ public class BehaviorSuiteMaterializer {
             String expected = text(checkpoint, "expected");
             if (expected.isBlank()) expected = "Kết quả phải khớp observation của Golden App.";
             boolean component = ABSOLUTE_WEIGHT_KINDS.contains(text(checkpoint, "kind"));
+            boolean ch7 = CH7_KINDS.contains(text(checkpoint, "kind"));
             Map<String, Object> uiGroup = map(checkpoint.get("ui_group"));
             Map<String, Object> metadata = new LinkedHashMap<>();
             metadata.put("instance_id", item.get("test_id"));
@@ -487,7 +498,12 @@ public class BehaviorSuiteMaterializer {
             metadata.put("scenario_code", item.get("scenario_code"));
             metadata.put("execution_code", item.get("execution_code"));
             metadata.put("checkpoint_id", checkpoint.get("id"));
-            metadata.put("skill_code", component ? "UI_LAYOUT" : item.get("skill_code"));
+            // Ch.7 dùng mã kỹ năng riêng (có thật trong syllabus.json, "ADVUI_EXPANDED_
+            // LAYOUTBUILDER") thay vì "UI_LAYOUT" — mã đó không nằm trong syllabus nên chỉ
+            // hợp lệ vì 4 tiêu chí giao diện gốc đi qua nhánh publish không ép validate; Ch.7
+            // không nên kế thừa nợ kỹ thuật đó khi đã có mã thật để dùng.
+            metadata.put("skill_code", ch7 ? "ADVUI_EXPANDED_LAYOUTBUILDER"
+                    : component ? "UI_LAYOUT" : item.get("skill_code"));
             metadata.put("testcase_group", component ? "UI" : "BEHAVIOR");
             metadata.put("layer", component ? "ui" : "behavior");
             // Nhóm là cấp mà điểm lẻ nổi lên (đạt 3/4 thành phần = 15/20) và là cấp đối

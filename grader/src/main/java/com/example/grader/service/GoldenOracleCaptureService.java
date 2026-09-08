@@ -151,6 +151,8 @@ public class GoldenOracleCaptureService {
             // ghi checkpointsJson; nó đọc lại bản vừa lưu nên số chuẩn không bị mất.
             int daNuongBoCuc = 0;
             int daNuongDuPhong = 0;
+            int daNuongDinhDanh = 0;
+            List<Object> kiemKeIcon = List.of();
             Path layoutFile = captured.resolveSibling("captured-layout.json");
             if (Files.isRegularFile(layoutFile) && Files.size(layoutFile) > 0) {
                 Map<String, Object> layout = mapper.readValue(layoutFile.toFile(), new TypeReference<>() {});
@@ -158,11 +160,19 @@ public class GoldenOracleCaptureService {
                 // Đường dự phòng: cách tìm lại widget khi bài nộp quên gắn nhãn. Engine chỉ
                 // ghi mô tả nào DUY NHẤT trên cây Golden nên ở đây nhận sao dùng vậy.
                 daNuongDuPhong = authoring.applyCapturedTargets(scenarioId, map(layout.get("targets")));
+                // Định danh Semantics(identifier:) đo trên Golden — nướng vào bước để bộ đề đã
+                // ghi hình nhận định danh mà không ghi hình lại (Gói 2 kế hoạch Định danh
+                // Semantics). Engine cũ không ghi khoá này: vắng thì bỏ qua, không phải lỗi.
+                daNuongDinhDanh = authoring.applyCapturedIdentifiers(scenarioId, list(layout.get("identifiers")));
+                // Kiểm kê icon trên màn: nút chỉ có hình thì web KHÔNG phơi aria-label nào nên
+                // "Quét UI" qua DOM không thấy. Máy chấm nhìn thẳng cây widget nên thấy đủ —
+                // trả về đây để màn soạn đề bày ra cho người ra đề tick.
+                kiemKeIcon = list(layout.get("icons"));
             }
 
             List<Map<String, Object>> checkpoints = artifacts.databaseDiffCheckpoints(suiteId);
             Map<String, Object> completedScenario = authoring.applyDerivedDatabaseCheckpoints(
-                    scenarioId, checkpoints, String.valueOf(outputArtifact.get("sha256")));
+                    scenarioId, checkpoints, String.valueOf(outputArtifact.get("sha256")), golden.getSha256());
 
             Map<String, Object> result = new LinkedHashMap<>();
             // Luồng có nhập liệu mà không đẻ nổi một checkpoint database nào là dấu hiệu
@@ -187,6 +197,8 @@ public class GoldenOracleCaptureService {
             result.put("database_checkpoint_count", checkpoints.size());
             result.put("layout_checkpoint_count", daNuongBoCuc);
             result.put("fallback_target_count", daNuongDuPhong);
+            result.put("identifier_step_count", daNuongDinhDanh);
+            result.put("icons", kiemKeIcon);
             result.put("execution_code", executionCode);
             result.put("log", limitLog(output.toString()));
             return result;

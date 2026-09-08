@@ -1434,6 +1434,82 @@ public class ExamService {
         }
     }
 
+    /** Tên các package ĐỌC ĐƯỢC từ pubspec.lock của ảnh nền; rỗng khi chưa đọc lần nào. */
+    private volatile Set<String> goiTrongAnh = Set.of();
+    private volatile String goiTrongAnhCuaAnh = "";
+
+    /**
+     * Mọi package mà bài sinh viên import được trong ảnh chấm, gồm CẢ package phụ thuộc kéo theo.
+     *
+     * <p>Nguồn là {@code pubspec.lock} trong chính ảnh nền, không phải khối dependencies của
+     * {@code pubspec.base.yaml}: {@code sqflite_common} và {@code riverpod} không được khai trực
+     * tiếp nhưng vẫn import được vì nằm trong package graph đã resolve. Lấy nhầm nguồn là chặn oan
+     * đúng những tên bộ đề hiện tại đang cho phép.
+     *
+     * <p>Trả về TẬP RỖNG khi không đọc được (Docker tắt, chưa build ảnh). Người gọi phải hiểu rỗng
+     * là "không biết" chứ không phải "không có gì": không biết thì đừng chặn ai.
+     */
+    public Set<String> goiCoTrongAnhCham() {
+        if (!goiTrongAnh.isEmpty() && baseImage.equals(goiTrongAnhCuaAnh)) return goiTrongAnh;
+        Set<String> ten = goiTuLock(readLockFromBaseImage());
+        if (ten.isEmpty()) return Set.of();
+        goiTrongAnh = ten;
+        goiTrongAnhCuaAnh = baseImage;
+        return goiTrongAnh;
+    }
+
+    /**
+     * Bóc tên package từ nội dung pubspec.lock. Tách riêng khỏi phần gọi Docker để kiểm được
+     * bằng test mà không cần ảnh nền.
+     *
+     * <p>Trả TẬP RỖNG khi không bóc được tên nào ngoài hai gói lõi: nội dung hỏng hay rỗng đều
+     * phải quy về "không biết", chứ không được thành "ảnh chỉ có flutter" rồi chặn oan cả bộ đề.
+     */
+    static Set<String> goiTuLock(String lock) {
+        if (lock == null || lock.isBlank()) return Set.of();
+        Set<String> ten = new LinkedHashSet<>(Set.of("flutter", "flutter_test"));
+        // Mỗi package là một khoá thụt ĐÚNG 2 dấu cách dưới "packages:"; khối "sdks:" ở cuối
+        // file cũng thụt như vậy nên phải bám theo khối đang đứng, không bắt bừa theo thụt đầu.
+        boolean trongKhoi = false;
+        for (String raw : lock.split("\\R", -1)) {
+            String dong = raw.replace("\t", "  ");
+            if (dong.isBlank() || dong.trim().startsWith("#")) continue;
+            if (!dong.startsWith(" ")) { trongKhoi = dong.split(":")[0].trim().equals("packages"); continue; }
+            if (!trongKhoi) continue;
+            Matcher m = Pattern.compile("^ {2}([A-Za-z0-9_]+):\\s*$").matcher(dong);
+            if (m.find()) ten.add(m.group(1));
+        }
+        return ten.size() <= 2 ? Set.of() : Set.copyOf(ten);
+    }
+
+    /**
+     * Bảng tick cho màn soạn đề: gói khai thẳng trong ảnh, và gói kéo theo để riêng.
+     *
+     * <p>Tách hai nhóm vì hai ý nghĩa khác nhau. Nhóm khai thẳng là thứ đề thường cho phép,
+     * chừng chục cái. Nhóm kéo theo tám chục cái, import được nhưng hiếm khi đề nhắc tới; trộn
+     * chung là bảng tick không đọc nổi.
+     *
+     * <p>{@code image_read=false} nghĩa là chưa đọc được ảnh. Màn soạn đề phải hiểu đó là "không
+     * biết" và giữ nguyên danh sách đã lưu, chứ không phải "ảnh không có gói nào".
+     */
+    public Map<String, Object> goiChoManSoanDe() {
+        Set<String> tatCa = goiCoTrongAnhCham();
+        List<Map<String, Object>> khaiThang = listManagedPackages();
+        Set<String> tenKhaiThang = new LinkedHashSet<>();
+        khaiThang.forEach(item -> tenKhaiThang.add(String.valueOf(item.get("name"))));
+        tenKhaiThang.add("flutter");
+        tenKhaiThang.add("flutter_test");
+        List<String> keoTheo = tatCa.stream()
+                .filter(ten -> !tenKhaiThang.contains(ten))
+                .sorted()
+                .toList();
+        Map<String, Object> ra = new LinkedHashMap<>();
+        ra.put("image_read", !tatCa.isEmpty());
+        ra.put("direct", khaiThang);
+        ra.put("transitive", keoTheo);
+        return ra;
+    }
+
     /** Danh sách package trong khối dependencies: [{name, version, protected}]. `flutter` = lõi (không xóa). */
     public List<Map<String, Object>> listManagedPackages() {
         List<Map<String, Object>> out = new ArrayList<>();
@@ -1445,7 +1521,14 @@ public class ExamService {
             for (String raw : Files.readAllLines(pubspec, StandardCharsets.UTF_8)) {
                 String line = raw.replace("\t", "  ");
                 if (line.isBlank() || line.trim().startsWith("#")) continue;
-                if (!line.startsWith(" ")) { inDeps = line.split(":")[0].trim().equals("dependencies"); continue; }
+                // Đọc CẢ dev_dependencies: flutter_test nằm ở đó. Bỏ khối này thì trang thư viện
+                // bảo "flutter_test là gói lõi" mà không bày ra dòng nào, còn bảng tick bên soạn
+                // đề thì thiếu đúng gói mọi bài đều cần.
+                if (!line.startsWith(" ")) {
+                    String khoi = line.split(":")[0].trim();
+                    inDeps = khoi.equals("dependencies") || khoi.equals("dev_dependencies");
+                    continue;
+                }
                 if (!inDeps) continue;
                 java.util.regex.Matcher m = entry.matcher(line);
                 if (!m.find()) continue;
@@ -1454,7 +1537,10 @@ public class ExamService {
                 p.put("name", name);
                 boolean isBlock = val.isEmpty();                 // vd flutter: → sdk block ở dòng dưới
                 p.put("version", isBlock ? "(flutter sdk)" : val);
-                p.put("protected", isBlock || name.equals("flutter") || name.equals("flutter_test"));
+                // flutter_lints chỉ dùng cho phân tích mã, không import được trong bài — khoá
+                // luôn để không ai xóa nhầm rồi tưởng đã cấm được gì.
+                p.put("protected", isBlock || name.equals("flutter") || name.equals("flutter_test")
+                        || name.equals("flutter_lints"));
                 out.add(p);
             }
         } catch (Exception e) {

@@ -37,6 +37,20 @@ public class BehaviorAuthoringService {
             // đo hình chữ nhật logic để xác nhận trên/dưới, cùng hàng/cột, chứa nhau...
             "layout_relation",
             "component_color",
+            // Trạng thái thật bên trong widget: công tắc bật hay tắt, dải trượt bao nhiêu,
+            // ô nhập có dùng bàn phím số không, nút có đúng loại không. Khác
+            // component_present ở chỗ cái kia chỉ hỏi "có trên màn hình không".
+            "widget_state",
+            // Kiểu chữ của MỘT dòng chữ (cỡ, độ đậm, phông, màu) đọc từ đoạn văn bản
+            // thật sự được vẽ — không phải từ style khai trên widget, vì phần thừa kế
+            // từ theme không nằm ở đó.
+            "text_style",
+            // Giá trị trong bảng chủ đề: vai trò màu, useMaterial3, phông toàn app,
+            // theme của từng thành phần.
+            "theme_value",
+            // Cả luồng không vỡ bố cục (RenderFlex overflow). Không có giá trị chuẩn —
+            // engine tự bắt lỗi tràn trong lúc replay.
+            "no_overflow",
             // Màu chủ đạo của app: đọc thẳng ColorScheme từ cây widget, KHÔNG lấy mẫu
             // pixel. Bù đúng điểm mù của component_color — Material 3 cố ý làm các vai
             // outline/onSurfaceVariant gần như xám trung tính nên thành phần chỉ có
@@ -44,10 +58,28 @@ public class BehaviorAuthoringService {
             "theme_color",
             // So bố cục màn hình với ảnh chuẩn chụp từ Golden trong cùng container.
             "screen_match",
+            // Ch.7 — widget bố cục và hiển thị nâng cao. Không quét được từ semantics
+            // (Stack/IndexedStack/Table/Sliver đều lộ ra là container "list"/"generic"
+            // giống nhau) nên giáo viên tự gõ ValueKey thay vì tick từ bảng quét. Mỗi
+            // kind ứng với đúng 1 runner COMMON_V1 cùng tên khái niệm ở
+            // common-testcase-engine/exam_test.dart — xem CH7_KIND_TO_EXPECT_FIELDS.
+            "component_scroll_direction", "component_scroll_to_end", "component_stack_order",
+            "component_indexed_switch", "component_bottom_sheet", "component_table",
+            "component_sliver_collapse", "component_expanded",
             // Trạng thái Router/URL do ứng dụng phản ánh ra SystemNavigator.
             "route_state");
+    /** Ch.7 — field bắt buộc trong {@code expect} theo từng kind, xem {@link #EVENT_KINDS}. */
+    private static final Map<String, List<String>> CH7_REQUIRED_EXPECT_FIELDS = Map.of(
+            "component_scroll_direction", List.of("direction"),
+            "component_scroll_to_end", List.of("target_key"),
+            "component_stack_order", List.of("bottom_key", "top_key"),
+            "component_indexed_switch", List.of("tabs"),
+            "component_bottom_sheet", List.of("sheet_key"),
+            "component_table", List.of("row_count"),
+            "component_sliver_collapse", List.of("appbar_key"),
+            "component_expanded", List.of("flex"));
     private static final Set<String> ACTIONS = Set.of(
-            "boot", "boot_with_uri", "tap", "enter_text", "clear_text", "scroll", "back",
+            "boot", "boot_with_uri", "tap", "enter_text", "clear_text", "scroll", "drag", "back",
             "open_uri", "browser_back", "browser_forward", "reload", "restart",
             "wait_until", "wait_for_route");
     private static final int MAX_EVENTS = 2_000;
@@ -61,13 +93,17 @@ public class BehaviorAuthoringService {
     private final SkillRepository skills;
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
 
+    private final ExamService exams;
+
     public BehaviorAuthoringService(GoldenAppRepository goldenApps,
                                     BehaviorSuiteRepository suites,
                                     BehaviorScenarioRepository scenarios,
                                     GoldenRecordingRepository recordings,
                                     OracleSnapshotRepository oracles,
                                     GoldenValidationRunRepository validationRuns,
-                                    SkillRepository skills) {
+                                    SkillRepository skills,
+                                    ExamService exams) {
+        this.exams = exams;
         this.goldenApps = goldenApps;
         this.suites = suites;
         this.scenarios = scenarios;
@@ -137,6 +173,7 @@ public class BehaviorAuthoringService {
         suite.setSchemaVersion(SCHEMA_VERSION);
         suite.setPublicContractJson(normalizeObject(body.get("public_contract"), defaultPublicContract()));
         suite.setDatabaseContractJson(normalizeObject(body.get("database_contract"), defaultDatabaseContract()));
+        kiemGoiChoPhep(body.get("runtime_config"));
         suite.setRuntimeConfigJson(normalizeObject(body.get("runtime_config"), defaultRuntimeConfig()));
         suites.save(suite);
         return suiteView(suite, true);
@@ -217,6 +254,7 @@ public class BehaviorAuthoringService {
             suite.setDatabaseContractJson(normalizeObject(body.get("database_contract"), Map.of()));
         }
         if (body.containsKey("runtime_config")) {
+            kiemGoiChoPhep(body.get("runtime_config"));
             suite.setRuntimeConfigJson(normalizeObject(body.get("runtime_config"), Map.of()));
         }
         if (invalidatesReplay) {
@@ -331,9 +369,17 @@ public class BehaviorAuthoringService {
             if ("boot_with_uri".equals(action) && !trace.isEmpty()) {
                 throw new IllegalArgumentException("boot_with_uri phải là event đầu tiên của scenario");
             }
-            if (Set.of("tap", "enter_text", "clear_text", "scroll", "wait_until").contains(action)
+            if (Set.of("tap", "enter_text", "clear_text", "scroll", "drag", "wait_until").contains(action)
                     && map(event.get("target")).isEmpty()) {
                 throw new IllegalArgumentException("Action " + action + " phải có target ngữ nghĩa");
+            }
+            // Kéo mà không nói kéo bao xa thì engine không làm gì được — chặn ngay lúc
+            // ghi, đừng để tới lượt capture mới nổ.
+            if ("drag".equals(action)) {
+                Map<String, Object> delta = map(event.get("delta"));
+                if (number(delta.get("x"), 0) == 0 && number(delta.get("y"), 0) == 0) {
+                    throw new IllegalArgumentException("Action drag phải khai độ dời (kéo ngang hoặc kéo dọc khác 0)");
+                }
             }
             if (Set.of("boot_with_uri", "open_uri", "wait_for_route").contains(action)) {
                 String uri = optional(event, "uri", "value");
@@ -385,6 +431,63 @@ public class BehaviorAuthoringService {
             // làm lệch chính sách; MÀU tính theo % của 255 trên từng kênh R/G/B (5% ~ ±13,
             // đủ chặt để lệch một nấc Material shade vẫn bị bắt).
             event.putIfAbsent("tolerance_pct", 5);
+            event.putIfAbsent("stage", "ASSERT");
+            event.putIfAbsent("action", "observe_ui");
+            event.putIfAbsent("browser", "flutter_tester");
+        } else if (CH7_REQUIRED_EXPECT_FIELDS.containsKey(kind)) {
+            // Ch.7 nhắm vào widget cấu trúc (Stack/Table/Sliver...), không có label/hint/
+            // text như thành phần tương tác — chỉ nhận ĐỊNH DANH làm locator, gõ sai tên là
+            // trượt rõ ràng chứ không âm thầm rơi về finder khác.
+            //
+            // Vì sao không phải ValueKey như bản đầu: đề chỉ được có MỘT hệ định danh, bắt
+            // sinh viên học hai cách là nhầm hai lần. Đo 7/9/2026: cả tám loại widget của
+            // mục này đều tìm được bằng Semantics(identifier:), sliver thì dùng
+            // SliverSemantics(identifier:) có sẵn trong SDK.
+            Map<String, Object> target = map(event.get("target"));
+            if (text(target, "semantic_id", "").isBlank() && text(target, "semanticId", "").isBlank()) {
+                throw new IllegalArgumentException(
+                        "Tiêu chí Ch.7 phải có target.semantic_id (định danh Semantics của widget cần chấm)");
+            }
+            Map<String, Object> expect = map(event.get("expect"));
+            for (String field : CH7_REQUIRED_EXPECT_FIELDS.get(kind)) {
+                if (text(expect, field, "").isBlank()) {
+                    throw new IllegalArgumentException(
+                            "Tiêu chí " + kind + " thiếu expect." + field);
+                }
+            }
+        } else if ("text_style".equals(kind)) {
+            if (map(event.get("target")).isEmpty() || text(event, "property", "").isBlank()) {
+                throw new IllegalArgumentException(
+                        "Tiêu chí kiểu chữ phải có target (dòng chữ cần đo) và thuộc tính cần đọc");
+            }
+            event.putIfAbsent("checkpoint", true);
+            // Cỡ chữ so tuyệt đối theo mặc định: sinh viên đặt 22 thì phải là 22, đây là
+            // con số người ra đề quy định chứ không phải phép đo có nhiễu. Riêng MÀU chữ
+            // engine tự dùng phép so màu với sai số 20% như mọi tiêu chí màu khác.
+            event.putIfAbsent("stage", "ASSERT");
+            event.putIfAbsent("action", "observe_ui");
+            event.putIfAbsent("browser", "flutter_tester");
+        } else if ("no_overflow".equals(kind)) {
+            event.putIfAbsent("checkpoint", true);
+            event.putIfAbsent("stage", "ASSERT");
+            event.putIfAbsent("action", "observe_ui");
+            event.putIfAbsent("browser", "flutter_tester");
+        } else if ("theme_value".equals(kind)) {
+            if (text(event, "property", "").isBlank()) {
+                throw new IllegalArgumentException("Tiêu chí chủ đề phải khai thuộc tính cần đọc");
+            }
+            event.putIfAbsent("checkpoint", true);
+            event.putIfAbsent("stage", "ASSERT");
+            event.putIfAbsent("action", "observe_ui");
+            event.putIfAbsent("browser", "flutter_tester");
+        } else if ("widget_state".equals(kind)) {
+            // Thiếu một trong hai thì lúc chấm engine không biết đọc gì của ai. Chặn ngay
+            // lúc ghi để người soạn đề sửa liền, đừng để lỗi trôi tới lượt capture.
+            if (text(event, "widget", "").isBlank() || text(event, "property", "").isBlank()) {
+                throw new IllegalArgumentException(
+                        "Tiêu chí trạng thái phải khai cả loại widget lẫn thuộc tính cần đọc");
+            }
+            event.putIfAbsent("checkpoint", true);
             event.putIfAbsent("stage", "ASSERT");
             event.putIfAbsent("action", "observe_ui");
             event.putIfAbsent("browser", "flutter_tester");
@@ -475,6 +578,37 @@ public class BehaviorAuthoringService {
         throw new IllegalArgumentException("Không tìm thấy event sequence " + sequence);
     }
 
+    @Transactional
+    /**
+     * Sửa GIÁ TRỊ NHẬP của một bước gõ chữ trong phiên record.
+     *
+     * Đây là nguồn sự thật duy nhất cho nội dung gõ. Recorder chỉ ghi được cú chạm vào ô;
+     * chữ thì người soạn tự khai ở đây, vì đọc chữ từ DOM của Flutter Web đã hỏng đủ ba
+     * kiểu: cắt cụt, mất trắng, và gán nhầm ô.
+     */
+    public Map<String, Object> updateEventValue(String recordingId, int sequence, String value) {
+        if (sequence < 1) throw new IllegalArgumentException("sequence event phải lớn hơn hoặc bằng 1");
+        GoldenRecording recording = recordingForUpdate(recordingId);
+        if (recording.getStatus() != RecordingStatus.ACTIVE) {
+            throw new IllegalStateException("Chỉ sửa được giá trị trong phiên ACTIVE");
+        }
+        List<Map<String, Object>> trace = readObjectList(recording.getRawTraceJson());
+        for (Map<String, Object> event : trace) {
+            Object raw = event.get("sequence");
+            if (raw instanceof Number number && number.intValue() == sequence) {
+                if (!"enter_text".equals(text(event, "action", ""))) {
+                    throw new IllegalArgumentException("Chỉ bước gõ chữ mới có giá trị nhập.");
+                }
+                event.put("value", value);
+                event.put("valueType", "string");
+                recording.setRawTraceJson(json(trace));
+                recordings.save(recording);
+                return event;
+            }
+        }
+        throw new IllegalArgumentException("Không tìm thấy event sequence " + sequence);
+    }
+
     // BẮT BUỘC @Transactional: recordingForUpdate() khóa bi quan PESSIMISTIC_WRITE, mà khóa
     // này đòi phải nằm trong transaction — thiếu là ném "No active transaction" ngay khi bấm
     // xóa action (đã xảy ra 31/8). Bốn hàm sửa phiên record còn lại đều đã có.
@@ -547,6 +681,20 @@ public class BehaviorAuthoringService {
         List<Map<String, Object>> trace = readObjectList(recording.getRawTraceJson());
         if (trace.isEmpty()) throw new IllegalStateException("Phiên record chưa có thao tác nào");
 
+        // CHẶN TẠI CỬA: bước gõ chữ mà chưa khai giá trị thì replay sẽ gõ chuỗi rỗng và
+        // mọi tiêu chí phía sau trượt theo — không được để lỗi đó trôi tới lượt capture.
+        List<String> thieuGiaTri = new ArrayList<>();
+        for (Map<String, Object> event : trace) {
+            if (!"enter_text".equals(text(event, "action", ""))) continue;
+            if (text(event, "value", "").isEmpty()) {
+                thieuGiaTri.add(locatorValue(map(event.get("target"))));
+            }
+        }
+        if (!thieuGiaTri.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "Chưa khai giá trị cho ô: " + String.join(", ", thieuGiaTri)
+                    + ". Gõ nội dung vào ô nhập trên từng dòng gõ chữ rồi sinh testcase lại.");
+        }
         List<Map<String, Object>> steps = new ArrayList<>();
         List<Map<String, Object>> checkpoints = new ArrayList<>();
         int actionNo = 0;
@@ -578,9 +726,18 @@ public class BehaviorAuthoringService {
                     || "component_position".equals(kind)
                     || "layout_relation".equals(kind)
                     || "component_color".equals(kind)
+                    || "widget_state".equals(kind)
+                    || "text_style".equals(kind)
+                    || "theme_value".equals(kind)
+                    || "no_overflow".equals(kind)
                     || "theme_color".equals(kind)
                     || "screen_match".equals(kind)
                     || "route_state".equals(kind)
+                    // Ch.7 — thiếu nhánh này thì abstractRecording ÂM THẦM LOẠI BỎ cả 8 event
+                    // component_* Chương 7 (rơi qua vòng lặp không action cũng không
+                    // checkpoint), scenario sinh ra không hề có tiêu chí nào dù appendEvent đã
+                    // lưu đúng vào raw_trace — bug thật phát hiện khi chấm thử 1 bài thật.
+                    || CH7_REQUIRED_EXPECT_FIELDS.containsKey(kind)
                     || (bool(event.get("checkpoint"), false)
                     && Set.of("ui_observation", "database_observation", "navigation").contains(kind))) {
                 Map<String, Object> checkpoint = new LinkedHashMap<>(event);
@@ -749,6 +906,23 @@ public class BehaviorAuthoringService {
     public Map<String, Object> applyDerivedDatabaseCheckpoints(String scenarioId,
                                                                 List<Map<String, Object>> derived,
                                                                 String outputSha256) {
+        return applyDerivedDatabaseCheckpoints(scenarioId, derived, outputSha256, null);
+    }
+
+    /**
+     * @param goldenSha256 sha của Golden Solution VỪA DÙNG để replay ra outputSha256 — PHẢI
+     *                     ghi lại vào oracle, nếu không publish() sẽ mãi mãi coi oracle này là
+     *                     "chưa khớp phiên bản Golden hiện tại" sau khi Golden đổi (bug thật:
+     *                     recapture qua updateScenario chỉ cập nhật nội dung oracle chứ không
+     *                     đụng golden_sha256, nên oracle cũ "READY" mãi mãi trỏ sha Golden ĐÃ
+     *                     THAY vì Golden ĐANG DÙNG). null = giữ nguyên sha cũ (dùng khi gọi
+     *                     ngay sau abstractRecording, lúc đó sha vừa được set đúng rồi).
+     */
+    @Transactional
+    public Map<String, Object> applyDerivedDatabaseCheckpoints(String scenarioId,
+                                                                List<Map<String, Object>> derived,
+                                                                String outputSha256,
+                                                                String goldenSha256) {
         BehaviorScenario scenario = scenario(scenarioId);
         ensureEditable(suite(scenario.getSuiteId()));
         // Checkpoint tự sinh bị xoá đi tách lại mỗi lần capture — nhưng ĐIỂM và RÀNG BUỘC
@@ -768,19 +942,40 @@ public class BehaviorAuthoringService {
                 .filter(item -> !Set.of("hidden_output_diff", "hidden_output_consistency")
                         .contains(text(item, "generated_from", "")))
                 .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
-        String uiCheckpointCorpus = checkpoints.stream()
-                .filter(item -> !"database_observation".equals(text(item, "kind", "")))
-                .map(this::json)
-                .collect(java.util.stream.Collectors.joining("\n"));
+        // Tập chữ mà các tiêu chí giao diện đang khẳng định NGUYÊN VĂN.
+        //
+        // Trước đây chỗ này gom JSON của mọi tiêu chí thành một chuỗi rồi lọc bằng
+        // `contains` — khớp CON. Nhưng lúc chấm, engine dùng `find.text(value)` khớp
+        // TUYỆT ĐỐI cả widget Text. Hai khái niệm khác nhau nên sinh ra tiêu chí không
+        // bao giờ đạt được: "KHAC" lọt vì nó là một đoạn của "29.300 ₫ · KHAC ·
+        // 2026-09-09", còn "6" lọt vì bất kỳ chuỗi nào có chữ số 6 cũng chứa nó.
+        Set<String> chuUiKhangDinh = new LinkedHashSet<>();
+        for (Map<String, Object> item : checkpoints) {
+            if ("database_observation".equals(text(item, "kind", ""))) continue;
+            themChuKhangDinh(chuUiKhangDinh, map(item.get("target")));
+            Map<String, Object> mongDoi = map(item.get("expect"));
+            for (Object raw : objectList(mongDoi.get("visible_texts"))) {
+                themChuKhangDinh(chuUiKhangDinh, raw);
+            }
+            for (Object raw : objectList(mongDoi.get("semantic_nodes"))) {
+                themChuKhangDinh(chuUiKhangDinh, map(map(raw).get("target")));
+            }
+        }
         int next = checkpoints.size() + 1;
         for (Map<String, Object> raw : derived == null ? List.<Map<String, Object>>of() : derived) {
             Map<String, Object> checkpoint = map(raw);
             validateDatabaseObservation(checkpoint);
-            List<String> uiValues = map(checkpoint.get("row")).values().stream()
-                    .filter(Objects::nonNull)
-                    .map(String::valueOf)
+            // Giữ giá trị nào có THẬT trong một dòng chữ mà tiêu chí giao diện khẳng định
+            // — khớp CON, đúng cách engine sẽ so (một dòng danh sách gộp nhiều trường vào
+            // một Text). Bỏ các cột ghi sổ của CSDL: id và khoá tự sinh không bao giờ hiện
+            // lên màn hình, mà lại khớp bừa với bất kỳ chuỗi nào chứa chữ số đó ("6" khớp
+            // "62.600") — sinh ra tiêu chí vô nghĩa rồi trượt oan.
+            List<String> uiValues = map(checkpoint.get("row")).entrySet().stream()
+                    .filter(o -> o.getValue() != null)
+                    .filter(o -> !COT_GHI_SO.contains(o.getKey().toLowerCase(Locale.ROOT)))
+                    .map(o -> String.valueOf(o.getValue()))
                     .filter(value -> !value.isBlank())
-                    .filter(uiCheckpointCorpus::contains)
+                    .filter(value -> chuUiKhangDinh.stream().anyMatch(chu -> chu.contains(value)))
                     .distinct()
                     .toList();
             if (!uiValues.isEmpty()
@@ -826,6 +1021,7 @@ public class BehaviorAuthoringService {
         observation.put("output_database_sha256", outputSha256);
         oracle.setDatabaseObservationJson(json(observation));
         oracle.setStatus(OracleStatus.READY);
+        if (goldenSha256 != null && !goldenSha256.isBlank()) oracle.setGoldenSha256(goldenSha256);
         oracles.save(oracle);
 
         Map<String, Object> out = new LinkedHashMap<>(scenarioView(scenario, true));
@@ -856,27 +1052,62 @@ public class BehaviorAuthoringService {
             boolean laViTri = "component_position".equals(kind);
             boolean laQuanHe = "layout_relation".equals(kind);
             boolean laMau = "component_color".equals(kind) || "theme_color".equals(kind);
-            if (!laViTri && !laQuanHe && !laMau) continue;
+            // Tiêu chí "có mặt" trước đây không nhận gì từ capture. Nay nó nhận phần LẶP:
+            // Golden có sáu nút Xóa thì "có mặt" nghĩa là có ở mọi dòng, không phải có một cái.
+            boolean laCoMat = "component_present".equals(kind);
+            // Ba loại tiêu chí "đọc một giá trị rồi so": trạng thái widget, kiểu chữ, chủ đề.
+            // Chúng dùng CHUNG một kênh giá trị chuẩn (`observed`) nên chỉ có một luật nướng.
+            boolean laTrangThai = "widget_state".equals(kind)
+                    || "text_style".equals(kind)
+                    || "theme_value".equals(kind);
+            // Quan he bo cuc (Ch.7 cua main) cung nhan gia tri chuan tu capture.
+            if (!laViTri && !laMau && !laTrangThai && !laCoMat && !laQuanHe) continue;
             Map<String, Object> doDuoc = map(components.get(text(checkpoint, "id", "")));
             if (doDuoc.isEmpty()) continue;
             Map<String, Object> mongDoi = new LinkedHashMap<>(map(checkpoint.get("expect")));
-            if (laViTri) {
-                if (doDuoc.get("center_x") == null || doDuoc.get("center_y") == null) continue;
-                mongDoi.put("center_x", doDuoc.get("center_x"));
-                mongDoi.put("center_y", doDuoc.get("center_y"));
-                mongDoi.put("width", doDuoc.get("width"));
-                mongDoi.put("height", doDuoc.get("height"));
+            boolean daDoi = false;
+            if (laViTri || laMau || laCoMat) {
+                Object lap = doDuoc.get("repeat");
+                // Bỏ luật lặp cũ khi lượt đo mới chỉ thấy một thể hiện: dữ liệu mẫu đổi mà giữ
+                // luật cũ thì bài đúng trượt oan vì "thiếu dòng".
+                if (lap == null) {
+                    if (mongDoi.remove("repeat") != null) daDoi = true;
+                } else {
+                    mongDoi.put("repeat", lap);
+                    daDoi = true;
+                }
+            }
+            if (laTrangThai) {
+                Object giaTri = doDuoc.get("observed");
+                // Không đo được (tiêu chí khai sai, widget không có trên màn) thì KHÔNG nướng:
+                // để lúc chấm báo "chưa có giá trị chuẩn" còn hơn nướng rỗng rồi cái gì cũng đạt.
+                if (giaTri == null) continue;
+                mongDoi.put("value", giaTri);
+                daDoi = true;
+            } else if (laViTri) {
+                if (doDuoc.get("center_x") != null && doDuoc.get("center_y") != null) {
+                    mongDoi.put("center_x", doDuoc.get("center_x"));
+                    mongDoi.put("center_y", doDuoc.get("center_y"));
+                    mongDoi.put("width", doDuoc.get("width"));
+                    mongDoi.put("height", doDuoc.get("height"));
+                    daDoi = true;
+                }
             } else if (laQuanHe) {
                 String quanHe = text(doDuoc, "relation", "");
-                if (quanHe.isBlank()) continue;
-                mongDoi.put("relation", quanHe);
-            } else {
+                if (!quanHe.isBlank()) {
+                    mongDoi.put("relation", quanHe);
+                    daDoi = true;
+                }
+            } else if (laMau) {
                 String mau = text(doDuoc, "color", "");
                 // Thành phần trong suốt hoàn toàn thì không có màu để so — bỏ qua, để tiêu chí
                 // báo "chưa có giá trị chuẩn" còn hơn nướng bừa một màu sai.
-                if (mau.isBlank()) continue;
-                mongDoi.put("color", mau);
+                if (!mau.isBlank()) {
+                    mongDoi.put("color", mau);
+                    daDoi = true;
+                }
             }
+            if (!daDoi) continue;
             checkpoint.put("expect", mongDoi);
             daNuong++;
         }
@@ -914,6 +1145,95 @@ public class BehaviorAuthoringService {
         scenario.setStepsJson(json(steps));
         scenarios.save(scenario);
         return daNuong;
+    }
+
+    /**
+     * Khoá định vị cũ của một bước, đúng THỨ TỰ engine chọn lúc thu định danh
+     * ({@code _thuDinhDanh} trong exam_test.dart). Hai bên phải cùng thứ tự, kẻo bước có cả
+     * label lẫn text được engine ghi theo label mà backend lại tra theo text.
+     */
+    private static final List<String> KHOA_DINH_VI_CU =
+            List.of("label", "text", "hint", "tooltip", "text_prefix");
+
+    /**
+     * Nướng ĐỊNH DANH (Semantics identifier) đo trên Golden lúc thu oracle vào target của các
+     * bước — Gói 2 kế hoạch "Định danh Semantics".
+     *
+     * Engine ghi mỗi phần tử dạng {label|text|hint|tooltip|text_prefix: giá trị, semantic_id: ...}.
+     * Bước nào có cùng khoá và giá trị thì nhận {@code semantic_id}; nhãn cũ GIỮ NGUYÊN cạnh
+     * bên làm đường lui, nên bài nộp quên định danh vẫn được tìm bằng nhãn như trước.
+     * Nhờ vậy bộ đề đã ghi hình từ trước nhận định danh sau một lần "Sinh lại testcase".
+     *
+     * KHÔNG ghi đè định danh người soạn đã gõ tay ở khung "Thêm action" (đường 2): tay là
+     * ý người, máy chỉ điền chỗ trống. CHỈ vá steps, KHÔNG vá checkpoint (quyết định Q2,
+     * 4/9/2026): tiêu chí "màn hình có dòng X" là kiểm NỘI DUNG, đổi sang định danh thì
+     * dòng đúng định danh mà sai chữ vẫn đạt.
+     */
+    @Transactional
+    public int applyCapturedIdentifiers(String scenarioId, List<Object> dinhDanh) {
+        if (dinhDanh == null || dinhDanh.isEmpty()) return 0;
+        BehaviorScenario scenario = scenario(scenarioId);
+        ensureEditable(suite(scenario.getSuiteId()));
+        Map<String, String> tra = new LinkedHashMap<>();
+        for (Object raw : dinhDanh) {
+            Map<String, Object> muc = map(raw);
+            String id = text(muc, "semantic_id", "");
+            if (id.isBlank()) continue;
+            for (String khoa : KHOA_DINH_VI_CU) {
+                String giaTri = text(muc, khoa, "");
+                if (giaTri.isBlank()) continue;
+                tra.putIfAbsent(khoa + "=" + giaTri, id);
+                break;
+            }
+        }
+        if (tra.isEmpty()) return 0;
+        List<Map<String, Object>> steps = new ArrayList<>(readObjectList(scenario.getStepsJson()));
+        int daNuong = 0;
+        for (Map<String, Object> step : steps) {
+            Map<String, Object> target = new LinkedHashMap<>(map(step.get("target")));
+            if (target.isEmpty()) continue;
+            if (!text(target, "semantic_id", "").isBlank() || !text(target, "semanticId", "").isBlank()) {
+                continue;
+            }
+            String id = null;
+            for (String khoa : KHOA_DINH_VI_CU) {
+                String giaTri = text(target, khoa, "");
+                if (giaTri.isBlank()) continue;
+                id = tra.get(khoa + "=" + giaTri);
+                break;
+            }
+            if (id == null) continue;
+            // semantic_id đứng đầu để ai đọc JSON cũng thấy nó là khoá chính; nhãn cũ theo sau.
+            Map<String, Object> moi = new LinkedHashMap<>();
+            moi.put("semantic_id", id);
+            moi.putAll(target);
+            step.put("target", moi);
+            daNuong++;
+        }
+        if (daNuong == 0) return 0;
+        scenario.setStepsJson(json(steps));
+        scenarios.save(scenario);
+        return daNuong;
+    }
+
+    /** Số bước có định danh / tổng bước có target — để màn soạn đề và lúc publish thấy độ phủ. */
+    public Map<String, Object> identifierCoverage(List<BehaviorScenario> danhSach) {
+        int co = 0;
+        int tong = 0;
+        for (BehaviorScenario scenario : danhSach) {
+            for (Map<String, Object> step : readObjectList(scenario.getStepsJson())) {
+                Map<String, Object> target = map(step.get("target"));
+                if (target.isEmpty()) continue;
+                tong++;
+                if (!text(target, "semantic_id", "").isBlank() || !text(target, "semanticId", "").isBlank()) {
+                    co++;
+                }
+            }
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("steps_with_identifier", co);
+        out.put("steps_total", tong);
+        return out;
     }
 
     @Transactional
@@ -1039,6 +1359,10 @@ public class BehaviorAuthoringService {
         Map<String, Object> out = new LinkedHashMap<>(suiteView(suite, true));
         out.put("total_weight", totalWeight);
         out.put("ready_for_replay", true);
+        // Độ phủ định danh: thông tin, KHÔNG chặn (Q3: không có điểm riêng cho định danh).
+        // Bước chưa có định danh vẫn chấm được bằng nhãn; con số này chỉ để người soạn biết
+        // bộ đề đã hưởng định danh tới đâu và cần "Sinh lại testcase" kịch bản nào.
+        out.put("identifier_coverage", identifierCoverage(enabled));
         return out;
     }
 
@@ -1151,14 +1475,19 @@ public class BehaviorAuthoringService {
                 throw new IllegalArgumentException("Loại semantic node không được hỗ trợ: " + role);
             }
         }
+        // TIỀN TỐ cũng là một nội dung hợp lệ. Thiếu hai dòng này thì tiêu chí chỉ khai
+        // tiền tố bị chặn ngay tại cửa — engine hiểu, form gửi đúng, mà backend từ chối.
         if (map(event.get("target")).isEmpty()
                 && objectList(expect.get("visible_texts")).isEmpty()
+                && objectList(expect.get("visible_text_prefixes")).isEmpty()
                 && objectList(expect.get("hidden_texts")).isEmpty()
+                && objectList(expect.get("hidden_text_prefixes")).isEmpty()
                 && semanticNodes.isEmpty()
                 && event.get("text") == null
                 && !bool(event.get("no_exception"), false)) {
             throw new IllegalArgumentException(
-                    "Checkpoint UI phải có target, semantic_nodes, visible_texts, hidden_texts, text hoặc no_exception");
+                    "Checkpoint UI phải có target, semantic_nodes, visible_texts, hidden_texts, "
+                    + "tiền tố (bắt đầu bằng…), text hoặc no_exception");
         }
         event.putIfAbsent("checkpoint", true);
         event.putIfAbsent("scope", "ui");
@@ -1456,6 +1785,34 @@ public class BehaviorAuthoringService {
                         "flutter", "flutter_test", "path", "sqflite", "sqflite_common_ffi"));
     }
 
+    /**
+     * Chặn khai package mà ẢNH CHẤM không có.
+     *
+     * <p>Danh sách này chỉ THU HẸP được, không mở rộng được: thêm một tên vào đây không cài gì
+     * cả, thư viện phải có sẵn trong ảnh nền (trang "Thư viện chấm" rồi build lại ảnh). Không
+     * chặn ở đây thì giảng viên yên tâm cho phép một gói không tồn tại, sinh viên làm theo, và
+     * cả lô bài chết ở khâu biên dịch chứ không phải ở khâu kiểm gói — lúc đó mới biết thì muộn.
+     *
+     * <p>Đọc không được danh sách của ảnh (Docker tắt, chưa build) thì BỎ QUA phép kiểm. Không
+     * biết thì đừng chặn ai.
+     */
+    private void kiemGoiChoPhep(Object runtimeConfig) {
+        List<Object> khai = objectList(map(runtimeConfig).get("allowed_packages"));
+        if (khai.isEmpty()) return;
+        Set<String> coThat = exams.goiCoTrongAnhCham();
+        if (coThat.isEmpty()) return;
+        List<String> thieu = khai.stream()
+                .map(item -> String.valueOf(item).trim())
+                .filter(ten -> !ten.isBlank() && !coThat.contains(ten))
+                .distinct()
+                .toList();
+        if (thieu.isEmpty()) return;
+        throw new IllegalArgumentException(
+                "Ảnh chấm không có package: " + String.join(", ", thieu)
+                + ". Danh sách này chỉ thu hẹp được chứ không cài thêm được gì — muốn dùng thì"
+                + " thêm ở trang \"Thư viện chấm\" rồi build lại ảnh nền, xong mới khai ở đây.");
+    }
+
     private Map<String, Object> defaultViewport() {
         return Map.of("id", "desktop", "width", 1280, "height", 800, "device_pixel_ratio", 1.0);
     }
@@ -1464,7 +1821,7 @@ public class BehaviorAuthoringService {
 
     private String locatorAttribute(Map<String, Object> target) {
         for (String key : List.of("semanticId", "semantic_id", "valueKey", "value_key", "key",
-                "label", "hint", "text", "role")) {
+                "label", "hint", "text", "text_prefix", "tooltip", "role")) {
             if (target.get(key) != null && !String.valueOf(target.get(key)).isBlank()) return key;
         }
         return "none";
@@ -1483,6 +1840,37 @@ public class BehaviorAuthoringService {
         if (value instanceof List<?>) return "array";
         return "string";
     }
+
+    /**
+     * Gom các chuỗi mà một target/giá trị đang khẳng định, dưới dạng `find.text()` sẽ tìm.
+     *
+     * Nhãn hai dòng của ListTile ("tiêu đề\nphụ đề") được tách thêm DÒNG ĐẦU: title của
+     * ListTile là một widget Text riêng nên `find.text` khớp được nó, còn cả cụm hai dòng
+     * thì chỉ tồn tại trong cây ngữ nghĩa.
+     */
+    private void themChuKhangDinh(Set<String> dich, Object nguon) {
+        if (nguon == null) return;
+        if (nguon instanceof Map<?, ?> m) {
+            Map<String, Object> target = map(m);
+            for (String khoa : List.of("text", "label", "hint", "text_prefix")) {
+                themChuKhangDinh(dich, target.get(khoa));
+            }
+            return;
+        }
+        String chu = String.valueOf(nguon).trim();
+        if (chu.isBlank()) return;
+        dich.add(chu);
+        int xuong = chu.indexOf('\n');
+        if (xuong > 0) dich.add(chu.substring(0, xuong).trim());
+    }
+
+    /**
+     * Cột ghi sổ của CSDL — không phải dữ liệu người dùng nhìn thấy, nên không đưa vào
+     * phép đối chiếu UI. Khoá tự sinh còn nguy hiểm ở chỗ nó khớp bừa: id 6 nằm trong
+     * "62.600", trong "2026" — tiêu chí sẽ vừa vô nghĩa vừa trượt thất thường.
+     */
+    private static final Set<String> COT_GHI_SO =
+            Set.of("id", "_id", "rowid", "uuid", "created_at", "updated_at");
 
     private List<Object> objectList(Object value) {
         return value instanceof List<?> source ? new ArrayList<>(source) : new ArrayList<>();

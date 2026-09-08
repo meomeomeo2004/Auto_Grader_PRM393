@@ -171,6 +171,13 @@ public class BehaviorAuthoringController {
     @PutMapping("/recordings/{id}/events/{sequence}")
     public ResponseEntity<?> updateEvent(@PathVariable String id, @PathVariable int sequence,
                                          @RequestBody Map<String, Object> body) {
+        // Hai việc sửa được trên một dòng đã ghi: điểm của checkpoint, và GIÁ TRỊ NHẬP
+        // của bước gõ chữ. Cái sau là đường chính thức để khai chữ — recorder không còn
+        // đoán nữa.
+        if (body.containsKey("value")) {
+            return call(() -> service.updateEventValue(id, sequence,
+                    body.get("value") == null ? "" : String.valueOf(body.get("value"))));
+        }
         return call(() -> service.updateEventWeight(id, sequence,
                 body.get("weight") instanceof Number number ? number.doubleValue() : 1.0));
     }
@@ -265,6 +272,11 @@ public class BehaviorAuthoringController {
                 result.put("output_database", capture.get("output_database"));
                 result.put("database_checkpoint_count", capture.get("database_checkpoint_count"));
                 result.put("materialized_variables", capture.get("materialized_variables"));
+                // Hai khoá này màn soạn đề ĐANG ĐỌC: số bước vừa nhận định danh, và kiểm kê
+                // icon để người ra đề tick thành tiêu chí. Thiếu chúng thì thông báo im lặng
+                // và bảng icon không bao giờ hiện.
+                result.put("identifier_step_count", capture.get("identifier_step_count"));
+                result.put("icons", capture.get("icons"));
             }
             return result;
         });
@@ -282,11 +294,13 @@ public class BehaviorAuthoringController {
                     || body.containsKey("viewports");
             if (replayChanged) {
                 Map<String, Object> capture = captureService.capture(suiteId, id);
-                scenario = map(capture.get("scenario"));
+                scenario = new LinkedHashMap<>(map(capture.get("scenario")));
                 if (capture.get("capture_warning") != null) {
-                    scenario = new LinkedHashMap<>(scenario);
                     scenario.put("capture_warning", capture.get("capture_warning"));
                 }
+                // Kiểm kê icon cũng phải theo đường sửa scenario: người ra đề thêm tiêu chí
+                // icon xong là capture chạy lại ngay, bảng icon phải cập nhật theo.
+                scenario.put("icons", capture.get("icons"));
             }
             writeTestcaseDefinition(suiteId, scenario.get("scenario_code"));
             return scenario;
@@ -399,6 +413,11 @@ public class BehaviorAuthoringController {
                 .header(HttpHeaders.CONTENT_DISPOSITION,
                         "attachment; filename=\"" + type.name().toLowerCase() + "\"")
                 .body(resource);
+    }
+
+    @GetMapping("/suites/{id}/golden-value-keys")
+    public ResponseEntity<?> goldenValueKeys(@PathVariable String id) {
+        return call(() -> Map.of("keys", artifactService.scanGoldenValueKeys(id)));
     }
 
     @GetMapping("/suites/{id}/execution-plan")
