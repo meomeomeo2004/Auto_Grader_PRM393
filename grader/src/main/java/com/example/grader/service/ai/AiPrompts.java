@@ -12,6 +12,12 @@ import java.util.Map;
  * Grader_App không còn dùng (đã chuyển sang Golden Solution Record–Abstract–Replay). Bù lại, file
  * này có thêm prompt sinh app "lời giải mẫu" (Golden Solution) — năng lực MỚI, không có ở
  * Grader_App1.
+ *
+ * <p>{@link #draftSystem} ra đề theo khuôn "ĐỀ THI THỰC HÀNH" thật của bộ môn (hợp đồng dữ liệu +
+ * bảng Định danh giao diện), KHÔNG còn dùng khuôn "YÊU CẦU CHUNG" chung chung của Grader_App1 —
+ * khuôn cũ thiếu bảng Định danh nên đề sinh ra không chấm tự động được qua Golden Solution
+ * Record–Abstract–Replay. Không có bảng điểm trong đề: điểm cấu hình riêng ở UI Behavior
+ * Authoring (trọng số scenario/checkpoint), tránh khai trùng hai nơi.
  */
 final class AiPrompts {
 
@@ -20,64 +26,97 @@ final class AiPrompts {
     // ── 1. Soạn đề bài ───────────────────────────────────────────
 
     /**
-     * Khuôn "YÊU CẦU CHUNG – BÀI KIỂM TRA FLUTTER" mà bộ môn đang phát cho sinh viên: 5 mục đánh
-     * số, mỗi mục là danh sách gạch đầu dòng. Nội dung từng gạch đầu dòng do wizard quyết định
-     * (chủ đề, số màn, kiến thức, lưu trữ…), riêng BỐ CỤC thì cố định để mọi đề nhìn như một.
+     * Khuôn "ĐỀ THI THỰC HÀNH" thật của bộ môn (vd. PE_PRM393_SP27): 5 mục đánh số, trong đó mục 2
+     * và 3 là HỢP ĐỒNG dữ liệu/giao diện đúng từng chữ — khớp trực tiếp với cách hệ thống Golden
+     * Solution Record–Abstract–Replay chấm bài (Semantics(identifier:…), tên bảng/cột SQLite đối
+     * chiếu literal). Khuôn cũ "YÊU CẦU CHUNG" (kiểu liệt kê chung chung, có bảng điểm ở cuối) đã bị
+     * thay hẳn: nó không có bảng Định danh nên đề sinh ra không thể chấm tự động qua Golden được.
+     * Điểm số KHÔNG còn khai trong đề — trọng số cấu hình riêng ở UI Behavior Authoring (scenario/
+     * checkpoint), khai trùng hai nơi dễ lệch nhau.
      */
-    static String draftSystem() {
+    static String draftSystem(String databaseName, List<String> allowedPackages) {
         return """
                Bạn là giảng viên ra đề thi thực hành môn PRM393 (Flutter/Dart) của FPT University.
-               Viết đề theo ĐÚNG khuôn "YÊU CẦU CHUNG – BÀI KIỂM TRA FLUTTER" của bộ môn: tiếng
-               Việt, mỗi mục là danh sách gạch đầu dòng ngắn gọn, mọi yêu cầu đều KIỂM TRA ĐƯỢC
-               bằng test tự động.
+               Viết đề theo ĐÚNG khuôn "ĐỀ THI THỰC HÀNH" của bộ môn: tiếng Việt, mỗi hợp đồng là
+               bảng Markdown, mỗi yêu cầu còn lại là gạch đầu dòng ngắn gọn. Đề này sẽ được máy chấm
+               tự động bằng cách dò đúng chuỗi ký tự và Semantics(identifier:…) trên màn hình, nên
+               MỌI giá trị bắt buộc (tên bảng, tên cột, nhãn nút, thông báo lỗi, mã định danh) phải
+               viết ra CHÍNH XÁC, không mơ hồ, không để giáo viên tự suy diễn khi chấm tay.
 
                Chỉ trả về MỘT object JSON:
                {
                  "de_bai_markdown": "<toàn bộ đề bài dạng Markdown>",
-                 "summary": "<2-3 câu tóm tắt đề vừa tạo>",
-                 "criteria": [ {"name": "<tiêu chí>", "points": <số điểm>} ]
+                 "summary": "<2-3 câu tóm tắt đề vừa tạo>"
                }
 
                "de_bai_markdown" PHẢI có đủ 5 mục, đúng thứ tự và đúng tiêu đề:
 
-               # YÊU CẦU CHUNG – BÀI KIỂM TRA FLUTTER: <TÊN BÀI VIẾT HOA>
-               ## 1. Yêu cầu kỹ thuật
-               (mỗi gạch đầu dòng một yêu cầu: loại đối tượng phải quản lý, kiến trúc, quản lý
-                trạng thái, cách lưu trữ, responsive, Form + GlobalKey<FormState>, hình ảnh…)
-               ## 2. Dữ liệu và Validation
-               (Model và từng thuộc tính; khóa chính/ID tự tăng; trường bắt buộc; ràng buộc và
-                thông báo lỗi hiện Ở ĐÂU; chỉ cho lưu khi toàn bộ hợp lệ)
-               ## 3. Chức năng chính
-               (hiển thị danh sách, Thêm, Sửa, Xóa, điều hướng sang màn Chi tiết, đồng bộ dữ liệu
-                giữa giao diện – ViewModel – tầng lưu trữ; nói rõ hành vi mong đợi sau mỗi thao tác)
-               ## 4. Giao diện
-               (bố cục từng màn hình, thành phần bắt buộc của mỗi item, yêu cầu responsive)
-               ## 5. Đánh giá
-               (một gạch đầu dòng liệt kê các nhóm tiêu chí, rồi bảng Markdown 2 cột
-                | Tiêu chí | Điểm | với các dòng cộng lại ĐÚNG BẰNG 100)
+               # ĐỀ THI THỰC HÀNH — <TÊN BÀI VIẾT HOA>
+               Ứng dụng cần xây: <tên ứng dụng suy từ chủ đề>
+               <1-2 câu mô tả ứng dụng>
+               Thời gian: <thời lượng> · Điểm: 100
+
+               ## 1. Môi trường làm bài và nộp bài
+               (CỐ ĐỊNH — chép gần như nguyên văn, chỉ đổi PACKAGES cho khớp đề này:
+                "Làm bài bằng Android Studio, chạy thử trên máy ảo Android. Không cần chạy trên
+                trình duyệt hay trên Windows."; "Nộp thư mục `lib/` của dự án, nén thành một file
+                .zip."; "Mọi thứ khác (pubspec, android, test, build…) sẽ bị bỏ qua khi chấm — hệ
+                thống dùng bộ thư viện chuẩn giống nhau cho mọi bài."; rồi liệt kê PACKAGES)
+               ## 2. Hợp đồng dữ liệu (BẮT BUỘC ĐÚNG TỪNG CHỮ)
+               (Tên database DB_NAME_INLINE_TOKEN; câu lệnh CREATE TABLE IF NOT EXISTS đầy đủ tên
+                bảng/cột/kiểu dữ liệu, suy từ thực thể giáo viên mô tả; danh sách mã cố định — enum/
+                category viết hoa không dấu — nếu đề có; nói rõ hậu quả nếu sai tên file/bảng/cột:
+                hệ thống chấm ghi và đọc lệch nhau, điểm chức năng về 0 dù code chạy đúng)
+               ## 3. Hợp đồng giao diện (BẮT BUỘC ĐÚNG TỪNG CHỮ)
+               (mở đầu bằng câu: "Bài được chấm tự động: máy tìm các thành phần trên màn hình theo
+                đúng chuỗi ký tự dưới đây. Đặt sai một chữ hay thiếu một dấu tiếng Việt thì máy
+                không tìm thấy thành phần đó, dù ứng dụng chạy hoàn hảo với người dùng."
+                Sau đó một mục con "3.x <tên màn hình>" cho MỖI màn hình giáo viên liệt kê — đúng
+                SỐ MÀN, không tách thêm không gộp bớt — mỗi mục con là MỘT bảng Markdown 4 cột
+                | Thành phần | Cách đặt | Giá trị bắt buộc | Định danh |
+                "Cách đặt" ghi đúng cơ chế Flutter (Semantics(label:…) bọc ngoài, labelText của
+                InputDecoration, Text hiển thị, chữ trên ChoiceChip…). "Định danh" đặt theo mẫu
+                DinhDanh.<tên>, DinhDanh.<tên>(id) khi cần tham số theo dữ liệu, DinhDanh.<tên>(mã)
+                khi có nhiều biến thể (lọc/chọn danh mục…). Sau bảng, thêm dòng
+                "<Ảnh mẫu — mô tả ngắn màn hình để giáo viên tự chèn ảnh chụp>" làm chỗ trống cho
+                giáo viên gắn ảnh minh họa sau — KHÔNG tự vẽ hay mô tả ảnh chi tiết.
+                Nếu đề có validate dữ liệu nhập, thêm một mục con cuối "Thông báo lỗi khi nhập sai
+                — nguyên văn" dạng bảng 2 cột | Trường hợp | Thông báo bắt buộc | với thông báo viết
+                nguyên văn tiếng Việt, ngắn gọn, không kèm dấu chấm câu thừa)
+               ## 4. Chức năng phải làm
+               (gạch đầu dòng, MỖI hành vi trong đề đều phải xuất hiện ở đây dưới dạng có thể ghi
+                thao tác/replay được: hiển thị, thêm, sửa, xóa, lọc… nói rõ trạng thái database
+                phải đổi thật sau Thêm/Sửa/Xóa — không chỉ cập nhật trên màn hình)
+               ## 5. Tự kiểm trước khi nộp
+               (CỐ ĐỊNH — một đoạn ngắn nhắc sinh viên chạy `flutter test test/tu_kiem.dart` trước
+                khi nộp để tự kiểm tên bảng/cột và các định danh còn thiếu)
 
                LUẬT QUAN TRỌNG NHẤT — CHỈ VIẾT NHỮNG GÌ ĐƯỢC YÊU CẦU:
-               Bạn CHỈ mượn BỐ CỤC 5 mục ở trên. Toàn bộ NỘI DUNG phải suy ra từ phần mô tả yêu cầu
-               của giảng viên, KHÔNG thêm bất cứ yêu cầu nào không được nhắc tới, kể cả khi bạn thấy
-               nó là "thông lệ tốt" hay "đề Flutter nào cũng có".
-               - Giảng viên KHÔNG nhắc kiến trúc ⇒ không viết MVVM, Repository, Clean Architecture.
-               - KHÔNG nhắc quản lý trạng thái ⇒ không viết Provider, Riverpod, StateNotifier,
-                 ValueNotifier, Bloc, setState.
-               - KHÔNG nhắc responsive/tablet ⇒ không viết yêu cầu responsive hay mốc dp nào.
-               - KHÔNG nhắc thông báo lỗi ⇒ không bịa ra yêu cầu hiện lỗi dưới ô nhập.
-               - KHÔNG nhắc lưu trữ ⇒ không viết SQLite/SharedPreferences/File.
-               - KHÔNG nhắc chức năng nào (sửa, tìm kiếm, sắp xếp, xác nhận xoá, màn chi tiết…)
-                 ⇒ tuyệt đối không đưa nó vào đề.
-               Ô nào giảng viên để trống thì mục tương ứng chỉ viết đúng phần suy ra được từ các ô
-               đã điền — thà đề ngắn còn hơn đề có yêu cầu sinh viên không được báo trước.
+               Toàn bộ NỘI DUNG của mục 2, 3, 4 phải suy ra từ phần mô tả yêu cầu của giảng viên
+               (chủ đề, kiến thức, màn hình, chức năng, thực thể), KHÔNG thêm bất cứ yêu cầu nào
+               không được nhắc tới, kể cả khi bạn thấy nó là "thông lệ tốt" hay "đề Flutter nào cũng
+               có". Giảng viên KHÔNG nhắc chức năng nào (sửa, tìm kiếm, sắp xếp, xác nhận xoá, màn
+               chi tiết…) ⇒ tuyệt đối không đưa nó vào đề. Ô nào giảng viên để trống thì mục tương
+               ứng chỉ viết đúng phần suy ra được từ các ô đã điền — thà đề ngắn còn hơn đề có yêu
+               cầu sinh viên không được báo trước.
 
                Nguyên tắc còn lại:
-               - Số màn hình phải ĐÚNG con số giảng viên ghi; một màn thì không được tách thành hai.
-               - Mỗi tiêu chí ở mục 5 phải tương ứng với một hành vi đã mô tả ở mục 2, 3 hoặc 4 —
-                 và hành vi đó phải bắt nguồn từ yêu cầu của giảng viên.
-               - Không ra yêu cầu chỉ đánh giá được bằng mắt ("giao diện đẹp") mà không kèm tiêu chí
-                 cụ thể (kích thước, số cột, thành phần phải có).
-               """;
+               - Số màn hình ở mục 3 phải ĐÚNG con số giảng viên ghi; một màn thì không được tách
+                 thành hai, và không được thêm màn nào ngoài danh sách.
+               - Mỗi định danh trong bảng mục 3 phải DUY NHẤT trong toàn đề — không trùng giữa hai
+                 màn hình khác nhau.
+               - Chỉ dùng CÁC PACKAGE SAU khi mô tả yêu cầu kỹ thuật (không gợi ý package khác):
+                 PACKAGES
+
+               DB_NAME_HINT_TOKEN
+               """
+                .replace("PACKAGES", String.join(", ", allowedPackages))
+                .replace("DB_NAME_INLINE_TOKEN", databaseName == null || databaseName.isBlank()
+                        ? "<đặt một tên hợp lý, ví dụ app.db>" : "`" + databaseName + "`")
+                .replace("DB_NAME_HINT_TOKEN", databaseName == null || databaseName.isBlank()
+                        ? "Đề này chưa khai tên file database ở Bước 1 — bạn tự chọn một tên hợp lý "
+                          + "và ghi rõ trong \"summary\" để giáo viên khai lại đúng tên đó."
+                        : "Tên file database dùng đúng: " + databaseName + ".");
     }
 
     static String draftUser(Map<String, Object> req) {
@@ -89,12 +128,10 @@ final class AiPrompts {
         appendIf(sb, "Các màn hình", req.get("screens"));
         appendIf(sb, "Chức năng bắt buộc", req.get("features"));
         appendIf(sb, "Cấu trúc dữ liệu / thực thể", req.get("entity"));
-        appendIf(sb, "Kiến trúc & quản lý trạng thái", req.get("architecture"));
         appendIf(sb, "Cách lưu trữ dữ liệu", req.get("storage"));
         appendIf(sb, "Mức độ khó", req.get("difficulty"));
         appendIf(sb, "Thời lượng làm bài", req.get("duration"));
         appendIf(sb, "Yêu cầu thêm của giảng viên", req.get("note"));
-        sb.append("\nTổng điểm của bảng thang điểm: 100.");
         return sb.toString();
     }
 
@@ -105,14 +142,15 @@ final class AiPrompts {
                Chỉ trả về MỘT object JSON:
                {
                  "de_bai_markdown": "<toàn bộ đề sau khi sửa, giữ nguyên cấu trúc 5 mục>",
-                 "summary": "<liệt kê ngắn gọn những gì đã thay đổi>",
-                 "criteria": [ {"name": "<tiêu chí>", "points": <số điểm>} ]
+                 "summary": "<liệt kê ngắn gọn những gì đã thay đổi>"
                }
 
                Quy tắc: CHỈ sửa đúng phần được yêu cầu, giữ nguyên mọi nội dung khác kể cả cách
-               diễn đạt. Giữ đủ 5 mục theo khuôn "YÊU CẦU CHUNG – BÀI KIỂM TRA FLUTTER"
-               (1. Yêu cầu kỹ thuật · 2. Dữ liệu và Validation · 3. Chức năng chính · 4. Giao diện
-               · 5. Đánh giá) và bảng thang điểm vẫn cộng đúng 100 điểm.
+               diễn đạt. Giữ đủ 5 mục theo khuôn "ĐỀ THI THỰC HÀNH" (1. Môi trường làm bài và nộp
+               bài · 2. Hợp đồng dữ liệu · 3. Hợp đồng giao diện — bảng Định danh theo từng màn
+               hình · 4. Chức năng phải làm · 5. Tự kiểm trước khi nộp). Mục 3 vẫn phải giữ định
+               dạng bảng | Thành phần | Cách đặt | Giá trị bắt buộc | Định danh | và mỗi định danh
+               vẫn phải duy nhất trong toàn đề. Đề KHÔNG có bảng điểm — điểm cấu hình riêng ở UI.
                """;
     }
 
@@ -239,11 +277,11 @@ final class AiPrompts {
                - Không viết test, không viết file ngoài lib/ (không cần pubspec.yaml, hệ thống tự
                  ghép).
 
-               DATABASE_NAME_NOTE
+               DB_NAME_HINT_TOKEN
                """
                 .replace("ALLOWED_PACKAGES", String.join(", ", allowedPackages))
                 .replace("DATABASE_NAME", databaseName == null ? "" : databaseName)
-                .replace("DATABASE_NAME_NOTE", databaseName == null || databaseName.isBlank()
+                .replace("DB_NAME_HINT_TOKEN", databaseName == null || databaseName.isBlank()
                         ? "Đề này chưa khai tên file database — nếu có lưu trữ SQLite, hãy chọn một "
                           + "tên hợp lý và nói rõ trong \"notes\" để giảng viên khai lại đúng tên đó "
                           + "ở Bước 1 trước khi tải app lên."
@@ -269,6 +307,62 @@ final class AiPrompts {
         return "ĐỀ BÀI:\n\n" + deBai
                 + "\n\nAPP HIỆN TẠI (danh sách file):\n" + filesJson
                 + "\n\n---\nYÊU CẦU CHỈNH SỬA:\n" + instruction;
+    }
+
+    // ── 4. Database mẫu (phát cho SV) + database ẩn (chống hardcode) ─
+
+    /**
+     * Sinh dữ liệu cho ĐÚNG HAI database mà mục "Bảy thành phần của bộ chấm" cần
+     * (STUDENT_DATABASE + HIDDEN_DATABASE): cùng cấu trúc bảng, khác dữ liệu — hệ thống chấm đối
+     * chiếu schema hai bên phải giống hệt nhau ({@code BehaviorArtifactService#compareSqliteSchema}),
+     * còn dữ liệu khác nhau mới chặn được sinh viên hardcode kết quả theo bộ mẫu công khai.
+     *
+     * <p>Không tự chạy SQL của AI trực tiếp lên database thật: {@code ExamService#saveDatabaseSeed}
+     * chỉ chấp nhận đúng câu lệnh bắt đầu bằng "CREATE TABLE", còn dữ liệu luôn bind qua
+     * PreparedStatement — AI không có đường nào thực thi SQL tuỳ ý.
+     */
+    static String seedSystem() {
+        return """
+               Bạn là giảng viên chuẩn bị HAI file SQLite cho một bài thi PRM393 đã ra đề xong:
+               - Database PHÁT CHO SINH VIÊN: dữ liệu mẫu, sinh viên nhìn thấy khi mở app.
+               - Database ẨN: CÙNG CẤU TRÚC BẢNG (tên bảng/cột/kiểu giống hệt), nhưng DỮ LIỆU KHÁC
+                 hẳn — dùng để chấm bài mà sinh viên không đoán/hardcode được kết quả từ dữ liệu mẫu.
+
+               Chỉ trả về MỘT object JSON:
+               {
+                 "tables": [
+                   {
+                     "name": "<tên bảng, đúng như trong mục Hợp đồng dữ liệu của đề>",
+                     "create_sql": "<câu lệnh CREATE TABLE IF NOT EXISTS ... NGUYÊN VĂN từ đề>",
+                     "columns": ["<cột 1>", "<cột 2>", "..."],
+                     "student_rows": [[<giá trị cột 1>, <giá trị cột 2>, "..."], ["..."]],
+                     "hidden_rows": [["..."], ["..."]]
+                   }
+                 ],
+                 "notes": ["<vd: đổi hẳn ngày tháng nên tổng theo tháng của 2 bộ khác nhau>"]
+               }
+
+               QUY TẮC BẮT BUỘC:
+               - "create_sql" PHẢI khớp NGUYÊN VĂN câu lệnh ở mục "Hợp đồng dữ liệu" của đề — sai
+                 một chữ là hệ thống chấm đọc nhầm bảng, mất điểm oan cho sinh viên.
+               - KHÔNG bịa thêm bảng nào ngoài những bảng đã khai trong "Hợp đồng dữ liệu".
+               - Mỗi bảng: 5–10 dòng cho MỖI bộ (student_rows và hidden_rows tách riêng).
+               - "columns" liệt kê đúng tên cột sẽ điền giá trị, ĐÚNG THỨ TỰ với từng phần tử trong
+                 mỗi dòng của student_rows/hidden_rows. Được bỏ qua cột khóa chính tự tăng (vd "id")
+                 để SQLite tự đánh số.
+               - Dữ liệu phải THỰC TẾ, đúng kiểu (số là số, không để chữ vào cột số, ngày đúng định
+                 dạng đề yêu cầu), đúng các mã cố định nếu đề có khai (vd mã danh mục viết hoa
+                 không dấu).
+               - "student_rows" và "hidden_rows" PHẢI khác nhau đủ nhiều (tên, số tiền, ngày tháng,
+                 số dòng...) để không thể suy ra kết quả tính toán (tổng, đếm, lọc, sắp xếp...) của
+                 bộ này từ bộ kia.
+               """;
+    }
+
+    static String seedUser(String deBai) {
+        return "ĐỀ BÀI:\n\n" + deBai
+                + "\n\nHãy soạn dữ liệu mẫu (student_rows) và dữ liệu ẩn (hidden_rows) cho đúng"
+                + " (các) bảng đã khai ở mục Hợp đồng dữ liệu.";
     }
 
     private static void appendIf(StringBuilder sb, String label, Object value) {

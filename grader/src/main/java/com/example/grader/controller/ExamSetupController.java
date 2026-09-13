@@ -101,6 +101,20 @@ public class ExamSetupController {
     }
 
     /**
+     * Danh sách mã đề đã soạn bằng trợ lý AI (có de_bai.md), kể cả đề CHƯA có testcase/suite nào —
+     * cho trang "Tạo đề" hiển thị để mở lại. Khác {@code /list}: cái đó chỉ trả đề đã có testcase
+     * thật trong DB.
+     */
+    @GetMapping("/authored-list")
+    public ResponseEntity<?> authoredList() {
+        try {
+            return ResponseEntity.ok(examService.listAuthoredExamIds());
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", "Không đọc được danh sách đề."));
+        }
+    }
+
+    /**
      * ĐÁNH GIÁ ĐỘ PHỦ của đề theo SYLLABUS hiện tại (resolve trực tiếp → sửa syllabus là
      * phản chiếu ngay). Trả: testcase ↔ kiến thức/độ khó, độ phủ theo category & độ khó,
      * skill chưa phủ (gaps), issues.
@@ -219,6 +233,55 @@ public class ExamSetupController {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         } catch (Exception e) {
             return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /**
+     * Dựng THẬT hai file SQLite (handout/student.db, handout/hidden.db) từ bản mô tả bảng+dữ liệu
+     * AI đã soạn ({@code /api/ai/database/propose}). Body: { tables: [{name, create_sql, columns,
+     * student_rows, hidden_rows}] }.
+     */
+    @SuppressWarnings("unchecked")
+    @PostMapping("/{examId}/database-seed")
+    public ResponseEntity<?> saveDatabaseSeed(@PathVariable String examId, @RequestBody Map<String, Object> body) {
+        try {
+            Object raw = body == null ? null : body.get("tables");
+            java.util.List<Map<String, Object>> tables = raw instanceof java.util.List
+                    ? (java.util.List<Map<String, Object>>) raw : java.util.List.of();
+            examService.saveDatabaseSeed(examId, tables);
+            return ResponseEntity.ok(Map.of("exam_id", examId, "ok", true));
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /** Tải database mẫu phát cho sinh viên (handout/student.db). 404 nếu chưa sinh. */
+    @GetMapping("/{examId}/download/student-db")
+    public ResponseEntity<?> downloadStudentDb(@PathVariable String examId) {
+        return downloadHandoutFile(examId, "student.db");
+    }
+
+    /** Tải database ẩn dùng để chấm chống hardcode (handout/hidden.db). 404 nếu chưa sinh. */
+    @GetMapping("/{examId}/download/hidden-db")
+    public ResponseEntity<?> downloadHiddenDb(@PathVariable String examId) {
+        return downloadHandoutFile(examId, "hidden.db");
+    }
+
+    private ResponseEntity<?> downloadHandoutFile(String examId, String fileName) {
+        try {
+            byte[] bytes = examService.readHandoutFile(examId, fileName);
+            if (bytes == null) return ResponseEntity.status(404)
+                    .body(Map.of("error", "Đề " + examId + " chưa có " + fileName + " — hãy sinh database mẫu trước."));
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + examId + "_" + fileName + "\"")
+                    .contentType(MediaType.parseMediaType("application/x-sqlite3"))
+                    .body(bytes);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", "Lỗi máy chủ"));
         }
     }
 

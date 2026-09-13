@@ -7,7 +7,7 @@ import {
   FileText, FileCode2, CheckSquare, BarChart2, Bell, Search,
   GraduationCap, Loader2, History, PanelLeftClose,
   Clock, CheckCircle2, AlertCircle, BookOpen, Package, Pause,
-  Bot, ChevronDown,
+  Bot, ChevronDown, Sparkles, FlaskConical,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { API_BASE } from '@/lib/config';
@@ -53,6 +53,8 @@ const PRIMARY_NAV: NavEntry[] = [
     ],
   },
   { name: 'Thư viện chấm', path: '/teacher/libraries', icon: Package },
+  { name: 'Tạo đề', path: '/teacher/exam-authoring', icon: Sparkles },
+  { name: 'Tạo Golden', path: '/teacher/golden-authoring', icon: FlaskConical },
   // Vào thẳng trang Kho — mọi thao tác (tạo/sửa/xóa/chấm lại) đều là nút trong trang đó.
   { name: 'Bộ chấm Golden', path: '/teacher/archive', icon: FileCode2 },
   { name: 'Khung năng lực', path: '/syllabus', icon: BookOpen },

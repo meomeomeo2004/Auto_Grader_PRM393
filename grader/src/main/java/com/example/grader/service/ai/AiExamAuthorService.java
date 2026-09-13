@@ -49,9 +49,10 @@ public class AiExamAuthorService {
 
     // ── Bước 1: đề bài ───────────────────────────────────────────
 
-    public Map<String, Object> draftExam(Map<String, Object> req) {
+    public Map<String, Object> draftExam(Map<String, Object> req, String databaseName,
+                                          List<String> allowedPackages) {
         JsonNode res = llm.chatJson(List.of(
-                LlmMessage.system(AiPrompts.draftSystem()),
+                LlmMessage.system(AiPrompts.draftSystem(databaseName, effectivePackages(allowedPackages))),
                 LlmMessage.user(AiPrompts.draftUser(req == null ? Map.of() : req))));
         return examResult(res);
     }
@@ -71,21 +72,9 @@ public class AiExamAuthorService {
         String markdown = text(res.path("de_bai_markdown"), "");
         if (markdown.isBlank())
             throw new IllegalStateException("AI không trả về nội dung đề bài. Hãy thử lại.");
-        List<Map<String, Object>> criteria = new ArrayList<>();
-        double total = 0;
-        for (JsonNode c : res.path("criteria")) {
-            double points = c.path("points").asDouble(0);
-            total += points;
-            Map<String, Object> row = new LinkedHashMap<>();
-            row.put("name", text(c.path("name"), ""));
-            row.put("points", points);
-            criteria.add(row);
-        }
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("de_bai", markdown.trim());
         out.put("summary", text(res.path("summary"), ""));
-        out.put("criteria", criteria);
-        out.put("total_points", Math.round(total * 10) / 10.0);
         return out;
     }
 
@@ -298,6 +287,66 @@ public class AiExamAuthorService {
             return new SyntaxCheck(null, "Chưa kiểm tra được cú pháp (" + e.getMessage()
                     + "). Hãy mở Docker rồi kiểm tra lại nếu muốn chắc chắn.");
         }
+    }
+
+    // ── Bước 4 (MỚI): database mẫu (STUDENT_DATABASE) + database ẩn (HIDDEN_DATABASE) ─
+
+    /**
+     * Sinh dữ liệu cho hai database mà "Bảy thành phần của bộ chấm" cần (cùng cấu trúc bảng, khác
+     * dữ liệu — xem {@link AiPrompts#seedSystem}). Chỉ trả BẢN MÔ TẢ (bảng/cột/dữ liệu) để giáo
+     * viên xem lại; {@link com.example.grader.service.ExamService#saveDatabaseSeed} mới thật sự
+     * dựng file .db, và tự chặn mọi câu lệnh SQL không phải "CREATE TABLE".
+     */
+    public Map<String, Object> proposeDatabaseSeed(String deBai) {
+        if (deBai == null || deBai.isBlank())
+            throw new IllegalArgumentException("Chưa có đề bài để soạn database mẫu.");
+        JsonNode res = llm.chatJson(List.of(
+                LlmMessage.system(AiPrompts.seedSystem()),
+                LlmMessage.user(AiPrompts.seedUser(deBai))));
+        return seedResult(res);
+    }
+
+    private Map<String, Object> seedResult(JsonNode res) {
+        List<Map<String, Object>> tables = new ArrayList<>();
+        for (JsonNode t : res.path("tables")) {
+            String name = text(t.path("name"), "");
+            String createSql = text(t.path("create_sql"), "").trim();
+            if (name.isBlank() || createSql.isBlank()) continue;
+            if (!createSql.toUpperCase(java.util.Locale.ROOT).startsWith("CREATE TABLE")) continue;
+            List<String> columns = new ArrayList<>();
+            for (JsonNode c : t.path("columns")) {
+                String col = c.asText("").trim();
+                if (!col.isEmpty()) columns.add(col);
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("name", name);
+            row.put("create_sql", createSql);
+            row.put("columns", columns);
+            row.put("student_rows", rowsOf(t.path("student_rows")));
+            row.put("hidden_rows", rowsOf(t.path("hidden_rows")));
+            tables.add(row);
+        }
+        if (tables.isEmpty())
+            throw new IllegalStateException("AI không mô tả được bảng dữ liệu nào hợp lệ. Hãy thử lại.");
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("tables", tables);
+        out.put("notes", textList(res.path("notes")));
+        return out;
+    }
+
+    private List<List<Object>> rowsOf(JsonNode node) {
+        List<List<Object>> rows = new ArrayList<>();
+        for (JsonNode r : node) {
+            List<Object> row = new ArrayList<>();
+            for (JsonNode v : r) {
+                if (v.isNumber()) row.add(v.numberValue());
+                else if (v.isBoolean()) row.add(v.booleanValue());
+                else if (v.isNull()) row.add(null);
+                else row.add(v.asText());
+            }
+            rows.add(row);
+        }
+        return rows;
     }
 
     /**

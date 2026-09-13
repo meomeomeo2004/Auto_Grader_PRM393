@@ -1,6 +1,7 @@
 package com.example.grader.controller;
 
 import com.example.grader.config.AppActor;
+import com.example.grader.service.BehaviorAuthoringService;
 import com.example.grader.service.ExamService;
 import com.example.grader.service.ai.AiExamAuthorService;
 import com.example.grader.service.ai.AiSettingsService;
@@ -39,6 +40,7 @@ public class AiAuthorController {
     @Autowired private AiExamAuthorService author;
     @Autowired private ExamDocumentReader documents;
     @Autowired private ExamService examService;
+    @Autowired private BehaviorAuthoringService behaviorAuthoring;
 
     // ── Cấu hình LLM ─────────────────────────────────────────────
 
@@ -72,10 +74,11 @@ public class AiAuthorController {
 
     // ── Bước 1: đề bài ───────────────────────────────────────────
 
-    /** Body: { topic, knowledge, screens, features, entity, architecture, storage, difficulty, duration, note }. */
+    /** Body: { topic, knowledge, screens, features, entity, storage, difficulty, duration, note,
+     *          database_name?, allowed_packages? }. */
     @PostMapping("/exam/draft")
     public ResponseEntity<?> draftExam(@RequestBody Map<String, Object> body) {
-        return handle(() -> author.draftExam(body));
+        return handle(() -> author.draftExam(body, str(body, "database_name"), packages(body)));
     }
 
     /** Body: { de_bai, instruction } — giáo viên gõ yêu cầu sửa bằng lời. */
@@ -144,9 +147,11 @@ public class AiAuthorController {
         List<Map<String, Object>> files = raw instanceof List ? (List<Map<String, Object>>) raw : List.of();
         if (files.isEmpty())
             return ResponseEntity.badRequest().body(Map.of("error", "Chưa có file khung starter để tải."));
+        List<Map<String, Object>> all = new java.util.ArrayList<>(files);
+        all.addAll(scaffoldEntries());
         String examId = str(body, "exam_id");
         String name = examId == null || examId.isBlank() ? "starter" : examId.trim() + "_starter";
-        return zipDownload(files, name);
+        return zipDownload(all, name);
     }
 
     // ── Bước 3 (MỚI): app "lời giải mẫu" (Golden Solution) ───────
@@ -178,6 +183,38 @@ public class AiAuthorController {
                 str(body, "database_name"), packages(body)));
     }
 
+    /** Body: {de_bai} → {tables:[{name,create_sql,columns,student_rows,hidden_rows}], notes[]}. */
+    @PostMapping("/database/propose")
+    public ResponseEntity<?> proposeDatabaseSeed(@RequestBody Map<String, Object> body) {
+        return handle(() -> author.proposeDatabaseSeed(str(body, "de_bai")));
+    }
+
+    /**
+     * Body: {exam_id} → tự tạo (hoặc trả về Suite/Golden App đã có) cho mã đề này, để trang
+     * "Tạo Golden" gắn Golden Solution vào mà giáo viên không phải tự điền form Suite (database
+     * contract, allowed packages…) như trang "Bộ chấm Golden" cũ. Quy ước MỘT Suite mặc định mỗi
+     * mã đề — {@link BehaviorAuthoringService#listSuites} lọc theo exam_id, có rồi thì trả luôn,
+     * chưa có thì tạo Golden App rồi Suite với giá trị mặc định (giáo viên chỉnh lại sau ở trang
+     * "Bộ chấm Golden" nếu cần).
+     */
+    @PostMapping("/golden/ensure-suite")
+    public ResponseEntity<?> ensureSuite(@RequestBody Map<String, Object> body) {
+        return handle(() -> {
+            String examId = str(body, "exam_id");
+            if (examId == null || examId.isBlank()) throw new IllegalArgumentException("Thiếu mã đề.");
+            examId = examId.trim();
+            List<Map<String, Object>> existing = behaviorAuthoring.listSuites(examId);
+            if (!existing.isEmpty()) return existing.get(0);
+
+            String code = (examId + "_RAR").toUpperCase(java.util.Locale.ROOT).replaceAll("[^A-Z0-9_-]", "_");
+            Map<String, Object> golden = behaviorAuthoring.registerGoldenApp(Map.of(
+                    "name", examId + " - Golden", "exam_id", examId, "platform", "WEB"));
+            return behaviorAuthoring.createSuite(Map.of(
+                    "suite_code", code, "exam_id", examId, "golden_app_id", String.valueOf(golden.get("id")),
+                    "name", examId, "description", "Tạo tự động từ trang \"Tạo Golden\""));
+        });
+    }
+
     /**
      * Body: { files: [{path, content}], exam_id? } → ZIP app lời giải mẫu để tải về, kèm sẵn
      * pubspec.yaml/pubspec.lock đúng môi trường chấm (giống starter/download). Giáo viên tự tải
@@ -196,10 +233,24 @@ public class AiAuthorController {
             all.add(Map.of("path", project.get("name"), "content", project.get("content")));
         }
         all.addAll(files);
+        all.addAll(scaffoldEntries());
 
         String examId = str(body, "exam_id");
         String name = examId == null || examId.isBlank() ? "golden_solution" : examId.trim() + "_golden_solution";
         return zipDownload(all, name);
+    }
+
+    /** {@link ExamService#flutterScaffoldFiles()} chuyển sang khuôn {path,content,encoding} của {@link #zipDownload}. */
+    private List<Map<String, Object>> scaffoldEntries() {
+        List<Map<String, Object>> out = new java.util.ArrayList<>();
+        for (Map<String, String> file : examService.flutterScaffoldFiles()) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("path", file.get("name"));
+            row.put("content", file.get("content"));
+            row.put("encoding", file.get("encoding"));
+            out.add(row);
+        }
+        return out;
     }
 
     @SuppressWarnings("unchecked")
@@ -224,8 +275,14 @@ public class AiAuthorController {
                         return ResponseEntity.badRequest().body(Map.of("error", "Tên file không hợp lệ: " + path));
                     zos.putNextEntry(new java.util.zip.ZipEntry(clean));
                     Object content = file.get("content");
-                    zos.write((content == null ? "" : String.valueOf(content))
-                            .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    String text = content == null ? "" : String.valueOf(content);
+                    // Vỏ dự án Flutter (flutter-starter-scaffold, xem ExamService#flutterScaffoldFiles)
+                    // có file nhị phân (icon PNG, gradle-wrapper.jar) nên được gửi base64 — ép UTF-8
+                    // như văn bản thường sẽ hỏng file.
+                    byte[] bytes = "base64".equals(file.get("encoding"))
+                            ? java.util.Base64.getDecoder().decode(text)
+                            : text.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                    zos.write(bytes);
                     zos.closeEntry();
                 }
             }

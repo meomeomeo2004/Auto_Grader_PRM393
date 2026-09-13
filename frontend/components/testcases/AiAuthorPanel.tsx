@@ -61,8 +61,7 @@ export default function AiAuthorPanel({ examId, databaseName, allowedPackages }:
   const [importedName, setImportedName] = useState("");
   const [req, setReq] = useState({
     topic: "", knowledge: "", screens: "", features: "", entity: "",
-    architecture: "MVVM + Riverpod (tùy chọn)", storage: "SQLite",
-    difficulty: "Trung bình", duration: "90 phút", note: "",
+    storage: "SQLite", difficulty: "Trung bình", duration: "90 phút", note: "",
   });
 
   // Bước 2 — đề bài
@@ -288,7 +287,9 @@ export default function AiAuthorPanel({ examId, databaseName, allowedPackages }:
   // ── Bước 1 & 2 ─────────────────────────────────────────────────
   const draftExam = async () => {
     if (!req.topic.trim()) { setError("Hãy nhập chủ đề / bài toán của đề."); return; }
-    const data = await call<{ de_bai: string; summary: string }>("/ai/exam/draft", req, "draft");
+    const data = await call<{ de_bai: string; summary: string }>("/ai/exam/draft", {
+      ...req, database_name: databaseName, allowed_packages: allowedPackages,
+    }, "draft");
     if (data) {
       setDeBai(data.de_bai);
       setSummary(data.summary);
@@ -723,10 +724,6 @@ export default function AiAuthorPanel({ examId, databaseName, allowedPackages }:
               <Field label="Chức năng bắt buộc">
                 <input value={req.features} onChange={(e) => setReq({ ...req, features: e.target.value })}
                   placeholder="Thêm, sửa, xóa có xác nhận, điều hướng sang chi tiết" className={inputClass} />
-              </Field>
-              <Field label="Kiến trúc & quản lý trạng thái">
-                <input value={req.architecture} onChange={(e) => setReq({ ...req, architecture: e.target.value })}
-                  placeholder="MVVM + Riverpod (tùy chọn)" className={inputClass} />
               </Field>
               <Field label="Lưu trữ dữ liệu">
                 <input value={req.storage} onChange={(e) => setReq({ ...req, storage: e.target.value })}

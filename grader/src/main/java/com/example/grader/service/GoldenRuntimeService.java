@@ -830,6 +830,27 @@ public class GoldenRuntimeService {
                     });
                     window.parent.postMessage({type: 'GOLDEN_RECORDER_INVENTORY', payload: {items}}, '*');
                   }
+                  // Anh minh hoa cho de bai (khong lien quan oracle cham diem). Chup thang trong
+                  // TRANG NAY (cung tai lieu voi canvas Flutter) nen khong dinh CORS/tainted-canvas
+                  // nhu chup tu ngoai iframe. CanvasKit ve toan bo UI vao MOT the <canvas>; HTML
+                  // renderer (hiem gap voi ban build release mac dinh) khong co canvas nay, luc do
+                  // bao loi de giao vien biet ma chup bang cach khac (vd chup man hinh tay).
+                  function screenshot() {
+                    const canvas = document.querySelector('flt-glass-pane canvas') || document.querySelector('canvas');
+                    if (!canvas) {
+                      window.parent.postMessage({type: 'GOLDEN_RECORDER_SCREENSHOT',
+                        payload: {error: 'Khong tim thay canvas de chup (renderer khong ho tro).'}}, '*');
+                      return;
+                    }
+                    try {
+                      const dataUrl = canvas.toDataURL('image/png');
+                      const comma = dataUrl.indexOf(',');
+                      window.parent.postMessage({type: 'GOLDEN_RECORDER_SCREENSHOT',
+                        payload: {png_base64: dataUrl.slice(comma + 1)}}, '*');
+                    } catch (e) {
+                      window.parent.postMessage({type: 'GOLDEN_RECORDER_SCREENSHOT', payload: {error: String(e)}}, '*');
+                    }
+                  }
                   window.addEventListener('message', event => {
                     if (!event.data || event.data.type !== COMMAND) return;
                     if (event.data.action === 'perform_route_action') {
@@ -855,6 +876,9 @@ public class GoldenRuntimeService {
                     if (event.data.action === 'snapshot_ui') {
                       chotEnterText();
                       inventory();
+                    }
+                    if (event.data.action === 'capture_screenshot') {
+                      screenshot();
                     }
                     if (event.data.action === 'flush_input') {
                       const requestId = event.data.request_id || '';
