@@ -1,0 +1,10 @@
+# Cau hinh phan tich tinh co ban.
+analyzer:
+  errors:
+    invalid_annotation_target: ignore
+
+linter:
+  rules:
+    - avoid_empty_else
+    - empty_catches
+    - unrelated_type_equality_checks

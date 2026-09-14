@@ -45,11 +45,11 @@ class VaiDuongDanNguoiChamTest {
         assertTrue(co.contains("/api/exam-setup/{examId}"), "phải có đường xóa bộ testcase");
 
         assertFalse(coNhom(co, "/api/behavior-authoring"), "không được có màn soạn bộ chấm");
-        // Chặn sẵn cho lần gộp nhánh AI ra đề (đang nằm ở origin/main). Toàn bộ chức năng đó
-        // thuộc về giảng viên, nhưng nó được viết TRƯỚC khi tách vai nên AiAuthorController
-        // không mang @Profile nào — gộp xong là bản này có luôn /api/ai/settings (nơi giữ khoá
-        // API) và cả đường gọi mô hình sinh đề. Git gộp trót lọt, không cảnh báo gì; chỉ có dòng
-        // dưới đây mới nói ra. Hôm nay nó xanh vì controller chưa tồn tại — đúng như mong muốn.
+        // Nhánh AI ra đề đã gộp vào (14/9/2026). Toàn bộ chức năng đó thuộc về giảng viên, nhưng
+        // nó được viết TRƯỚC khi tách vai nên AiAuthorController không mang @Profile nào — để
+        // nguyên là bản này có luôn /api/ai/settings (nơi giữ khoá API) và cả đường gọi mô hình
+        // sinh đề. Git gộp trót lọt, không một dòng cảnh báo; chỉ dòng dưới đây mới nói ra, và nó
+        // được đặt sẵn TỪ TRƯỚC lần gộp đúng vì lý do đó.
         assertFalse(coNhom(co, "/api/ai"),
                 "soạn đề bằng AI là việc của giảng viên: gộp nhánh AI thì nhớ gắn "
                         + "@Profile(Vai.GIANG_VIEN) cho AiAuthorController");

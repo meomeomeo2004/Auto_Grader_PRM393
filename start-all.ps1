@@ -184,11 +184,26 @@ if (-not $SkipMysql) {
       }
       catch { Write-Host "  [LOI] docker compose that bai: $($_.Exception.Message)" -ForegroundColor Yellow }
       Pop-Location
-      # Anh nen 'grading-base' (Flutter SDK) la BAT BUOC de CHAM BAI. Build 1 lan bang setup-prereqs.ps1.
+      # Anh nen (Flutter SDK) la BAT BUOC de CHAM BAI. Build 1 lan bang setup-prereqs.ps1.
+      #
+      # NHAN DOC TU application.yml, KHONG ghi cung. Truoc 14/9/2026 cho nay hoi thang
+      # 'grading-base:latest' trong khi backend cham bang nhan o grader.base-image - hai thu khac
+      # nhau. Hau qua: may chi co moi latest thi script bao "[OK] anh nen da co" roi den luc cham
+      # moi hong, con may co dung nhan can dung nhung khong co latest thi bi keu thieu anh oan.
+      # Doc thang tu cau hinh thi phep kiem noi dung cai backend that su se dung.
+      $anhNen = $env:GRADER_BASE_IMAGE
+      if (-not $anhNen) {
+        $ymlAnh = Join-Path $beDir 'src\main\resources\application.yml'
+        if (Test-Path $ymlAnh) {
+          $khop = [regex]::Match((Get-Content $ymlAnh -Raw), 'base-image:\s*\$\{GRADER_BASE_IMAGE:([^}]+)\}')
+          if ($khop.Success) { $anhNen = $khop.Groups[1].Value.Trim() }
+        }
+      }
+      if (-not $anhNen) { $anhNen = 'grading-base:latest' }   # cuu canh neu khong doc duoc cau hinh
       $hasBase = $false
-      try { & docker image inspect grading-base:latest *> $null; if ($LASTEXITCODE -eq 0) { $hasBase = $true } } catch {}
-      if ($hasBase) { Write-Host "  [OK] anh nen grading-base da co" -ForegroundColor Green }
-      else { Write-Host "  [CANH BAO] Chua co anh nen grading-base -> CHUA cham bai duoc. Chay: grader-base\build-base.ps1" -ForegroundColor Yellow }
+      try { & docker image inspect $anhNen *> $null; if ($LASTEXITCODE -eq 0) { $hasBase = $true } } catch {}
+      if ($hasBase) { Write-Host "  [OK] anh nen $anhNen da co" -ForegroundColor Green }
+      else { Write-Host "  [CANH BAO] Chua co anh nen $anhNen -> CHUA cham bai duoc. Chay: grader-base\build-base.ps1" -ForegroundColor Yellow }
     } else {
       Write-Host "  [CANH BAO] Docker chua san sang. Mo Docker Desktop roi chay lai (cham bai can Docker)." -ForegroundColor Yellow
     }
@@ -300,7 +315,11 @@ if ('$backendJdkHome') {
 # mot MySQL ma khong nhin thay du lieu cua nhau.
 `$env:GRADER_ROLE = '$Vai'
 `$env:SPRING_DATASOURCE_URL = 'jdbc:mysql://localhost:3306/$Schema' + '?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&createDatabaseIfNotExist=true'
-Write-Host "Vai: $Vai | Schema: $Schema" -ForegroundColor DarkGray
+# NHAY DON, khong phai nhay kep. Khoi lenh nay duoc truyen cho powershell qua -Command, ma
+# Start-Process ghep danh sach tham so thanh mot dong lenh Windows va NUOT dau nhay kep. Dong
+# nay co dau | ben trong chuoi: mat nhay kep thi | thanh toan tu ong that, PowerShell di tim
+# mot lenh ten "Schema:" va in ra mot dong do loet moi lan khoi dong. Nhay don di qua duoc.
+Write-Host 'Vai: $Vai | Schema: $Schema' -ForegroundColor DarkGray
 Write-Host 'Doi MySQL/JDBC san sang...' -ForegroundColor DarkGray
 for (`$i = 0; `$i -lt 60; `$i++) {
   try {

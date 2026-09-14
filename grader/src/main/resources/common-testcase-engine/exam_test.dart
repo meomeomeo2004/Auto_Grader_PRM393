@@ -13,9 +13,12 @@ import '../lib/main.dart' as student_app;
 /// Progress marker consumed only by grader.dart when a process is force-stopped.
 /// It lets the backend tell whether the last risky operation belonged to the
 /// student app or to the testcase engine, without exposing implementation keys.
-/// 3.6.0: thêm bảy runner Ch.7 — SCROLL_DIRECTION, SCROLL_TO_END, STACK_LAYERS,
-/// INDEXED_STACK_SWITCH, BOTTOM_SHEET_FLOW, TABLE_ROWS, SLIVER_SCROLL_COLLAPSE.
-/// Mở rộng _assertTargetType với 8 loại widget mới. Điểm đề cũ KHÔNG ĐỔI.
+/// 3.6.0: thêm tám runner Ch.7 — SCROLL_DIRECTION, SCROLL_TO_END, STACK_LAYERS,
+/// INDEXED_STACK_SWITCH, BOTTOM_SHEET_FLOW, TABLE_ROWS, SLIVER_SCROLL_COLLAPSE,
+/// EXPANDED_WIDGET. Mở rộng _assertTargetType với 8 loại widget mới.
+/// Cả tám runner định vị bằng Semantics(identifier:) qua `_byIdentifier`, không
+/// dùng ValueKey — đồng bộ với cách `behavior-replay-engine/exam_test.dart` (engine
+/// đang dùng thật) đã chuyển sang từ commit bb0ab32. Điểm đề cũ KHÔNG ĐỔI.
 const String kEngineVersion = 'COMMON_V1-3.6.0';
 const String kStageMarker = '###GRADER_STAGE###';
 
@@ -903,7 +906,7 @@ Future<void> _checkStateReactiveFlow(
 ///
 /// Chứng minh sinh viên dùng `scrollDirection: Axis.horizontal` đúng.
 /// Parameter:
-///   listKey  — ValueKey của ListView/GridView
+///   listKey  — Semantics(identifier:) của ListView/GridView
 ///   direction — 'horizontal' hoặc 'vertical' (mặc định 'vertical')
 Future<void> _checkScrollDirection(
   WidgetTester tester,
@@ -912,8 +915,8 @@ Future<void> _checkScrollDirection(
   await _boot(tester);
   final listKey = _requiredText(parameters, 'listKey');
   final wantedDir = _text(parameters, 'direction', 'vertical').toLowerCase();
-  final listFinder = _byKey(listKey);
-  _expectPresent(listFinder, 'list', 'Không tìm thấy list key: $listKey');
+  final listFinder = _byIdentifier(listKey);
+  _expectPresent(listFinder, 'list', 'Không tìm thấy định danh list: $listKey');
 
   // Tìm Scrollable là con trực tiếp hoặc chính widget đó
   final scrollables = find.descendant(
@@ -951,8 +954,8 @@ Future<void> _checkScrollDirection(
 /// Chứng minh `ListView.builder` chỉ render item khi cần (không overflow),
 /// và `itemCount` đã được truyền đúng.
 /// Parameters:
-///   listKey       — ValueKey của ListView/GridView
-///   targetItemKey — ValueKey của item ở cuối (ví dụ: 'list.item.9')
+///   listKey       — Semantics(identifier:) của ListView/GridView
+///   targetItemKey — Semantics(identifier:) của item ở cuối (ví dụ: 'list.item.9')
 ///   direction     — 'vertical'/'horizontal', mặc định 'vertical'
 Future<void> _checkScrollToEnd(
   WidgetTester tester,
@@ -963,9 +966,9 @@ Future<void> _checkScrollToEnd(
   final targetKey = _requiredText(parameters, 'targetItemKey');
   final direction = _text(parameters, 'direction', 'vertical').toLowerCase();
   _expectPresent(
-    _byKey(listKey),
+    _byIdentifier(listKey),
     'list',
-    'Không tìm thấy list key: $listKey',
+    'Không tìm thấy định danh list: $listKey',
   );
   // Cuộn đến khi item xuất hiện. Dùng chiều cuộn đúng.
   final offset =
@@ -973,7 +976,7 @@ Future<void> _checkScrollToEnd(
           ? const Offset(-300, 0)
           : const Offset(0, -300);
   for (var attempt = 0; attempt < 30; attempt++) {
-    if (_byKey(targetKey).evaluate().isNotEmpty) break;
+    if (_byIdentifier(targetKey).evaluate().isNotEmpty) break;
     final scrollables = find.byType(Scrollable, skipOffstage: false);
     if (scrollables.evaluate().isEmpty) break;
     // Cuộn scrollable cuối cùng (tránh trùng scrollable của AppBar)
@@ -983,7 +986,7 @@ Future<void> _checkScrollToEnd(
     _failIfActionThrew(tester);
   }
   _expectPresent(
-    _byKey(targetKey),
+    _byIdentifier(targetKey),
     'item',
     'Cuộn hết nhưng không tìm thấy item: $targetKey',
     where: 'after_scroll',
@@ -996,9 +999,9 @@ Future<void> _checkScrollToEnd(
 ///
 /// Widget khai sau trong Stack nằm TRÊN widget khai trước (rect đè lên nhau).
 /// Parameters:
-///   stackKey      — ValueKey của Stack widget
-///   bottomLayerKey — ValueKey của layer dưới
-///   topLayerKey    — ValueKey của layer trên (đè lên bottom)
+///   stackKey      — Semantics(identifier:) của Stack widget
+///   bottomLayerKey — Semantics(identifier:) của layer dưới
+///   topLayerKey    — Semantics(identifier:) của layer trên (đè lên bottom)
 Future<void> _checkStackLayers(
   WidgetTester tester,
   Map<String, dynamic> parameters,
@@ -1008,23 +1011,25 @@ Future<void> _checkStackLayers(
   final bottomKey = _requiredText(parameters, 'bottomLayerKey');
   final topKey = _requiredText(parameters, 'topLayerKey');
 
-  final stackFinder = _byKey(stackKey);
-  _expectPresent(stackFinder, 'stack', 'Không tìm thấy Stack key: $stackKey');
-  // Xác nhận đây là Stack widget
-  final stackWidget = tester.widget<Widget>(stackFinder);
-  if (stackWidget is! Stack && stackWidget is! IndexedStack) {
+  final stackFinder = _byIdentifier(stackKey);
+  _expectPresent(stackFinder, 'stack', 'Không tìm thấy định danh Stack: $stackKey');
+  // Xác nhận đây là Stack widget — tìm theo định danh trả về lớp Semantics bọc ngoài
+  // chứ không phải Stack/IndexedStack bên trong, nên phải đi xuống một nấc mới thấy.
+  final khungStack = _duoiLopBoc(stackFinder, Stack);
+  final khungIndexed = _duoiLopBoc(stackFinder, IndexedStack);
+  if (khungStack.evaluate().isEmpty && khungIndexed.evaluate().isEmpty) {
     _observe('TYPE_MISMATCH', subject: 'stack');
     fail('$stackKey không phải Stack hoặc IndexedStack.');
   }
 
-  final bottomFinder = _byKey(bottomKey);
-  final topFinder = _byKey(topKey);
+  final bottomFinder = _byIdentifier(bottomKey);
+  final topFinder = _byIdentifier(topKey);
   _expectPresent(
     bottomFinder,
     'layer',
-    'Không tìm thấy layer dưới: $bottomKey',
+    'Không tìm thấy định danh layer dưới: $bottomKey',
   );
-  _expectPresent(topFinder, 'layer', 'Không tìm thấy layer trên: $topKey');
+  _expectPresent(topFinder, 'layer', 'Không tìm thấy định danh layer trên: $topKey');
 
   // Kiểm hai layer có overlap (rect giao nhau): đây là dấu hiệu Stack đang xếp chồng
   final bottomRect = tester.getRect(bottomFinder);
@@ -1050,9 +1055,9 @@ Future<void> _checkStackLayers(
 /// trang cũ trở nên không active (mất semantics). IndexedStack giữ tất cả con
 /// trong tree nhưng chỉ vẽ con có index hiện tại.
 /// Parameters:
-///   stackKey — ValueKey của IndexedStack
-///   tabKeys  — CSV các key nút chuyển tab (ít nhất 2)
-///   pageKeys — CSV các key widget nhận dạng mỗi trang (cùng thứ tự tabKeys)
+///   stackKey — Semantics(identifier:) của IndexedStack
+///   tabKeys  — CSV các định danh nút chuyển tab (ít nhất 2)
+///   pageKeys — CSV các định danh widget nhận dạng mỗi trang (cùng thứ tự tabKeys)
 Future<void> _checkIndexedStackSwitch(
   WidgetTester tester,
   Map<String, dynamic> parameters,
@@ -1065,17 +1070,18 @@ Future<void> _checkIndexedStackSwitch(
     fail('tabKeys và pageKeys phải có ít nhất 2 phần tử và bằng nhau.');
   }
 
-  // Trang đầu tiên phải đang hiện — dùng skipOffstage: false vì IndexedStack
-  // giữ tất cả con trong tree, chỉ ẩn bằng Offstage chứ không xóa khỏi cây.
+  // Trang đầu tiên phải đang HIỆN. Trang KHÔNG được chọn của IndexedStack vẫn còn
+  // trong cây nhưng không sinh nút ngữ nghĩa (không có Offstage để loại trừ riêng
+  // như bản ValueKey cũ), nên tìm được bằng định danh nghĩa là đang hiển thị thật.
   _expectPresent(
-    find.byKey(ValueKey<String>(pageKeys[0]), skipOffstage: false),
+    _byIdentifier(pageKeys[0]),
     'screen',
     'Trang đầu tiên (${pageKeys[0]}) phải hiển thị ngay khi boot.',
   );
 
   // Lần lượt bấm từng tab và kiểm trang tương ứng bật lên
   for (var i = 1; i < tabKeys.length; i++) {
-    final tabFinder = _byKey(tabKeys[i]);
+    final tabFinder = _byIdentifier(tabKeys[i]);
     await _tap(
       tester,
       tabFinder,
@@ -1087,14 +1093,15 @@ Future<void> _checkIndexedStackSwitch(
 
     // Trang mới phải hiện
     _expectPresent(
-      _byKey(pageKeys[i]),
+      _byIdentifier(pageKeys[i]),
       'screen',
       'Sau khi bấm ${tabKeys[i]}, trang ${pageKeys[i]} phải hiển thị.',
       where: 'after_action',
     );
-    // Trang trước phải ẩn (Offstage — không đo được, không tương tác được)
-    // Dùng findsNothing với finder không skipOffstage để bắt Offstage widget
-    final prevFinder = find.byKey(ValueKey<String>(pageKeys[i - 1]));
+    // Trang trước phải KHÔNG còn tìm được bằng định danh: trang không được chọn
+    // của IndexedStack không sinh nút ngữ nghĩa, nên "tìm thấy" ở đây tức là vẫn
+    // đang hiển thị thật, không phải chỉ còn nằm offstage trong cây.
+    final prevFinder = _byIdentifier(pageKeys[i - 1]);
     if (prevFinder.evaluate().isNotEmpty) {
       _observe(
         'STILL_PRESENT',
@@ -1112,14 +1119,14 @@ Future<void> _checkIndexedStackSwitch(
   // Bấm lại tab đầu — trang đầu quay lại
   await _tap(
     tester,
-    _byKey(tabKeys[0]),
+    _byIdentifier(tabKeys[0]),
     'Không tìm thấy nút tab đầu: ${tabKeys[0]}',
     where: 'tab_switch_back',
   );
   await _settle(tester);
   _failIfActionThrew(tester);
   _expectPresent(
-    _byKey(pageKeys[0]),
+    _byIdentifier(pageKeys[0]),
     'screen',
     'Bấm lại tab đầu, trang ${pageKeys[0]} phải hiển thị lại.',
     where: 'after_action',
@@ -1131,10 +1138,10 @@ Future<void> _checkIndexedStackSwitch(
 /// Chứng minh `showModalBottomSheet` hoạt động: sheet xuất hiện sau khi bấm
 /// nút, và đóng được khi bấm nút đóng hoặc bấm ra ngoài.
 /// Parameters:
-///   triggerKey — ValueKey nút bật sheet
-///   sheetKey   — ValueKey container bên trong sheet
-///   closeKey   — (tuỳ chọn) ValueKey nút đóng sheet trong sheet; nếu bỏ trống,
-///                engine sẽ drag sheet xuống để đóng
+///   triggerKey — Semantics(identifier:) nút bật sheet
+///   sheetKey   — Semantics(identifier:) container bên trong sheet
+///   closeKey   — (tuỳ chọn) Semantics(identifier:) nút đóng sheet trong sheet; nếu
+///                bỏ trống, engine sẽ drag sheet xuống để đóng
 Future<void> _checkBottomSheetFlow(
   WidgetTester tester,
   Map<String, dynamic> parameters,
@@ -1146,7 +1153,7 @@ Future<void> _checkBottomSheetFlow(
 
   // Sheet chưa được hiện khi mới boot
   expect(
-    find.byKey(ValueKey<String>(sheetKey)),
+    _byIdentifier(sheetKey),
     findsNothing,
     reason: 'Sheet $sheetKey không nên hiển thị trước khi bấm trigger.',
   );
@@ -1154,13 +1161,13 @@ Future<void> _checkBottomSheetFlow(
   // Bấm trigger → sheet xuất hiện
   await _tap(
     tester,
-    _byKey(triggerKey),
+    _byIdentifier(triggerKey),
     'Không tìm thấy nút bật sheet: $triggerKey',
   );
   await _settle(tester);
   _failIfActionThrew(tester);
   _expectPresent(
-    _byKey(sheetKey),
+    _byIdentifier(sheetKey),
     'sheet',
     'Bấm trigger nhưng sheet $sheetKey không xuất hiện.',
     where: 'after_open',
@@ -1171,19 +1178,19 @@ Future<void> _checkBottomSheetFlow(
     // Đóng bằng nút trong sheet
     await _tap(
       tester,
-      _byKey(closeKey),
+      _byIdentifier(closeKey),
       'Không tìm thấy nút đóng sheet: $closeKey',
       where: 'after_open',
     );
   } else {
     // Drag sheet xuống để đóng
-    final sheetFinder = _byKey(sheetKey);
+    final sheetFinder = _byIdentifier(sheetKey);
     await tester.drag(sheetFinder, const Offset(0, 400));
   }
   await _settle(tester);
   _failIfActionThrew(tester);
   _expectGone(
-    _goneByKey(sheetKey),
+    _goneByIdentifier(sheetKey),
     'sheet',
     'Sheet $sheetKey vẫn còn hiển thị sau khi đóng.',
     where: 'after_close',
@@ -1192,14 +1199,14 @@ Future<void> _checkBottomSheetFlow(
   // Bật lại lần 2 để kiểm không bị trạng thái treo
   await _tap(
     tester,
-    _byKey(triggerKey),
+    _byIdentifier(triggerKey),
     'Không mở được sheet lần 2: $triggerKey',
     where: 'second_open',
   );
   await _settle(tester);
   _failIfActionThrew(tester);
   _expectPresent(
-    _byKey(sheetKey),
+    _byIdentifier(sheetKey),
     'sheet',
     'Sheet $sheetKey không mở được lần 2.',
     where: 'second_open',
@@ -1211,28 +1218,30 @@ Future<void> _checkBottomSheetFlow(
 /// Chứng minh sinh viên dùng `Table`/`TableRow`/`TableCell` chứ không nhầm
 /// sang ListView. Đếm số TableRow con trực tiếp của Table.
 /// Parameters:
-///   tableKey         — ValueKey của Table widget
+///   tableKey         — Semantics(identifier:) của Table widget
 ///   expectedRowCount — số hàng kỳ vọng (bao gồm cả header nếu có)
-///   headerKeys       — (tuỳ chọn) CSV key các cell header
-///   sampleCellKeys   — (tuỳ chọn) CSV key các cell dữ liệu mẫu
+///   headerKeys       — (tuỳ chọn) CSV định danh các cell header
+///   sampleCellKeys   — (tuỳ chọn) CSV định danh các cell dữ liệu mẫu
 Future<void> _checkTableRows(
   WidgetTester tester,
   Map<String, dynamic> parameters,
 ) async {
   await _boot(tester);
   final tableKey = _requiredText(parameters, 'tableKey');
-  final tableFinder = _byKey(tableKey);
-  _expectPresent(tableFinder, 'table', 'Không tìm thấy Table key: $tableKey');
+  final tableFinder = _byIdentifier(tableKey);
+  _expectPresent(tableFinder, 'table', 'Không tìm thấy định danh Table: $tableKey');
 
-  // Xác nhận là Table widget
-  final tableWidget = tester.widget<Widget>(tableFinder);
-  if (tableWidget is! Table) {
+  // Xác nhận là Table widget — tìm theo định danh trả về lớp Semantics bọc ngoài
+  // chứ không phải Table bên trong, nên phải đi xuống một nấc mới thấy đúng widget.
+  final khungBang = _duoiLopBoc(tableFinder, Table);
+  if (khungBang.evaluate().isEmpty) {
     _observe('TYPE_MISMATCH', subject: 'table');
     fail('$tableKey không phải Table widget — dùng Table() thay vì ListView.');
   }
+  final tableWidget = tester.widget<Table>(khungBang.first);
 
   // Đếm số hàng (TableRow) của bảng này
-  final actualRows = (tableWidget as Table).children.length;
+  final actualRows = tableWidget.children.length;
   final wantedRows = _number(parameters, 'expectedRowCount', double.nan).toInt();
   if (!wantedRows.isNaN && actualRows != wantedRows) {
     _observe(
@@ -1251,17 +1260,17 @@ Future<void> _checkTableRows(
   // Kiểm header keys nếu có
   for (final key in _csv(parameters, 'headerKeys')) {
     _expectPresent(
-      _byKey(key),
+      _byIdentifier(key),
       'text',
-      'Thiếu header cell key: $key',
+      'Thiếu định danh header cell: $key',
     );
   }
   // Kiểm sample data cell keys nếu có
   for (final key in _csv(parameters, 'sampleCellKeys')) {
     _expectPresent(
-      _byKey(key),
+      _byIdentifier(key),
       'item',
-      'Thiếu data cell key: $key',
+      'Thiếu định danh data cell: $key',
     );
   }
 
@@ -1311,9 +1320,9 @@ Future<void> _checkTableRows(
 /// 2. Cuộn lên không gây lỗi "RenderViewport expected a child of type RenderSliver"
 /// 3. SliverAppBar thu lại (collapsed) sau khi cuộn (nếu collapseOnScroll = true)
 /// Parameters:
-///   scrollViewKey  — ValueKey của CustomScrollView
-///   appBarKey      — ValueKey của SliverAppBar (hoặc widget tiêu đề)
-///   listKey        — ValueKey của SliverList/SliverGrid bên trong
+///   scrollViewKey  — Semantics(identifier:) của CustomScrollView
+///   appBarKey      — Semantics(identifier:) của SliverAppBar (hoặc widget tiêu đề)
+///   listKey        — Semantics(identifier:) của SliverList/SliverGrid bên trong
 ///   collapseOnScroll — true nếu kiểm thu nhỏ (mặc định false — chỉ kiểm boot + scroll an toàn)
 /// Đo "chiều cao thật" hiện tại của SliverAppBar (hay widget tiêu đề bên trong
 /// flexibleSpace) tại thời điểm gọi — dùng cho SLIVER_SCROLL_COLLAPSE.
@@ -1322,13 +1331,30 @@ Future<void> _checkTableRows(
 /// biết sliver đã co lại hay chưa: `RenderSliverPersistentHeader` luôn layout con
 /// của nó ở đúng `maxExtent`, bất kể đang collapse hay không — phần "thu nhỏ" chỉ
 /// là dịch vị trí paint (bị clip bớt), không phải resize. Đại lượng phản ánh đúng
-/// độ co giãn là `geometry.paintExtent` của CHÍNH `RenderSliverPersistentHeader`,
-/// nên hàm này đi ngược cây render từ widget được tìm thấy lên tới ancestor gần
-/// nhất thuộc loại đó. Trả về null nếu không có ancestor như vậy (fallback về
-/// getRect ở nơi gọi) — ví dụ bài không dùng SliverAppBar mà tự dựng sliver khác.
+/// độ co giãn là `geometry.paintExtent` của CHÍNH `RenderSliverPersistentHeader`.
+///
+/// Tìm XUỐNG cây con trước rồi mới leo lên: đích khai bằng định danh trỏ vào lớp
+/// SliverSemantics bọc NGOÀI SliverAppBar, leo lên là đi xa khỏi header và không
+/// bao giờ gặp — khác bản ValueKey cũ (đích trỏ thẳng vào bên trong, phải leo lên
+/// mới ra RenderSliverPersistentHeader). Trả về null nếu không tìm thấy theo cả
+/// hai hướng (fallback về getRect ở nơi gọi) — ví dụ bài không dùng SliverAppBar mà
+/// tự dựng sliver khác.
 double? _sliverCollapsedExtent(WidgetTester tester, Finder finder) {
   if (finder.evaluate().isEmpty) return null;
-  RenderObject? node = tester.renderObject(finder);
+  final RenderObject goc = tester.renderObject(finder);
+  RenderSliverPersistentHeader? tim;
+  void diXuong(RenderObject r) {
+    if (tim != null) return;
+    if (r is RenderSliverPersistentHeader) {
+      tim = r;
+      return;
+    }
+    r.visitChildren(diXuong);
+  }
+
+  diXuong(goc);
+  if (tim != null) return tim!.geometry?.paintExtent;
+  RenderObject? node = goc;
   while (node != null) {
     if (node is RenderSliverPersistentHeader) return node.geometry?.paintExtent;
     node = node.parent;
@@ -1348,14 +1374,14 @@ Future<void> _checkSliverScrollCollapse(
 
   // Xác nhận CustomScrollView và tiêu đề tồn tại
   _expectPresent(
-    _byKey(scrollViewKey),
+    _byIdentifier(scrollViewKey),
     'list',
-    'Không tìm thấy CustomScrollView key: $scrollViewKey',
+    'Không tìm thấy định danh CustomScrollView: $scrollViewKey',
   );
   _expectPresent(
-    _byKey(appBarKey),
+    _byIdentifier(appBarKey),
     'widget',
-    'Không tìm thấy SliverAppBar key: $appBarKey',
+    'Không tìm thấy định danh SliverAppBar: $appBarKey',
   );
 
   // Đo chiều cao AppBar trước khi cuộn. Dùng _sliverCollapsedExtent thay vì
@@ -1364,8 +1390,8 @@ Future<void> _checkSliverScrollCollapse(
   // vị trí paint, không đổi kích thước layout. getRect trên widget bên trong
   // flexibleSpace do đó luôn trả về cùng một chiều cao dù bài làm đúng, khiến phép
   // so sánh dưới đây luôn fail oan. paintExtent của chính sliver mới phản ánh đúng.
-  final heightBefore = _sliverCollapsedExtent(tester, _byKey(appBarKey)) ??
-      tester.getRect(_byKey(appBarKey)).height;
+  final heightBefore = _sliverCollapsedExtent(tester, _byIdentifier(appBarKey)) ??
+      tester.getRect(_byIdentifier(appBarKey)).height;
 
   // Cuộn lên nhiều lần để kích hoạt collapse
   final scrollables = find.byType(Scrollable, skipOffstage: false);
@@ -1379,9 +1405,9 @@ Future<void> _checkSliverScrollCollapse(
 
   // Kiểm thu nhỏ nếu yêu cầu
   final collapseExpected = _bool(parameters, 'collapseOnScroll', false);
-  if (collapseExpected && _byKey(appBarKey).evaluate().isNotEmpty) {
-    final heightAfter = _sliverCollapsedExtent(tester, _byKey(appBarKey)) ??
-        tester.getRect(_byKey(appBarKey)).height;
+  if (collapseExpected && _byIdentifier(appBarKey).evaluate().isNotEmpty) {
+    final heightAfter = _sliverCollapsedExtent(tester, _byIdentifier(appBarKey)) ??
+        tester.getRect(_byIdentifier(appBarKey)).height;
     if (heightAfter >= heightBefore) {
       _observe(
         'NUMBER_MISMATCH',
@@ -1401,9 +1427,9 @@ Future<void> _checkSliverScrollCollapse(
   final listKey = _text(parameters, 'listKey');
   if (listKey.isNotEmpty) {
     _expectPresent(
-      _byKey(listKey),
+      _byIdentifier(listKey),
       'list',
-      'Không tìm thấy SliverList/SliverGrid key: $listKey',
+      'Không tìm thấy định danh SliverList/SliverGrid: $listKey',
     );
   }
 }
@@ -1411,7 +1437,7 @@ Future<void> _checkSliverScrollCollapse(
 /// [EXPANDED_WIDGET] Kiểm tra một widget có được bọc trong Expanded và nằm trong Row/Column/Flex không.
 ///
 /// Parameters:
-///   childKey  — Key của widget con (ví dụ: 'list.container')
+///   childKey  — Semantics(identifier:) của widget con (ví dụ: 'list.container')
 ///   flex      — (tuỳ chọn) giá trị flex mong đợi (mặc định 1)
 Future<void> _checkExpandedWidget(
   WidgetTester tester,
@@ -1419,8 +1445,8 @@ Future<void> _checkExpandedWidget(
 ) async {
   await _boot(tester);
   final childKey = _requiredText(parameters, 'childKey');
-  final childFinder = _byKey(childKey);
-  _expectPresent(childFinder, 'widget', 'Không tìm thấy widget con: $childKey');
+  final childFinder = _byIdentifier(childKey);
+  _expectPresent(childFinder, 'widget', 'Không tìm thấy định danh widget con: $childKey');
 
   // Tìm Expanded là tổ tiên của child
   final expandedFinder = find.ancestor(
@@ -2479,6 +2505,36 @@ FontWeight _fontWeight(String value) {
 /// Sinh viên không dùng key thì finder rỗng và phép kiểm đạt — cố ý nghiêng về phía sinh viên,
 /// vì phần khẳng định CHÍNH của mỗi runner vẫn phải đạt riêng.
 Finder _goneByKey(String key) => find.byKey(ValueKey<String>(key));
+
+// ═══════════════════════════════════════════════════════════════
+// Ch.7 — định vị bằng Semantics(identifier:), KHÔNG dùng ValueKey.
+//
+// Tám runner widget bố cục/hiển thị ở dưới (SCROLL_DIRECTION…EXPANDED_WIDGET) từng khai đích
+// bằng ValueKey như phần còn lại của file này, nhưng đề chỉ nên có MỘT hệ định danh: phần tương
+// tác (CRUD, form, dialog…) của bộ engine này đã dùng Semantics(identifier:) qua các heuristic
+// vai trò ở `_byKey`, nên nhóm tiêu chí bố cục dùng ValueKey riêng là hai hệ song song, học một
+// cách cho từng nhóm và nhầm lẫn cả hai. Đổi hẳn sang định danh cho khớp, theo đúng cách
+// `behavior-replay-engine/exam_test.dart` (engine Golden Solution Record–Abstract–Replay đang
+// dùng thật) đã làm trước — xem lịch sử file đó để biết số liệu đo thật (8/8 đạt, 8/8 trượt đúng
+// chỗ khi gài lỗi).
+// ═══════════════════════════════════════════════════════════════
+
+/// Tìm widget theo Semantics(identifier: …). `skipOffstage: false` để bắt được item lazy-list
+/// vừa dựng xong nhưng chưa vào khung nhìn (cần cho SCROLL_TO_END).
+Finder _byIdentifier(String id) => find.bySemanticsIdentifier(id, skipOffstage: false);
+
+/// Như [_goneByKey] nhưng cho định danh: KHÔNG override skipOffstage nên mặc định bỏ qua widget
+/// offstage — dùng cho phép kiểm "đã biến mất thật" (ví dụ sheet đã đóng), lý do y hệt [_goneByKey].
+Finder _goneByIdentifier(String id) => find.bySemanticsIdentifier(id);
+
+/// Widget THẬT dưới lớp bọc Semantics — tìm theo định danh trả về node Semantics (hoặc
+/// SliverSemantics) bọc ngoài chứ không phải Stack/Table bên trong, nên phép kiểm "đúng kiểu"
+/// phải đi xuống một nấc mới gặp đúng widget cần kiểm.
+Finder _duoiLopBoc(Finder wrapper, Type type) => find.descendant(
+  of: wrapper,
+  matching: find.byType(type, skipOffstage: false),
+  matchRoot: true,
+);
 
 Finder _roleActionFinder(String key) {
   switch (key) {

@@ -19,6 +19,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.Statement;
 import java.text.Normalizer;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -530,6 +534,36 @@ public class ExamService {
         return saved;
     }
 
+    /**
+     * Phiên làm việc của trợ lý AI cho một bộ; {@code null} nếu bộ đó chưa từng dùng AI.
+     *
+     * <p>Bộ mới chỉ nằm trên đĩa (chưa có hàng trong DB) thì cũng trả null chứ KHÔNG dựng bản ghi:
+     * chỉ mở màn sửa mà đã ghi vào DB là đăng ký nhầm cả những bộ người dùng chỉ ghé xem.
+     */
+    public String readAiAuthorDraft(String examId) {
+        safeId(examId, "đề");
+        return examRepository.findByExamId(examId).map(Exam::getAiAuthorJson).orElse(null);
+    }
+
+    /**
+     * Ghi phiên làm việc của trợ lý AI cho một bộ. Chuỗi rỗng/null = xoá nháp (bấm "Bắt đầu lại").
+     *
+     * <p>KHÔNG đụng tới testcase đang chấm hay cấu hình Golden Suite — đây chỉ là bản nháp soạn thảo.
+     */
+    public synchronized void saveAiAuthorDraft(String examId, String json) {
+        safeId(examId, "đề");
+        Exam exam = examRepository.findByExamId(examId).orElse(null);
+        if (exam == null) {
+            // Chưa có bộ trên đĩa lẫn DB (đang soạn cho một mã hoàn toàn mới): giữ nháp ở trình
+            // duyệt là đủ, tạo hàng exam rỗng ở đây sẽ đẻ ra bộ testcase ma trong Kho.
+            if (!Files.exists(examsRoot().resolve(examId).resolve("testcase").resolve("skills_matrix.json")))
+                return;
+            exam = ensureExamRecord(examId);
+        }
+        exam.setAiAuthorJson(json == null || json.isBlank() ? null : json);
+        examRepository.save(exam);
+    }
+
     /** Chép nguyên cây thư mục; chặn đường dẫn thoát ra ngoài đích khi tên file bất thường. */
     private void copyTree(Path source, Path target) throws Exception {
         try (Stream<Path> walk = Files.walk(source)) {
@@ -751,13 +785,15 @@ public class ExamService {
                 case "li" -> { docx.bullet(block.text(), false, 0); ordered = 0; }
                 case "ol" -> docx.bullet(block.text(), true, ++ordered);
                 case "code" -> { docx.code(block.text()); ordered = 0; }
+                case "table" -> { docx.table(HandoutDocument.splitTableRows(block.text())); ordered = 0; }
                 default -> { docx.paragraph(block.text()); ordered = 0; }
             }
         }
 
-        if (images != null && !images.isEmpty()) {
+        Map<String, byte[]> screenshots = readGoldenScreenshots(examId);
+        if ((images != null && !images.isEmpty()) || !screenshots.isEmpty()) {
             docx.heading("Hình minh họa giao diện", 2);
-            for (Map<String, Object> image : images) {
+            for (Map<String, Object> image : images == null ? List.<Map<String, Object>>of() : images) {
                 if (image == null) continue;
                 String base64 = String.valueOf(image.getOrDefault("png_base64", ""));
                 if (base64.isBlank()) continue;
@@ -769,8 +805,137 @@ public class ExamService {
                 catch (Exception e) { continue; }
                 docx.image(png, (int) toDouble(image.get("width"), 0), (int) toDouble(image.get("height"), 0));
             }
+            // Ảnh chụp thật từ Golden App (nút "Build & chụp ảnh" ở trang "Tạo Golden") — luôn
+            // chèn cuối tài liệu kèm tên màn hình, chưa ghép vào đúng mục 3.x tương ứng (xem ghi
+            // chú ở readGoldenScreenshots).
+            for (Map.Entry<String, byte[]> entry : screenshots.entrySet()) {
+                java.awt.image.BufferedImage img;
+                try { img = javax.imageio.ImageIO.read(new java.io.ByteArrayInputStream(entry.getValue())); }
+                catch (Exception e) { continue; }
+                if (img == null) continue;
+                docx.paragraph(entry.getKey());
+                docx.image(entry.getValue(), img.getWidth(), img.getHeight());
+            }
         }
         return docx.build();
+    }
+
+    /**
+     * Ảnh chụp Golden App đã lưu ở {@code handout/golden_screenshot/<tên màn>.png} (xem
+     * {@link #saveGoldenScreenshot}), sắp theo tên file để thứ tự ổn định.
+     *
+     * <p>Thư mục RIÊNG với {@code mockup/} (ảnh SVG do giáo viên tự vẽ ở bước soạn đề): tránh đụng
+     * logic "xoá mockup cũ trước khi ghi mới" ở {@link #saveDeBaiWithMockups} vô tình xoá luôn ảnh
+     * chụp Golden — hai nguồn ảnh độc lập, chỉ gặp nhau lúc xuất .docx.
+     */
+    private Map<String, byte[]> readGoldenScreenshots(String examId) throws Exception {
+        Path dir = handoutDirOf(examId).resolve("golden_screenshot");
+        Map<String, byte[]> out = new java.util.TreeMap<>();
+        if (!Files.isDirectory(dir)) return out;
+        try (Stream<Path> files = Files.list(dir)) {
+            for (Path f : files.filter(p -> p.getFileName().toString().endsWith(".png")).toList()) {
+                out.put(f.getFileName().toString().replaceFirst("\\.png$", ""), Files.readAllBytes(f));
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Lưu 1 ảnh chụp màn hình Golden App (nút "Build & chụp ảnh" ở trang "Tạo Golden") vào
+     * {@code handout/golden_screenshot/<tên màn>.png}. Ảnh này được {@link #buildHandoutDocx} tự
+     * động chèn vào cuối bản .docx.
+     */
+    public void saveGoldenScreenshot(String examId, String screenName, byte[] png) throws Exception {
+        safeId(examId, "đề");
+        if (png == null || png.length == 0) throw new IllegalArgumentException("Ảnh rỗng.");
+        String name = (screenName == null || screenName.isBlank() ? "man_hinh" : screenName)
+                .toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_-]", "-");
+        Path dir = handoutDirOf(examId).resolve("golden_screenshot");
+        Files.createDirectories(dir);
+        Path out = dir.resolve(name + ".png").normalize();
+        if (!out.startsWith(dir)) throw new IllegalArgumentException("Tên màn hình không hợp lệ: " + screenName);
+        Files.write(out, png);
+    }
+
+    /** Đọc thô một file đã lưu trong handout/ (student.db, hidden.db…); null nếu chưa có. */
+    public byte[] readHandoutFile(String examId, String name) throws Exception {
+        safeId(examId, "đề");
+        Path f = handoutDirOf(examId).resolve(name);
+        return Files.isRegularFile(f) ? Files.readAllBytes(f) : null;
+    }
+
+    /**
+     * Dựng THẬT hai file SQLite (handout/student.db, handout/hidden.db) từ bản mô tả bảng+dữ liệu
+     * do {@code AiExamAuthorService#proposeDatabaseSeed} soạn — để tải trực tiếp ở trang "Tạo đề",
+     * rồi giáo viên tự tải lên đúng ô STUDENT_DATABASE/HIDDEN_DATABASE ở trang "Tạo Golden"/"Bộ
+     * chấm Golden".
+     *
+     * <p>Hai file LUÔN chạy CÙNG {@code create_sql} cho mỗi bảng — chỉ khác dữ liệu — nên cấu trúc
+     * hai bên khớp nhau đúng như {@code BehaviorArtifactService#compareSqliteSchema} đòi hỏi; AI
+     * chỉ quyết định DỮ LIỆU khác nhau thế nào để chống hardcode.
+     */
+    public void saveDatabaseSeed(String examId, List<Map<String, Object>> tables) throws Exception {
+        safeId(examId, "đề");
+        if (tables == null || tables.isEmpty())
+            throw new IllegalArgumentException("Chưa có bảng dữ liệu nào để dựng database.");
+        Path handout = handoutDirOf(examId);
+        Files.createDirectories(handout);
+        Path studentDb = handout.resolve("student.db");
+        Path hiddenDb = handout.resolve("hidden.db");
+        Files.deleteIfExists(studentDb);
+        Files.deleteIfExists(hiddenDb);
+        try {
+            buildSqlite(studentDb, tables, "student_rows");
+            buildSqlite(hiddenDb, tables, "hidden_rows");
+        } catch (Exception e) {
+            // Nửa vời (student có, hidden lỗi) còn tệ hơn không có cái nào — giáo viên tưởng đã
+            // xong mà thật ra thiếu HIDDEN_DATABASE, sẽ bị chặn ở bước upload sau mà không hiểu vì sao.
+            Files.deleteIfExists(studentDb);
+            Files.deleteIfExists(hiddenDb);
+            throw e;
+        }
+        log.info("🗄️ Đã dựng student.db + hidden.db cho đề {} ({} bảng)", examId, tables.size());
+    }
+
+    /**
+     * @param rowsKey "student_rows" hoặc "hidden_rows" — cùng danh sách bảng {@code tables}, chỉ
+     *                đổi khoá để lấy đúng bộ dữ liệu tương ứng cho từng file.
+     */
+    @SuppressWarnings("unchecked")
+    private void buildSqlite(Path file, List<Map<String, Object>> tables, String rowsKey) throws Exception {
+        try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + file.toAbsolutePath())) {
+            for (Map<String, Object> table : tables) {
+                String name = String.valueOf(table.get("name"));
+                String createSql = String.valueOf(table.get("create_sql"));
+                // AI chỉ được phép tạo bảng — chặn sớm nếu lỡ trả về DROP/ATTACH/PRAGMA… nào đó
+                // thay vì thực thi mù trên một file .db thật.
+                if (!createSql.strip().toUpperCase(Locale.ROOT).startsWith("CREATE TABLE"))
+                    throw new IllegalStateException("Câu lệnh tạo bảng không hợp lệ cho bảng " + name);
+                if (!name.matches("[A-Za-z_][A-Za-z0-9_]*"))
+                    throw new IllegalStateException("Tên bảng không an toàn: " + name);
+                try (Statement st = conn.createStatement()) { st.execute(createSql); }
+
+                List<String> columns = (List<String>) table.get("columns");
+                List<List<Object>> rows = (List<List<Object>>) table.get(rowsKey);
+                if (columns == null || columns.isEmpty() || rows == null || rows.isEmpty()) continue;
+                for (String col : columns) {
+                    if (!col.matches("[A-Za-z_][A-Za-z0-9_]*"))
+                        throw new IllegalStateException("Tên cột không an toàn: " + col + " (bảng " + name + ")");
+                }
+                String placeholders = String.join(",", java.util.Collections.nCopies(columns.size(), "?"));
+                String colList = String.join(",", columns);
+                String insertSql = "INSERT INTO " + name + " (" + colList + ") VALUES (" + placeholders + ")";
+                try (PreparedStatement ps = conn.prepareStatement(insertSql)) {
+                    for (List<Object> row : rows) {
+                        for (int i = 0; i < columns.size(); i++) {
+                            ps.setObject(i + 1, i < row.size() ? row.get(i) : null);
+                        }
+                        ps.addBatch();
+                    }
+                    ps.executeBatch();
+                }
+            }
+        }
     }
 
     private double toDouble(Object value, double fallback) {
@@ -864,6 +1029,42 @@ public class ExamService {
         safeId(examId, "đề");
         Path f = handoutDirOf(examId).resolve("de_bai.md");
         return Files.exists(f) ? Files.readString(f, StandardCharsets.UTF_8) : null;
+    }
+
+    /**
+     * Danh sách mã đề đã soạn bằng trợ lý AI (có {@code handout/de_bai.md} trên đĩa) — cho trang
+     * "Tạo đề" hiển thị để mở lại/chọn tiếp tục. Quét trực tiếp <exams>/*&#47;handout/ thay vì bảng
+     * {@code Exam} trong DB: một đề vừa soạn xong CHƯA CÓ testcase/suite nào thì cũng chưa có hàng
+     * DB (xem {@link #saveAiAuthorDraft}), nên tra theo DB sẽ bỏ sót đúng những đề mới nhất.
+     */
+    public List<Map<String, Object>> listAuthoredExamIds() throws Exception {
+        Path root = examsRoot();
+        if (!Files.isDirectory(root)) return List.of();
+        List<Map<String, Object>> out = new ArrayList<>();
+        try (Stream<Path> dirs = Files.list(root)) {
+            for (Path examDir : dirs.filter(Files::isDirectory).toList()) {
+                Path deBai = examDir.resolve("handout").resolve("de_bai.md");
+                if (!Files.isRegularFile(deBai)) continue;
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("exam_id", examDir.getFileName().toString());
+                row.put("title", firstLine(deBai));
+                row.put("updated_at", Files.getLastModifiedTime(deBai).toInstant().toString());
+                out.add(row);
+            }
+        }
+        out.sort((a, b) -> String.valueOf(b.get("updated_at")).compareTo(String.valueOf(a.get("updated_at"))));
+        return out;
+    }
+
+    /** Dòng đầu khác rỗng của de_bai.md (thường là tiêu đề "# ĐỀ THI THỰC HÀNH — ...") để hiện gọn trong danh sách. */
+    private String firstLine(Path deBai) {
+        try {
+            for (String line : Files.readString(deBai, StandardCharsets.UTF_8).split("\n", -1)) {
+                String trimmed = line.strip().replaceFirst("^#+\\s*", "");
+                if (!trimmed.isBlank()) return trimmed;
+            }
+        } catch (Exception ignored) { /* danh sách vẫn hiện được, chỉ thiếu tiêu đề */ }
+        return "";
     }
 
     /** ZIP khung starter (handout/starter/<lib/…>) để phát SV; null nếu đề chưa có starter. */
@@ -1406,6 +1607,53 @@ public class ExamService {
         String lock = readLockFromBaseImage();
         if (lock != null && !lock.isBlank()) {
             out.add(Map.of("name", "pubspec.lock", "content", lock));
+        }
+        return out;
+    }
+
+    /**
+     * "Vỏ dự án" Flutter đầy đủ (android/, gradle wrapper, launcher icon, .metadata,
+     * analysis_options.yaml, .gitignore) đóng gói sẵn trong classpath — nhờ đó khung starter/app
+     * lời giải mẫu tải về là một dự án {@code flutter run} được ngay, không chỉ vài file
+     * lib/*.dart rời rạc phải tự ghép vào một project có sẵn.
+     *
+     * <p>KHÔNG gộp vào {@link #starterProjectFiles()}: hàm đó còn được dùng để đổ danh sách file
+     * vào trình soạn thảo code cho giáo viên xem/sửa (AiExamAuthorService#starterResult/goldenResult)
+     * — vài chục file vỏ dự án (icon PNG, gradle-wrapper.jar…) hiện lẫn vào đó chỉ gây rối, giáo
+     * viên không sửa gì được ở các file đó. Chỉ gọi hàm này ở bước ĐÓNG GÓI ZIP CUỐI CÙNG
+     * ({@code AiAuthorController#downloadStarter/downloadGolden}).
+     *
+     * <p>Nội dung luôn mã hoá base64 (kể cả file text) vì cây này có file nhị phân
+     * (ic_launcher.png, gradle-wrapper.jar) — nơi ghi ra .zip
+     * ({@code AiAuthorController#zipDownload}) giải mã theo field "encoding" thay vì ép UTF-8.
+     */
+    public List<Map<String, String>> flutterScaffoldFiles() {
+        List<Map<String, String>> out = new ArrayList<>();
+        String prefix = "flutter-starter-scaffold/";
+        try {
+            var resolver = new org.springframework.core.io.support.PathMatchingResourcePatternResolver();
+            for (var res : resolver.getResources("classpath*:" + prefix + "**")) {
+                if (!res.isReadable()) continue;
+                String url = res.getURL().toString();
+                int idx = url.indexOf(prefix);
+                if (idx < 0) continue;
+                String relative = url.substring(idx + prefix.length());
+                if (relative.isBlank() || relative.endsWith("/")) continue;   // thư mục, bỏ qua
+                // "_dot_metadata" → ".metadata": Maven/Plexus loại BỎ MẶC ĐỊNH mọi resource tên
+                // ".metadata"/".metadata/**" khi copy (dành cho thư mục workspace Eclipse) — trùng
+                // tên với file ".metadata" thật của project Flutter (ghi lại version SDK), nên phải
+                // giấu tên lúc đóng gói rồi trả lại tên thật ở đây.
+                if (relative.equals("_dot_metadata")) relative = ".metadata";
+                try (var in = res.getInputStream()) {
+                    Map<String, String> row = new LinkedHashMap<>();
+                    row.put("name", relative);
+                    row.put("content", java.util.Base64.getEncoder().encodeToString(in.readAllBytes()));
+                    row.put("encoding", "base64");
+                    out.add(row);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Không đọc được khung dự án Flutter mẫu (flutter-starter-scaffold): {}", e.getMessage());
         }
         return out;
     }

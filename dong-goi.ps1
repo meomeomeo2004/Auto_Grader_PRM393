@@ -31,10 +31,21 @@
 
   CAT GI VA KHONG CAT GI
   - Frontend: xoa han thu muc man hinh cua vai kia. Ban giao di khong con ma cua vai do.
-  - Backend : GIU NGUYEN ca hai. Khong phai vi luoi: controller cua vai nao khong duoc bat thi
-              Spring khong nap, goi vao la 404 that (xem grader/src/main/java/.../config/Vai.java),
-              va dieu do duoc chung minh bang VaiDuongDanTest. Cat bot controller la xoa luon
-              bai kiem chung minh phep tach hoat dong, doi lay mot thu khong ai nhin thay.
+  - Backend : GIU NGUYEN, tru khoi AI ra de. Khong phai vi luoi: controller cua vai nao khong
+              duoc bat thi Spring khong nap, goi vao la 404 that (xem
+              grader/src/main/java/.../config/Vai.java), va dieu do duoc chung minh bang hai bai
+              VaiDuongDan*Test chay tren bang duong dan THAT cua tung profile. Giu ca hai ban
+              backend thi bai kiem do con nguyen o ca hai goi.
+  - Ngoai le AI (14/9/2026): khoi soan de bang AI bi XOA HAN khoi ban nguoi cham, khong chi tat
+              bang @Profile. Ly do khong phai ky thuat ma la pham vi san pham: soan de la viec
+              cua nguoi ra de, va nguoi cham khong co ly do gi de cam trong tay ma nguon do -
+              ke ca AiPrompts.java, tuc toan bo cach ra lenh cho mo hinh. Khoi nay dung doc lap
+              (ngoai no khong file nao import vao, chi co hai chu thich javadoc o ExamService)
+              nen cat di van bien dich duoc.
+  - src\test : KHONG di kem ban giao. Khi da cat ma cua mot vai ra khoi goi thi bai kiem cua vai
+              KIA trong goi do se do - vi du VaiDuongDanGiangVienTest doi phai co /api/ai, chay
+              trong goi nguoi cham la truot. Bo kiem thu khoi goi giao di, KHONG bo khoi repo:
+              cho bai kiem lam viec la trong repo, noi con du ca hai vai de doi chieu.
 #>
 
 param(
@@ -58,28 +69,36 @@ function Canh($t)    { Write-Host "  [!] $t" -ForegroundColor Yellow }
 # teacher\testcases DOI BEN tu 14/9/2026: truoc kia no chi la mot duong dan cu tro ve
 # behavior-authoring (bo cung voi ban nguoi cham); nay no la man "Quan ly bo testcase" - noi
 # DUY NHAT cua ban nguoi cham de nhan goi .zip va xoa bo. Nen ban giang vien moi la ban bo no.
+# grader\src\test bi bo o CA HAI goi - xem doan "src\test" o dau file.
 $BoManTheoVai = @{
   gv = @("frontend\app\teacher\grading", "frontend\app\history",
-         "frontend\app\teacher\testcases")
+         "frontend\app\teacher\testcases",
+         "grader\src\test")
   # archive chi la mot duong dan cu tro ve behavior-authoring, nen phai di cung no: bo moi
   # behavior-authoring thi duong kia thanh lien ket gay.
   #
-  # Bon duong CUOI la cua chuc nang AI RA DE - toan bo thuoc ve giang vien. Chung CHUA co trong
-  # nhanh nay: chung nam o origin/main (3 commit), se vao khi gop. Khai truoc o day la co y -
-  # vong xoa man la "if (Test-Path) thi xoa", duong chua ton tai thi no lang le bo qua, nen dong
-  # nay hom nay khong lam gi ca. Nhung den luc gop thi khong ai phai NHO ra viec nay nua.
+  # Bon duong CUOI la cua chuc nang AI RA DE - toan bo thuoc ve giang vien. Khai o day tu truoc
+  # khi gop nhanh AI (chung chua ton tai thi vong xoa man lang le bo qua), va da gop that ngay
+  # 14/9/2026.
   #
-  # Vi sao phai nho: AI ra de viet TRUOC khi tach vai nen no khong biet vai la gi. Git se gop
+  # Vi sao phai khai truoc: AI ra de viet TRUOC khi tach vai nen no khong biet vai la gi. Git gop
   # tron tru, khong mot dong canh bao, va ban nguoi cham tu nhien soan duoc de - dung thu ma ca
-  # khau tach vai dung ra de ngan. Kem theo day con hai viec nua phai lam luc gop:
-  #   1. Gan @Profile(Vai.GIANG_VIEN) cho AiAuthorController (/api/ai/**, co ca /settings giu
-  #      khoa API). Bai kiem VaiDuongDanNguoiChamTest da chan san san cho viec nay.
-  #   2. Them vai: 'gv' cho hai muc menu "Tao de" va "Tao Golden" trong SidebarLayout - muc
-  #      khong khai vai bi hieu la "ca hai ban deu co".
+  # khau tach vai dung ra de ngan. Hai viec con lai da lam cung luc gop:
+  #   1. @Profile(Vai.GIANG_VIEN) cho AiAuthorController (/api/ai/**, co ca /settings giu khoa
+  #      API). Hai bai kiem VaiDuongDan*Test giu hai mat cua viec nay.
+  #   2. vai: 'gv' cho hai muc menu "Tao de" va "Tao Golden" trong SidebarLayout - muc khong khai
+  #      vai bi hieu la "ca hai ban deu co".
   nc = @("frontend\app\teacher\behavior-authoring", "frontend\app\teacher\archive",
          "frontend\app\teacher\exam-view", "frontend\app\syllabus",
          "frontend\app\teacher\exam-authoring", "frontend\app\teacher\golden-authoring",
-         "frontend\components\testcases", "frontend\lib\aiAuthorDrafts.ts")
+         "frontend\components\testcases", "frontend\lib\aiAuthorDrafts.ts",
+         "grader\src\test",
+         # Backend cua khoi AI - xem doan "Ngoai le AI" o dau file. Bon duong nay la TAT CA
+         # nhung gi con lai cua no; ngoai chung ra khong file nao import vao khoi AI.
+         "grader\src\main\java\com\example\grader\service\ai",
+         "grader\src\main\java\com\example\grader\controller\AiAuthorController.java",
+         "grader\src\main\java\com\example\grader\entity\AiSetting.java",
+         "grader\src\main\java\com\example\grader\repository\AiSettingRepository.java")
 }
 
 $CauHinh = @{}

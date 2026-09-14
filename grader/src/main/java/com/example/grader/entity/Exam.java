@@ -82,6 +82,18 @@ public class Exam {
     @Column(name = "testcase_version")
     private Integer testcaseVersion;
 
+    /**
+     * Phiên làm việc của TRỢ LÝ AI cho bộ này: yêu cầu đã khai, đề bài, khung starter, app lời giải
+     * mẫu đang soạn.
+     *
+     * <p>Lưu ở ĐÂY chứ không chỉ trong localStorage: đề soạn bằng AI mà mở lại trên máy khác (hay
+     * sau khi dọn trình duyệt) là mất sạch phần AI đã làm, muốn nhờ AI sửa một chi tiết cũng phải
+     * dựng lại toàn bộ từ đầu. Đây là bản NHÁP soạn thảo — không phải bộ testcase đang chấm.
+     */
+    @Lob
+    @Column(name = "ai_author_json", columnDefinition = "LONGTEXT")
+    private String aiAuthorJson;
+
     /** DRAFT/PUBLISHED; không dùng ExamStatus để không phá trạng thái READY cũ. */
     @Column(name = "testcase_status", length = 20)
     private String testcaseStatus;

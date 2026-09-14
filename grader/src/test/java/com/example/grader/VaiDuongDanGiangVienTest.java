@@ -35,11 +35,9 @@ class VaiDuongDanGiangVienTest {
                 "tách /list ra controller chung rồi thì bản này cũng phải còn");
         assertTrue(co.contains("/api/exam-setup/{examId}"),
                 "đường xóa bộ chuyển sang controller chung, bản này không được mất theo");
-        // KHI GỘP NHÁNH AI RA ĐỀ (origin/main) thì mở dòng dưới đây ra. Không bật sẵn được vì
-        // AiAuthorController chưa có trong nhánh này, bật là bài kiểm đỏ ngay. Mặt kia của nó —
-        // "bản người chấm KHÔNG được có /api/ai" — thì đã chặn sẵn ở VaiDuongDanNguoiChamTest,
-        // và đó mới là mặt nguy hiểm nên không chờ được.
-        // assertTrue(coNhom(co, "/api/ai"), "soạn đề bằng AI là chức năng của giảng viên");
+        // Nhánh AI ra đề đã gộp vào (14/9/2026): toàn bộ chức năng đó thuộc giảng viên. Mặt kia —
+        // "bản người chấm KHÔNG được có /api/ai" — chặn ở VaiDuongDanNguoiChamTest.
+        assertTrue(coNhom(co, "/api/ai"), "soạn đề bằng AI là chức năng của giảng viên");
 
         assertFalse(coNhom(co, "/api/batch"), "không được có chấm bài");
         assertFalse(coNhom(co, "/api/results"), "không được có kết quả chấm");

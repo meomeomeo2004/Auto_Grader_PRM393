@@ -16,6 +16,11 @@
 #  DDL `CURRENT_TIMESTAMP` trên cột datetime(6), vì trên schema có sẵn bảng thì Hibernate
 #  không phải tạo bảng nên không ai thấy lỗi. Nay bỏ hẳn: Hibernate dựng toàn bộ bảng.
 
+# TÊN DỰ ÁN GHIM CỨNG. Mặc định Docker lấy tên thư mục đang chạy `docker compose` làm tên dự
+# án, mà file này được phát cho cả `dist\gv` lẫn `dist\nc` — nên cùng một file lại thành ba dự
+# án khác nhau tuỳ chỗ bấm chạy. Ghim lại thì bấm ở đâu cũng ra đúng một MySQL.
+name: chamthi
+
 services:
   mysql:
     image: mysql:8.0
@@ -42,4 +47,14 @@ services:
   # mount ./exams — thư mục nay thuộc về từng bản trong dist chứ không nằm ở gốc repo nữa.
 
 volumes:
+  # TÊN VOLUME CŨNG GHIM CỨNG, không để Docker ghép tiền tố theo tên dự án. Đây mới là chỗ dữ
+  # liệu thật nằm: hai vai dùng chung một MySQL nhưng khác schema (chamthi_gv / chamthi_nc), nên
+  # chúng phải trỏ vào CÙNG một volume, bất kể bản nào khởi động trước.
+  #
+  # Trước 14/9/2026 tên volume suy ra từ thư mục: chạy từ repo ra `grader_app_fix_mysql_data`,
+  # chạy từ dist\gv ra `gv_mysql_data`, từ dist\nc ra `nc_mysql_data`. Hệ thống chỉ chạy được
+  # nhờ ăn may — container tên `chamthi-mysql` do repo tạo đã chiếm sẵn cổng 3306, nên compose
+  # gọi từ dist thất bại và start-all.ps1 rơi vào nhánh "dùng MySQL sẵn có". Ngày container đó
+  # bị xoá, lần chạy dist kế tiếp sẽ dựng một MySQL TRẮNG và mọi schema trông như bốc hơi.
   mysql_data:
+    name: chamthi_mysql_data

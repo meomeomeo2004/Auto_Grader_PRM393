@@ -4,6 +4,8 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -25,6 +27,11 @@ public final class DocxWriter {
     private static final int EMU_PER_PX = 9525;
     /** Bề rộng vùng in của khổ A4 lề 2cm, tính theo pixel: ảnh rộng hơn sẽ bị thu nhỏ vừa trang. */
     private static final int PAGE_WIDTH_PX = 640;
+    /** Bề rộng vùng in tính theo twips (1/20 point): pgSz 11906 trừ lề trái/phải 1134×2 — dùng để
+     *  chia đều cột bảng, không thì bảng Định danh tràn lề hoặc bó hẹp một bên. */
+    private static final int PAGE_WIDTH_TWIPS = 11906 - 1134 * 2;
+    /** "**đậm**" hoặc "`mã`" — đủ cho đề thi; phần chữ còn lại giữ nguyên (khớp HandoutDocument#inline). */
+    private static final Pattern INLINE_MARKUP = Pattern.compile("\\*\\*([^*]+)\\*\\*|`([^`]+)`");
 
     private final List<String> body = new ArrayList<>();
     private final List<byte[]> images = new ArrayList<>();
@@ -32,12 +39,12 @@ public final class DocxWriter {
     public DocxWriter heading(String text, int level) {
         int size = switch (level) { case 1 -> 32; case 2 -> 26; default -> 24; };   // nửa-point
         body.add("<w:p><w:pPr><w:spacing w:before=\"" + (level == 1 ? 0 : 240) + "\" w:after=\"80\"/></w:pPr>"
-                + run(text, true, size, null) + "</w:p>");
+                + runsFromInline(text, true, size) + "</w:p>");
         return this;
     }
 
     public DocxWriter paragraph(String text) {
-        body.add("<w:p><w:pPr><w:spacing w:after=\"120\"/></w:pPr>" + run(text, false, 22, null) + "</w:p>");
+        body.add("<w:p><w:pPr><w:spacing w:after=\"120\"/></w:pPr>" + runsFromInline(text, false, 22) + "</w:p>");
         return this;
     }
 
@@ -45,7 +52,50 @@ public final class DocxWriter {
     public DocxWriter bullet(String text, boolean ordered, int index) {
         String marker = ordered ? index + ". " : "• ";
         body.add("<w:p><w:pPr><w:ind w:left=\"420\" w:hanging=\"220\"/><w:spacing w:after=\"60\"/></w:pPr>"
-                + run(marker + text, false, 22, null) + "</w:p>");
+                + run(marker, false, 22, null) + runsFromInline(text, false, 22) + "</w:p>");
+        return this;
+    }
+
+    /**
+     * Bảng Markdown → bảng Word thật (đường viền + hàng đầu tô nền/in đậm) — đúng khuôn bảng Định
+     * danh của "Hợp đồng giao diện". Không dùng {@code styles.xml} (xem lớp doc), nên border/shading
+     * đặt thẳng trên {@code tblPr}/{@code tcPr} của từng bảng.
+     *
+     * @param rows hàng đầu là header; {@link HandoutDocument#splitTableRows} đã đệm mọi hàng về
+     *             cùng số cột nên không cần kiểm tra lệch cột ở đây.
+     */
+    public DocxWriter table(List<String[]> rows) {
+        if (rows == null || rows.isEmpty()) return this;
+        int columns = rows.get(0).length;
+        if (columns == 0) return this;
+        int colWidth = PAGE_WIDTH_TWIPS / columns;
+
+        StringBuilder tbl = new StringBuilder("<w:tbl><w:tblPr><w:tblW w:w=\"" + PAGE_WIDTH_TWIPS
+                + "\" w:type=\"dxa\"/><w:tblBorders>");
+        for (String edge : new String[] {"top", "left", "bottom", "right", "insideH", "insideV"}) {
+            tbl.append("<w:").append(edge).append(" w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"94A3B8\"/>");
+        }
+        tbl.append("</w:tblBorders></w:tblPr><w:tblGrid>");
+        for (int i = 0; i < columns; i++) tbl.append("<w:gridCol w:w=\"").append(colWidth).append("\"/>");
+        tbl.append("</w:tblGrid>");
+
+        for (int r = 0; r < rows.size(); r++) {
+            boolean header = r == 0;
+            tbl.append("<w:tr>");
+            for (String cell : rows.get(r)) {
+                tbl.append("<w:tc><w:tcPr><w:tcW w:w=\"").append(colWidth).append("\" w:type=\"dxa\"/>");
+                if (header) tbl.append("<w:shd w:val=\"clear\" w:fill=\"EEF2FF\"/>");
+                tbl.append("</w:tcPr><w:p><w:pPr><w:spacing w:after=\"0\"/></w:pPr>")
+                   .append(runsFromInline(cell, header, 20))
+                   .append("</w:p></w:tc>");
+            }
+            tbl.append("</w:tr>");
+        }
+        tbl.append("</w:tbl>");
+        body.add(tbl.toString());
+        // Word khuyến nghị luôn có một đoạn văn ngay sau bảng — thiếu nó vài phiên bản Word cũ
+        // hiện bảng dính liền nội dung theo sau, không có khoảng cách.
+        body.add("<w:p><w:pPr><w:spacing w:after=\"120\"/></w:pPr></w:p>");
         return this;
     }
 
@@ -138,6 +188,29 @@ public final class DocxWriter {
                 + "<w:sectPr><w:pgSz w:w=\"11906\" w:h=\"16838\"/>"
                 + "<w:pgMar w:top=\"1134\" w:right=\"1134\" w:bottom=\"1134\" w:left=\"1134\"/></w:sectPr>"
                 + "</w:body></w:document>";
+    }
+
+    /**
+     * Tách "**đậm**" và "`mã`" thành các run riêng (đậm / font Consolas), giữ nguyên phần chữ còn
+     * lại — nếu không thì dấu sao/backtick của Markdown hiện y nguyên trong Word, đọc rất rối mắt.
+     *
+     * @param forceBold áp cho TOÀN BỘ text (dùng cho heading/header bảng); "**đậm**" bên trong vẫn
+     *                  nhận diện được để chuyển sang font mã nếu có, chỉ là không đổi được gì thêm
+     *                  vì đã đậm sẵn.
+     */
+    private String runsFromInline(String text, boolean forceBold, int halfPoints) {
+        if (text == null || text.isEmpty()) return run("", forceBold, halfPoints, null);
+        StringBuilder out = new StringBuilder();
+        Matcher m = INLINE_MARKUP.matcher(text);
+        int last = 0;
+        while (m.find()) {
+            if (m.start() > last) out.append(run(text.substring(last, m.start()), forceBold, halfPoints, null));
+            if (m.group(1) != null) out.append(run(m.group(1), true, halfPoints, null));
+            else out.append(run(m.group(2), forceBold, halfPoints, "Consolas"));
+            last = m.end();
+        }
+        if (last < text.length()) out.append(run(text.substring(last), forceBold, halfPoints, null));
+        return out.length() == 0 ? run("", forceBold, halfPoints, null) : out.toString();
     }
 
     private String run(String text, boolean bold, int halfPoints, String font) {

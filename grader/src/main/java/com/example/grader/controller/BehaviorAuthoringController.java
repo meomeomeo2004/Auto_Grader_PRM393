@@ -358,6 +358,31 @@ public class BehaviorAuthoringController {
         return call(() -> runtimeService.status(id));
     }
 
+    /**
+     * Lưu 1 ảnh chụp màn hình Golden App (trang "Tạo Golden", nút "Build & chụp ảnh") — trình
+     * duyệt tự chụp canvas trong iframe rồi gửi base64 lên đây, không qua Docker/oracle gì cả.
+     * Body: {screen_name, png_base64}.
+     */
+    @PostMapping("/suites/{id}/golden-screenshot")
+    public ResponseEntity<?> saveGoldenScreenshot(@PathVariable String id, @RequestBody Map<String, Object> body) {
+        return call(() -> {
+            Object examIdRaw = service.getSuite(id).get("exam_id");
+            String examId = examIdRaw == null ? "" : String.valueOf(examIdRaw);
+            if (examId.isBlank())
+                throw new IllegalStateException("Bộ chấm này chưa gắn mã đề — không biết lưu ảnh vào đâu.");
+            String screenName = body == null ? null : String.valueOf(body.get("screen_name"));
+            String base64 = body == null ? "" : String.valueOf(body.getOrDefault("png_base64", ""));
+            if (base64.isBlank()) throw new IllegalArgumentException("Thiếu ảnh (png_base64).");
+            int comma = base64.indexOf(',');
+            if (base64.startsWith("data:") && comma > 0) base64 = base64.substring(comma + 1);
+            byte[] png;
+            try { png = java.util.Base64.getDecoder().decode(base64.trim()); }
+            catch (Exception e) { throw new IllegalArgumentException("Ảnh base64 không hợp lệ."); }
+            examService.saveGoldenScreenshot(examId, screenName, png);
+            return Map.of("ok", true, "exam_id", examId);
+        });
+    }
+
     @GetMapping({"/runtime/{suiteId}", "/runtime/{suiteId}/", "/runtime/{suiteId}/**"})
     public ResponseEntity<Resource> goldenRuntimeAsset(@PathVariable String suiteId,
                                                        HttpServletRequest request) {
