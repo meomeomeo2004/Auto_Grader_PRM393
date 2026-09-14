@@ -153,6 +153,7 @@ public class GoldenOracleCaptureService {
             int daNuongDuPhong = 0;
             int daNuongDinhDanh = 0;
             List<Object> kiemKeIcon = List.of();
+            List<Object> kiemKeAnh = List.of();
             Path layoutFile = captured.resolveSibling("captured-layout.json");
             if (Files.isRegularFile(layoutFile) && Files.size(layoutFile) > 0) {
                 Map<String, Object> layout = mapper.readValue(layoutFile.toFile(), new TypeReference<>() {});
@@ -168,6 +169,7 @@ public class GoldenOracleCaptureService {
                 // "Quét UI" qua DOM không thấy. Máy chấm nhìn thẳng cây widget nên thấy đủ —
                 // trả về đây để màn soạn đề bày ra cho người ra đề tick.
                 kiemKeIcon = list(layout.get("icons"));
+                kiemKeAnh = list(layout.get("images"));
             }
 
             List<Map<String, Object>> checkpoints = artifacts.databaseDiffCheckpoints(suiteId);
@@ -199,6 +201,7 @@ public class GoldenOracleCaptureService {
             result.put("fallback_target_count", daNuongDuPhong);
             result.put("identifier_step_count", daNuongDinhDanh);
             result.put("icons", kiemKeIcon);
+            result.put("images", kiemKeAnh);
             result.put("execution_code", executionCode);
             result.put("log", limitLog(output.toString()));
             return result;

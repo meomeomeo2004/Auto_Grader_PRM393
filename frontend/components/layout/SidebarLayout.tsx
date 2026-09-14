@@ -4,13 +4,14 @@ import React, { useEffect, useState, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
-  FileText, FileCode2, CheckSquare, BarChart2, Bell, Search,
-  GraduationCap, Loader2, History, PanelLeftClose,
+  FileCode2, CheckSquare, Bell, FileArchive,
+  GraduationCap, History, PanelLeftClose,
   Clock, CheckCircle2, AlertCircle, BookOpen, Package, Pause,
   Bot, ChevronDown,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { API_BASE } from '@/lib/config';
+import { VAI, Vai, laGiangVien, laNguoiCham } from '@/lib/vai';
 import ThemeToggle from '@/components/layout/ThemeToggle';
 
 interface SidebarLayoutProps {
@@ -30,34 +31,42 @@ interface BatchNotif {
   errorCount: number;
   createdAt: string;
 }
-interface SearchRow {
-  examId: string;
-  studentId: string;
-  studentName: string | null;
-  score: number | null;
-  status: string;
-}
+/**
+ * Thanh trên báo cho trang Lịch sử chấm biết cần mở bộ nào.
+ *
+ * <p>Đổi query trên CÙNG một route thì Next không remount trang, nên effect đọc query của trang
+ * Lịch sử không chạy lại — đang đứng sẵn ở đó mà bấm một thông báo thì màn hình đứng im. Sự
+ * kiện này là đường báo cho đúng ca đó.
+ */
+export const MO_LICH_SU = 'grader:mo-lich-su';
+export interface MoLichSuDetail { examId: string; studentId?: string }
 
-interface NavLeaf { name: string; path: string; icon: React.ElementType }
-interface NavGroup { name: string; icon: React.ElementType; children: NavLeaf[] }
+// `vai` để trống nghĩa là cả hai bản đều có mục này.
+interface NavLeaf { name: string; path: string; icon: React.ElementType; vai?: Vai }
+interface NavGroup { name: string; icon: React.ElementType; vai?: Vai; children: NavLeaf[] }
 type NavEntry = NavLeaf | NavGroup;
 const isGroup = (e: NavEntry): e is NavGroup => 'children' in e;
 
-const PRIMARY_NAV: NavEntry[] = [
-  { name: 'Thống kê', path: '/statistics', icon: BarChart2 },
+const TOAN_BO_NAV: NavEntry[] = [
   {
-    name: 'Chấm bài', icon: CheckSquare, children: [
+    name: 'Chấm bài', icon: CheckSquare, vai: 'nc', children: [
       { name: 'Chấm tự động', path: '/teacher/grading', icon: Bot },
-      { name: 'Chấm thủ công', path: '/teacher/workspace', icon: FileText },
       { name: 'Lịch sử chấm', path: '/history', icon: History },
     ],
   },
+  // Bản người chấm không soạn được bộ nào: bộ chấm chỉ vào bằng gói .zip giảng viên gửi, nên
+  // nơi nhận gói phải là một màn riêng chứ không phải một góc của màn Chấm tự động.
+  { name: 'Quản lý bộ testcase', path: '/teacher/testcases', icon: FileArchive, vai: 'nc' },
   { name: 'Thư viện chấm', path: '/teacher/libraries', icon: Package },
   // Vào thẳng trang Kho — mọi thao tác (tạo/sửa/xóa/chấm lại) đều là nút trong trang đó.
-  { name: 'Bộ chấm Golden', path: '/teacher/archive', icon: FileCode2 },
-  { name: 'Khung năng lực', path: '/syllabus', icon: BookOpen },
+  { name: 'Bộ chấm Golden', path: '/teacher/archive', icon: FileCode2, vai: 'gv' },
+  { name: 'Khung năng lực', path: '/syllabus', icon: BookOpen, vai: 'gv' },
   // "Nhận xét AI" không còn là trang riêng: sinh/xem feedback nằm ngay trang Lịch sử chấm.
 ];
+
+const PRIMARY_NAV: NavEntry[] = TOAN_BO_NAV.filter(
+  (e) => !e.vai || (e.vai === 'gv' ? laGiangVien : laNguoiCham)
+);
 
 /** Diễn giải trạng thái 1 phiên chấm cho thông báo. */
 function notifStatus(n: BatchNotif) {
@@ -70,7 +79,19 @@ function notifStatus(n: BatchNotif) {
   return { Icon: AlertCircle, tone: 'text-slate-400', text: `${done + err}/${total}` };
 }
 
-export default function SidebarLayout({ children, activePath = '/', title, subtitle, contentClassName }: SidebarLayoutProps) {
+/**
+ * Thiếu vai thì mọi màn hình đều sai: menu trống, mà API bên máy chủ cũng không tồn tại. Nói
+ * thẳng ra một lần ở đây, thay vì để người dùng bấm quanh một giao diện nửa vời.
+ *
+ * Tách làm hai lớp vì phép kiểm phải đứng TRƯỚC mọi hook — trả về sớm ở giữa thân component
+ * là vi phạm quy tắc hook của React.
+ */
+export default function SidebarLayout(props: SidebarLayoutProps) {
+  if (!VAI) return <ChuaKhaiVai />;
+  return <SidebarTheoVai {...props} />;
+}
+
+function SidebarTheoVai({ children, activePath = '/', title, subtitle, contentClassName }: SidebarLayoutProps) {
   const router = useRouter();
 
   // ── UI state ──────────────────────────────────────────────────
@@ -85,15 +106,8 @@ export default function SidebarLayout({ children, activePath = '/', title, subti
   const [notifOpen, setNotifOpen] = useState(false);
   const [notifs, setNotifs] = useState<BatchNotif[]>([]);
   const [lastSeen, setLastSeen] = useState(0);
-  const [q, setQ] = useState("");
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [results, setResults] = useState<SearchRow[]>([]);
-  const [searching, setSearching] = useState(false);
 
   const notifRef = useRef<HTMLDivElement>(null);
-  const searchRef = useRef<HTMLDivElement>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const searchSeq = useRef(0);   // chống response cũ ghi đè response mới
 
   // Khôi phục trạng thái chỉ tồn tại trong localStorage sau hydration.
   useEffect(() => {
@@ -112,6 +126,8 @@ export default function SidebarLayout({ children, activePath = '/', title, subti
   }, []);
 
   useEffect(() => {
+    // Bản giảng viên không nạp API phiên chấm — gọi vào chỉ nhận 404 mỗi 30 giây.
+    if (!laNguoiCham) return;
     loadNotifs();
     const id = setInterval(loadNotifs, 30000);
     return () => clearInterval(id);
@@ -121,13 +137,9 @@ export default function SidebarLayout({ children, activePath = '/', title, subti
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (notifRef.current && !notifRef.current.contains(e.target as Node)) setNotifOpen(false);
-      if (searchRef.current && !searchRef.current.contains(e.target as Node)) setSearchOpen(false);
     };
     document.addEventListener("mousedown", handler);
-    return () => {
-      document.removeEventListener("mousedown", handler);
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-    };
+    return () => document.removeEventListener("mousedown", handler);
   }, []);
 
   const toggleCollapse = () => {
@@ -142,6 +154,13 @@ export default function SidebarLayout({ children, activePath = '/', title, subti
     (n) => n.createdAt && new Date(n.createdAt).getTime() > lastSeen
   ).length;
 
+  // Mở trang Lịch sử chấm đúng bộ được bấm. Truyền bằng query để lần điều hướng nào cũng đọc
+  // được, KÈM sự kiện cho ca đang đứng sẵn ở trang đó (xem chú thích ở MO_LICH_SU).
+  const moLichSu = (examId: string) => {
+    router.push(`/history?exam=${encodeURIComponent(examId)}`);
+    window.dispatchEvent(new CustomEvent(MO_LICH_SU, { detail: { examId } }));
+  };
+
   const toggleNotif = () => {
     setNotifOpen((o) => {
       const open = !o;
@@ -152,43 +171,6 @@ export default function SidebarLayout({ children, activePath = '/', title, subti
       }
       return open;
     });
-  };
-
-  const onSearchChange = (val: string) => {
-    setQ(val);
-    setSearchOpen(true);
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    if (val.trim().length < 1) { setResults([]); setSearching(false); return; }
-    setSearching(true);
-    const seq = ++searchSeq.current;
-    debounceRef.current = setTimeout(() => {
-      fetch(`${API_BASE}/results/search?q=${encodeURIComponent(val.trim())}`)
-        .then((r) => (r.ok ? r.json() : []))
-        .then((d) => { if (seq === searchSeq.current) setResults(Array.isArray(d) ? d : []); })
-        .catch(() => { if (seq === searchSeq.current) setResults([]); })
-        .finally(() => { if (seq === searchSeq.current) setSearching(false); });
-    }, 300);
-  };
-
-  // Bấm một kết quả = MỞ BÀI LÀM của sinh viên đó ở trang Chấm thủ công (xem code + chấm tay),
-  // không phải nhảy về bảng Lịch sử rồi tự tìm lại lần nữa. Lệnh truyền qua localStorage + event
-  // (không qua query string) để cả khi ĐANG đứng ở trang đó, bài vẫn được mở — điều hướng cùng
-  // route chỉ đổi query sẽ không remount trang.
-  const gotoResult = (r: SearchRow) => {
-    setSearchOpen(false);
-    setQ("");
-    setResults([]);
-    try {
-      localStorage.setItem("grader_open_submission", JSON.stringify({ examId: r.examId, studentId: r.studentId }));
-    } catch { /* bỏ qua */ }
-    window.dispatchEvent(new Event("grader:open-submission"));
-    router.push("/teacher/workspace");
-  };
-
-  const onSearchSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (results.length) gotoResult(results[0]);
-    else if (q.trim()) { setSearchOpen(false); router.push(`/history?q=${encodeURIComponent(q.trim())}`); }
   };
 
   // Bấm nhóm khi menu đang thu gọn thì mở rộng luôn — nếu không, danh sách con xổ ra
@@ -328,58 +310,11 @@ export default function SidebarLayout({ children, activePath = '/', title, subti
             {subtitle && <p className="truncate text-xs text-slate-500">{subtitle}</p>}
           </div>
           <div className="flex items-center gap-5">
-            {/* Thanh tìm kiếm */}
-            <div ref={searchRef} className="relative hidden md:block">
-              <form onSubmit={onSearchSubmit}>
-                <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                <input
-                  type="text"
-                  value={q}
-                  onChange={(e) => onSearchChange(e.target.value)}
-                  onFocus={() => q.trim() && setSearchOpen(true)}
-                  placeholder="Tìm mã bộ testcase, sinh viên..."
-                  className="w-64 rounded-full border border-transparent bg-slate-100 py-2 pl-9 pr-4 text-sm outline-none transition-all focus:border-indigo-400 focus:bg-white focus:ring-2 focus:ring-indigo-100"
-                />
-              </form>
-              {searchOpen && q.trim().length > 0 && (
-                <div className="absolute left-0 top-full z-30 mt-2 w-80 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl">
-                  {searching ? (
-                    <div className="p-4 text-center text-xs text-slate-400">
-                      <Loader2 size={14} className="mr-1 inline animate-spin" /> Đang tìm...
-                    </div>
-                  ) : results.length === 0 ? (
-                    <div className="p-4 text-center text-xs text-slate-400">Không tìm thấy kết quả</div>
-                  ) : (
-                    <ul className="max-h-80 overflow-y-auto py-1">
-                      {results.map((r, i) => (
-                        <li key={`${r.examId}-${r.studentId}-${i}`}>
-                          <button
-                            onClick={() => gotoResult(r)}
-                            className="flex w-full items-center gap-3 px-3 py-2 text-left transition-colors hover:bg-slate-50"
-                          >
-                            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-slate-100 to-slate-200 text-xs font-bold text-slate-500">
-                              {(r.studentName || r.studentId || '?').charAt(0).toUpperCase()}
-                            </div>
-                            <div className="min-w-0 flex-1">
-                              <p className="truncate text-sm font-medium text-slate-700">{r.studentName || r.studentId}</p>
-                              <p className="truncate font-mono text-xs text-slate-400">{r.studentId} · {r.examId}</p>
-                            </div>
-                            {r.score != null && (
-                              <span className="shrink-0 text-xs font-bold text-slate-500">{r.score.toFixed(1)}</span>
-                            )}
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              )}
-            </div>
-
             {/* Nút đổi giao diện sáng/tối — hiển thị trên mọi trang dùng layout này */}
             <ThemeToggle />
 
-            {/* Chuông thông báo */}
+            {/* Chuông thông báo — phiên chấm chỉ tồn tại ở bản người chấm. */}
+            {laNguoiCham && (
             <div ref={notifRef} className="relative">
               <button
                 onClick={toggleNotif}
@@ -408,7 +343,7 @@ export default function SidebarLayout({ children, activePath = '/', title, subti
                         return (
                           <li key={n.batchId}>
                             <button
-                              onClick={() => { setNotifOpen(false); router.push(`/history?exam=${encodeURIComponent(n.examId)}`); }}
+                              onClick={() => { setNotifOpen(false); moLichSu(n.examId); }}
                               className="flex w-full items-start gap-3 px-4 py-2.5 text-left transition-colors hover:bg-slate-50"
                             >
                               <s.Icon size={18} className={clsx('mt-0.5 shrink-0', s.tone)} />
@@ -428,6 +363,7 @@ export default function SidebarLayout({ children, activePath = '/', title, subti
                 </div>
               )}
             </div>
+            )}
 
           </div>
         </header>
@@ -436,6 +372,42 @@ export default function SidebarLayout({ children, activePath = '/', title, subti
         <main className="custom-scrollbar flex-1 overflow-y-auto bg-slate-50 p-8">
           <div className={clsx('mx-auto w-full max-w-6xl animate-fade-in-up', contentClassName)}>{children}</div>
         </main>
+      </div>
+    </div>
+  );
+}
+
+/** Màn hình khi bản đang chạy không khai vai — nói rõ phải làm gì, không bắt đoán. */
+function ChuaKhaiVai() {
+  return (
+    <div className="flex h-screen w-full items-center justify-center bg-slate-50 p-8 font-sans">
+      <div className="max-w-lg rounded-2xl border border-rose-200 bg-white p-8 shadow-sm">
+        <h1 className="text-lg font-bold text-slate-900">Bản này chưa khai vai</h1>
+        <p className="mt-2 text-sm leading-relaxed text-slate-600">
+          Hệ thống đã tách làm hai bản và không còn bản thấy cả hai vai. Không khai vai thì menu
+          trống và mọi lời gọi API đều không tồn tại — nên màn hình dừng ở đây thay vì để bạn bấm
+          quanh một giao diện nửa vời.
+        </p>
+        <div className="mt-5 space-y-3 text-sm text-slate-700">
+          <div>
+            <p className="font-semibold">Chạy bản đã cắt</p>
+            <code className="mt-1 block rounded-lg bg-slate-100 px-3 py-2 font-mono text-xs">
+              vào dist\gv hoặc dist\nc rồi chạy .\run
+            </code>
+          </div>
+          <div>
+            <p className="font-semibold">Chạy thẳng trong repo để phát triển</p>
+            <code className="mt-1 block rounded-lg bg-slate-100 px-3 py-2 font-mono text-xs">
+              .\run -Vai gv
+            </code>
+          </div>
+        </div>
+        <p className="mt-5 text-xs leading-relaxed text-slate-500">
+          Mở tay thì đặt <code className="font-mono">NEXT_PUBLIC_ROLE=gv</code> hoặc{" "}
+          <code className="font-mono">nc</code> trong <code className="font-mono">frontend/.env.local</code>,
+          rồi xóa thư mục <code className="font-mono">.next</code> vì biến này được nướng vào bản
+          biên dịch.
+        </p>
       </div>
     </div>
   );

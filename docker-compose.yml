@@ -1,14 +1,20 @@
 # docker-compose.yml
 #
-#  Mặc định: chỉ chạy MySQL (hạ tầng).
+#  File này chỉ dựng MySQL. Không có gì khác.
 #    docker compose up -d
 #
-#  Backend Spring Boot KHUYẾN NGHỊ chạy trên host (Windows/Mac) vì nó build &
-#  mount thư mục bài nộp vào docker.sock của host — đường dẫn phải là đường dẫn
-#  host thật. Chạy host:  cd grader && ./mvnw spring-boot:run
+#  Backend chạy trên HOST, không chạy trong container: nó build và mount thư mục bài nộp
+#  qua docker.sock của host nên đường dẫn phải là đường dẫn host thật. Và từ khi tách hai
+#  vai thì mỗi lần chạy phải khai vai, nên đường chạy duy nhất là:
+#      .\run -Vai gv        (hoặc -Vai nc)
+#  hay trong một bản đã đóng gói thì bấm GraderLauncher.exe.
 #
-#  Nếu deploy trọn gói trên 1 host Linux, bật thêm service backend:
-#    docker compose --profile full up -d --build
+#  KHÔNG tạo sẵn database ở đây. Schema do VAI quyết định (chamthi_gv / chamthi_nc, xem
+#  vai-cau-hinh.ps1) và chuỗi kết nối mang sẵn createDatabaseIfNotExist=true nên backend
+#  tự tạo schema của mình ở lần chạy đầu. Trước đây chỗ này tạo sẵn `chamthi_db` kèm một
+#  init.sql dựng tay 6 bảng theo hình dạng CŨ — chính bộ bảng dựng tay đó đã che mất lỗi
+#  DDL `CURRENT_TIMESTAMP` trên cột datetime(6), vì trên schema có sẵn bảng thì Hibernate
+#  không phải tạo bảng nên không ai thấy lỗi. Nay bỏ hẳn: Hibernate dựng toàn bộ bảng.
 
 services:
   mysql:
@@ -17,14 +23,12 @@ services:
     restart: always
     environment:
       MYSQL_ROOT_PASSWORD: "123456"     # khớp default backend (root/123456) → clone về chạy ngay
-      MYSQL_DATABASE: chamthi_db
-      MYSQL_USER: chamthi               # user phụ + dùng cho healthcheck
+      MYSQL_USER: chamthi               # user phụ, chỉ dùng cho healthcheck bên dưới
       MYSQL_PASSWORD: chamthi123
     ports:
       - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
-      - ./mysql/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "chamthi", "-pchamthi123"]
       interval: 10s
@@ -32,32 +36,10 @@ services:
       retries: 5
       start_period: 30s
 
-  grader-api:
-    profiles: ["full"]            # chỉ chạy khi `--profile full`
-    build:
-      context: ./grader           # ✅ backend nằm ở ./grader (không phải ./chamthi)
-      dockerfile: Dockerfile
-    container_name: chamthi-api
-    restart: always
-    ports:
-      - "8080:8080"
-    environment:
-      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/chamthi_db?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
-      SPRING_DATASOURCE_USERNAME: root
-      SPRING_DATASOURCE_PASSWORD: "123456"
-      GRADER_IMAGE_PREFIX: grading-env
-      GRADER_BASE_IMAGE: grading-base:latest
-      GRADER_TEMPLATE_DIR: /workspace/grader-base  # khớp volume mount bên dưới
-      GRADER_EXAMS_DIR: /workspace/exams
-      GRADER_MAX_CONCURRENT: 8
-      GRADER_TIMEOUT_SECONDS: 240
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock  # build/run ảnh chấm qua host docker
-      - ./grader-base:/workspace/grader-base
-      - ./exams:/workspace/exams
-    depends_on:
-      mysql:
-        condition: service_healthy
+  # Service `grader-api` (chạy backend trong container, sau `--profile full`) đã bỏ 14/9/2026.
+  # Nó không còn chạy được từ khi tách hai vai: một container thì là vai nào? Nó không đặt
+  # GRADER_ROLE nên VaiBatBuoc chặn ngay lúc khởi động, nó trỏ vào `chamthi_db` đã xoá, và nó
+  # mount ./exams — thư mục nay thuộc về từng bản trong dist chứ không nằm ở gốc repo nữa.
 
 volumes:
   mysql_data:

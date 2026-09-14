@@ -95,6 +95,11 @@ public class BehaviorSuiteMaterializer {
             exam.setTestcasePath(target.toAbsolutePath().toString());
             exam.setStatus(ExamStatus.READY);
             exam.setTestcaseStatus("PUBLISHED");
+            // Từ khâu "kiểm đồng bộ khung phát": mỗi lần publish là một bản Golden mới, nên
+            // kết quả kiểm cũ hết hiệu lực. Đề chỉ hiện lại ở phần chấm sau khi kiểm lại đạt.
+            exam.setStarterCheckRequired(true);
+            exam.setStarterCheckedGoldenSha(null);
+            exam.setStarterCheckedAt(null);
             exam.setTestcaseVersion((exam.getTestcaseVersion() == null ? 0 : exam.getTestcaseVersion()) + 1);
             exam.setTestcasePublishedAt(Instant.now());
             exams.save(exam);
@@ -107,7 +112,7 @@ public class BehaviorSuiteMaterializer {
             result.put("files", List.of(
                     "exam_test.dart", "grader.dart", "behavior_plan.json",
                     "skills_matrix.json", "contract.json", "suite_manifest.json",
-                    "fixtures/student.db", "fixtures/hidden.db", "fixtures/expected-output.db"));
+                    "fixtures/hidden.db", "fixtures/expected-output.db"));
             result.put("ready_for_grading", true);
             return result;
         } catch (Exception e) {
@@ -326,7 +331,8 @@ public class BehaviorSuiteMaterializer {
 
         Path fixtures = target.resolve("fixtures");
         Files.createDirectories(fixtures);
-        copyArtifact(suiteId, BehaviorArtifactType.STUDENT_DATABASE, fixtures.resolve("student.db"));
+        // student.db KHONG con duoc chep vao bundle: engine chi doc hidden_fixture_path,
+        // khong bao gio mo student.db. Viec canh schema nay do khau kiem dong bo khung phat lam.
         copyArtifact(suiteId, BehaviorArtifactType.HIDDEN_DATABASE, fixtures.resolve("hidden.db"));
         if (requireOutputDatabase
                 || artifacts.activeOptional(suiteId, BehaviorArtifactType.OUTPUT_DATABASE).isPresent()) {
@@ -547,7 +553,6 @@ public class BehaviorSuiteMaterializer {
                                                boolean includeInternalIdentity) {
         Map<String, Object> databaseContract = new LinkedHashMap<>(map(plan.get("database_contract")));
         databaseContract.put("enabled", true);
-        databaseContract.put("student_fixture_path", "/app/test/fixtures/student.db");
         databaseContract.put("hidden_fixture_path", "/app/test/fixtures/hidden.db");
         databaseContract.put("expected_output_path", "/app/test/fixtures/expected-output.db");
 

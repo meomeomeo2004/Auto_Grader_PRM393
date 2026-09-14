@@ -60,11 +60,16 @@ public class Exam {
     @Column(name = "created_by", length = 100)
     private String createdBy;
 
-    @ColumnDefault("CURRENT_TIMESTAMP")
+    // CURRENT_TIMESTAMP(6) chứ không phải CURRENT_TIMESTAMP: Hibernate sinh cột này là
+    // datetime(6), mà MySQL 8 đòi giá trị mặc định phải cùng độ chính xác — không thì báo
+    // "Invalid default value" và BẢNG KHÔNG ĐƯỢC TẠO. Lỗi nằm im rất lâu vì hồi đó
+    // mysql/init.sql dựng sẵn bảng bằng tay, Hibernate không phải tạo nên không ai thấy.
+    // Nay init.sql đã bỏ: mọi schema đều do Hibernate dựng, sai độ chính xác là lộ ngay.
+    @ColumnDefault("CURRENT_TIMESTAMP(6)")
     @Column(name = "created_at")
     private Instant createdAt;
 
-    @ColumnDefault("CURRENT_TIMESTAMP")
+    @ColumnDefault("CURRENT_TIMESTAMP(6)")
     @Column(name = "updated_at")
     private Instant updatedAt;
 
@@ -83,6 +88,24 @@ public class Exam {
 
     @Column(name = "testcase_published_at")
     private Instant testcasePublishedAt;
+
+    /**
+     * Đề publish từ khi có khâu "kiểm đồng bộ khung phát" thì phải qua khâu đó mới chấm được.
+     * Bộ đề cũ giữ giá trị null/false nên được miễn trừ, không đột ngột biến mất khỏi phần chấm.
+     */
+    @Column(name = "starter_check_required")
+    private Boolean starterCheckRequired;
+
+    /**
+     * sha256 của Golden Solution tại lượt kiểm đồng bộ ĐẠT gần nhất. Sửa Golden rồi publish lại
+     * thì giá trị này lệch, kết quả cũ hết hiệu lực và đề quay về trạng thái chờ kiểm — nếu
+     * không, lần kiểm đầu tiên thành con dấu vĩnh viễn.
+     */
+    @Column(name = "starter_checked_golden_sha", length = 80)
+    private String starterCheckedGoldenSha;
+
+    @Column(name = "starter_checked_at")
+    private Instant starterCheckedAt;
 
     @PrePersist
     protected void onCreate() {

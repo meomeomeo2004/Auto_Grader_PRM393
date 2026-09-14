@@ -48,6 +48,10 @@ public class BehaviorAuthoringService {
             // Giá trị trong bảng chủ đề: vai trò màu, useMaterial3, phông toàn app,
             // theme của từng thành phần.
             "theme_value",
+            // Giá trị app ghi vào bộ nhớ nhanh (SharedPreferences). Khác widget_state ở chỗ
+            // nó đọc KHO LƯU chứ không đọc màn hình: phân biệt được bài lưu thật với bài chỉ
+            // đổi giao diện bằng setState.
+            "preferences_observation",
             // Cả luồng không vỡ bố cục (RenderFlex overflow). Không có giá trị chuẩn —
             // engine tự bắt lỗi tràn trong lúc replay.
             "no_overflow",
@@ -480,6 +484,16 @@ public class BehaviorAuthoringService {
             event.putIfAbsent("stage", "ASSERT");
             event.putIfAbsent("action", "observe_ui");
             event.putIfAbsent("browser", "flutter_tester");
+        } else if ("preferences_observation".equals(kind)) {
+            // Thiếu khoá thì lúc chấm engine không biết đọc gì. Chặn ngay lúc ghi.
+            if (text(event, "key", "").isBlank()) {
+                throw new IllegalArgumentException(
+                        "Tiêu chí giá trị đã lưu phải khai khoá cần đọc trong bộ nhớ của app");
+            }
+            event.putIfAbsent("checkpoint", true);
+            event.putIfAbsent("stage", "ASSERT");
+            event.putIfAbsent("action", "observe_ui");
+            event.putIfAbsent("browser", "flutter_tester");
         } else if ("widget_state".equals(kind)) {
             // Thiếu một trong hai thì lúc chấm engine không biết đọc gì của ai. Chặn ngay
             // lúc ghi để người soạn đề sửa liền, đừng để lỗi trôi tới lượt capture.
@@ -729,6 +743,7 @@ public class BehaviorAuthoringService {
                     || "widget_state".equals(kind)
                     || "text_style".equals(kind)
                     || "theme_value".equals(kind)
+                    || "preferences_observation".equals(kind)
                     || "no_overflow".equals(kind)
                     || "theme_color".equals(kind)
                     || "screen_match".equals(kind)
@@ -1057,7 +1072,8 @@ public class BehaviorAuthoringService {
             boolean laCoMat = "component_present".equals(kind);
             // Ba loại tiêu chí "đọc một giá trị rồi so": trạng thái widget, kiểu chữ, chủ đề.
             // Chúng dùng CHUNG một kênh giá trị chuẩn (`observed`) nên chỉ có một luật nướng.
-            boolean laTrangThai = "widget_state".equals(kind)
+            boolean laTrangThai = "preferences_observation".equals(kind)
+                    || "widget_state".equals(kind)
                     || "text_style".equals(kind)
                     || "theme_value".equals(kind);
             // Quan he bo cuc (Ch.7 cua main) cung nhan gia tri chuan tu capture.

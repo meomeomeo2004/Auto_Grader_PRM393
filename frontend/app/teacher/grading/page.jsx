@@ -3,7 +3,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import SidebarLayout from "@/components/layout/SidebarLayout";
 import { API_BASE, PASS_THRESHOLD } from "@/lib/config";
-import ExamCombobox from "@/components/ui/ExamCombobox";
+import SelectMenu from "@/components/ui/SelectMenu";
 import PerformanceSettings from "@/components/grading/PerformanceSettings";
 import { gradingStatusLabel, gradingStatusTone } from "@/lib/gradingStatus";
 // Kho phiên chấm dùng chung với trang Lịch sử (nút "Chấm lại" bên đó ghi vào cùng chỗ này).
@@ -690,7 +690,6 @@ export default function AutomaticGradingPage() {
   return (
     <SidebarLayout
       title="Chấm bài tự động"
-      subtitle="Chấm tự động bài thi Flutter trong môi trường Docker cô lập"
       activePath="/teacher/grading"
       /* Nới trần bề ngang (mặc định max-w-6xl) — bảng kết quả 6 cột không đủ chỗ trong 1152px
          nên phải kéo ngang; cùng mức với trang Quản lý bộ testcase để hai trang nhìn đồng bộ. */
@@ -702,6 +701,7 @@ export default function AutomaticGradingPage() {
 
         {/* Cột trái: Form cấu hình & Upload */}
         <div className="min-w-0 space-y-6">
+
           <div className="card overflow-hidden">
             {/* Header gradient */}
             <div className="flex items-center gap-3 border-b border-slate-100 bg-gradient-to-r from-indigo-50 to-blue-50 px-6 py-4">
@@ -710,7 +710,6 @@ export default function AutomaticGradingPage() {
               </div>
               <div>
                 <h2 className="text-sm font-bold text-slate-800">Thiết lập phiên chấm bài</h2>
-                <p className="text-xs text-slate-500">Chọn bộ testcase và tải bài nộp</p>
               </div>
             </div>
 
@@ -719,12 +718,22 @@ export default function AutomaticGradingPage() {
                 <label className="mb-2 block text-xs font-bold uppercase tracking-wider text-slate-500">Mã Bộ Testcase</label>
                 {/* Không khoá lúc đang chấm — đổi bộ chỉ đổi KHUNG NHÌN; phiên đang chạy vẫn
                     chạy ngầm và quay lại đúng bộ đó là thấy lại tiến độ. */}
-                <ExamCombobox
-                  options={examOptions}
+                {/* CHỈ CHỌN, không cho gõ tay: bộ chấm chỉ vào máy này bằng gói bàn giao, nên
+                    một mã tự gõ chắc chắn không có thư mục testcase nào ứng với nó — gõ được chỉ
+                    đẩy người dùng tới một lỗi ở tận lúc bấm chấm. */}
+                <SelectMenu
+                  options={examOptions.map((e) => ({
+                    value: e.examId,
+                    label: e.examId,
+                    sublabel: e.examName !== e.examId ? e.examName : undefined,
+                    badge: e.examId.slice(0, 2).toUpperCase(),
+                  }))}
                   value={examId}
                   onChange={setExamId}
+                  icon={FileArchive}
                   ariaLabel="Mã bộ testcase"
-                  placeholder={examOptionsLoading ? "Đang tải danh sách bộ testcase..." : "Nhập hoặc chọn mã bộ testcase..."}
+                  placeholder={examOptionsLoading ? "Đang tải danh sách bộ testcase..." : "— Chọn bộ testcase —"}
+                  emptyText="Chưa nhận bộ testcase nào"
                 />
               </div>
 

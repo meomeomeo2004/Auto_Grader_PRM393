@@ -2,18 +2,23 @@ package com.example.grader.controller;
 
 import com.example.grader.config.AppActor;
 import com.example.grader.repository.ExamRepository;
+import com.example.grader.service.BanGiaoService;
 import com.example.grader.service.ExamService;
+import com.example.grader.service.StarterSyncService;
 import com.example.grader.service.SyllabusService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import com.example.grader.config.Vai;
+import org.springframework.context.annotation.Profile;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
+@Profile(Vai.GIANG_VIEN)   // Quản lý đề và bộ chấm — chỉ bản giảng viên.
 @RestController
 @RequestMapping("/api/exam-setup")
 @CrossOrigin(origins = "*")
@@ -25,6 +30,42 @@ public class ExamSetupController {
     private ExamRepository examRepo;
     @Autowired
     private SyllabusService syllabusService;
+    @Autowired
+    private StarterSyncService starterSyncService;
+    @Autowired
+    private BanGiaoService banGiaoService;
+
+    /**
+     * KIỂM ĐỒNG BỘ KHUNG PHÁT. Chọn một đề đã publish testcase, nạp gói khung phát cho sinh
+     * viên, hệ thống đối chiếu với Golden đang gắn với đề đó.
+     *
+     * Golden LẤY THẲNG từ artifact của bộ chấm, không cho nạp lại: nạp lại thì người ra đề có
+     * thể vô tình đưa một bản Golden khác với bản đã ghi hình, làm đổi nền tảng chấm mà không
+     * ai thấy.
+     *
+     * Đạt thì đề mới được hiện ở phần chấm; trượt thì không, kèm báo cáo lệch chỗ nào.
+     */
+    @PostMapping(value = "/{examId}/starter-check", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<?> kiemDongBoKhungPhat(@PathVariable String examId,
+                                                 @RequestPart("file") MultipartFile file) {
+        try {
+            return ResponseEntity.ok(starterSyncService.kiem(examId, file));
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", String.valueOf(e.getMessage())));
+        }
+    }
+
+    /** Trạng thái kiểm đồng bộ của một đề, để màn hình biết có hiện nút chấm hay không. */
+    @GetMapping("/{examId}/starter-check")
+    public ResponseEntity<?> trangThaiDongBo(@PathVariable String examId) {
+        try {
+            return ResponseEntity.ok(starterSyncService.tomTat(examId));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", String.valueOf(e.getMessage())));
+        }
+    }
 
     @PostMapping("/upload-testcase")
     public ResponseEntity<?> uploadTestcase(
@@ -94,11 +135,8 @@ public class ExamSetupController {
                 .orElse(ResponseEntity.notFound().build());
     }
 
-    /** Danh sách đề đã cấu hình — cho bộ chọn đánh giá độ phủ theo syllabus. */
-    @GetMapping("/list")
-    public ResponseEntity<?> list() {
-        return ResponseEntity.ok(examService.listExams());
-    }
+    // Đường /list đã chuyển sang ExamCatalogController: cả hai vai đều cần nó (bản người chấm
+    // dùng để chọn đề mà chấm), mà controller này thì chỉ bản giảng viên mới có.
 
     /**
      * ĐÁNH GIÁ ĐỘ PHỦ của đề theo SYLLABUS hiện tại (resolve trực tiếp → sửa syllabus là
@@ -340,6 +378,27 @@ public class ExamSetupController {
         }
     }
 
+    /**
+     * XUẤT GÓI BÀN GIAO cho người chấm: thư mục testcase đã xuất bản + tờ khai đi kèm.
+     *
+     * <p>Chặn ngay nếu đề chưa qua kiểm đồng bộ khung phát — bên nhận không có Golden để tự
+     * kiểm, nên đây là nơi cuối cùng còn phán được, và cũng là nơi có mặt người sửa được.
+     */
+    @GetMapping("/{examId}/xuat-goi")
+    public ResponseEntity<?> xuatGoiBanGiao(@PathVariable String examId) {
+        try {
+            byte[] zip = banGiaoService.xuatGoi(examId);
+            return zipResponse(banGiaoService.tenTepGoi(examId), zip);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(409).body(Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError()
+                    .body(Map.of("error", "Không xuất được gói: " + e.getMessage()));
+        }
+    }
+
     /** Tải STARTER: ZIP khung code (lib/…) phát cho SV. 404 nếu đề chưa lưu kèm. */
     @GetMapping("/{examId}/download/starter")
     public ResponseEntity<?> downloadStarter(@PathVariable String examId) {
@@ -394,13 +453,6 @@ public class ExamSetupController {
                 .body(data);
     }
 
-    /** Xóa 1 đề không dùng nữa: gỡ ảnh Docker + bản ghi DB (giải phóng dung lượng). */
-    @DeleteMapping("/{examId}")
-    public ResponseEntity<?> deleteExam(@PathVariable String examId) {
-        try {
-            return ResponseEntity.ok(examService.deleteExam(examId));
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
-        }
-    }
+    // Đường xóa bộ testcase đã chuyển sang ExamCatalogController: bản người chấm cũng phải xóa
+    // được bộ mình đã nhận (màn Quản lý bộ testcase), mà controller này thì chỉ giảng viên có.
 }

@@ -55,6 +55,18 @@ public class ExamService {
     @Value("${grader.exams-dir:exams}")
     private String examsDir;
 
+    /**
+     * Bản đang chạy có phải bản giảng viên không (profile "gv" — xem config/Vai.java).
+     *
+     * <p>Dùng để tắt phép QUÉT THƯ MỤC đề trên đĩa ở bản người chấm. Phép quét đó là di sản của
+     * thời một hệ thống làm cả hai việc: soạn xong là thư mục nằm sẵn đấy, liệt kê luôn cho tiện.
+     * Sang bản người chấm thì nó sai về nguyên tắc — bộ chấm chỉ được vào bằng gói bàn giao, và
+     * chính lúc nhập gói mới có dấu kiểm đồng bộ cùng phép đối chiếu thư viện. Một thư mục tự
+     * xuất hiện trong exams/ mà cũng lên danh sách là một đường vòng qua cả hai khâu đó.
+     */
+    @Value("#{environment.acceptsProfiles(T(org.springframework.core.env.Profiles).of('gv'))}")
+    private boolean vaiGiangVien;
+
     @Value("${grader.base-image:grading-base:latest}")
     private String baseImage;
 
@@ -81,6 +93,9 @@ public class ExamService {
 
     @Autowired
     private ExamRepository examRepository;
+    @Autowired
+    @org.springframework.context.annotation.Lazy
+    private StarterSyncService starterSyncService;
     @Autowired
     private SyllabusService syllabusService;
     @Autowired
@@ -164,6 +179,16 @@ public class ExamService {
             m.put("testcaseStatus", e.getTestcaseStatus() != null ? e.getTestcaseStatus() : "DRAFT");
             m.put("testcaseVersion", e.getTestcaseVersion());
             m.put("hasTestcase", hasTc);
+            // Mốc thời gian cho màn Quản lý bộ testcase. Ở bản người chấm, bản ghi đề chỉ ra đời
+            // bằng đường nhập gói bàn giao, nên createdAt chính là lúc nhận gói.
+            m.put("createdAt", e.getCreatedAt());
+            m.put("updatedAt", e.getUpdatedAt());
+            // Trang thai kiem dong bo khung phat: EXEMPT/OK thi cham duoc, PENDING/STALE thi
+            // man hinh phai bao ro thay vi de giao vien bam cham roi moi nhan loi.
+            String dongBo = starterSyncService.trangThai(e.getExamId());
+            m.put("starterCheck", dongBo);
+            m.put("gradable", StarterSyncService.MIEN_TRU.equals(dongBo)
+                    || StarterSyncService.DAT.equals(dongBo));
             // Mở được màn builder khi có cấu hình, HOẶC matrix còn template_id để dựng lại cấu hình.
             // Testcase viết tay không có template_id → sửa bằng trình sửa file thay vì builder.
             m.put("editable", false);
@@ -172,10 +197,11 @@ public class ExamService {
             byId.put(e.getExamId(), m);
         }
 
-        // 2) Thư mục đề trên đĩa
+        // 2) Thư mục đề trên đĩa — CHỈ bản giảng viên. Bản người chấm chỉ được biết tới những đề
+        //    đã đi qua đường nhập gói bàn giao; xem chú thích ở trường vaiGiangVien.
         try {
             Path root = examsRoot();
-            if (Files.isDirectory(root)) {
+            if (vaiGiangVien && Files.isDirectory(root)) {
                 try (Stream<Path> s = Files.list(root)) {
                     for (Path d : s.filter(Files::isDirectory).toList()) {
                         if (!Files.exists(d.resolve("testcase").resolve("skills_matrix.json"))) continue;
@@ -1426,6 +1452,79 @@ public class ExamService {
         goiTrongAnh = ten;
         goiTrongAnhCuaAnh = baseImage;
         return goiTrongAnh;
+    }
+
+    /**
+     * Bộ chấm này đòi những package nào mà ảnh chấm trên máy hiện tại chưa có.
+     *
+     * <p>Dùng sau khi nạp gói bàn giao: bên người chấm không được sửa thư viện tùy ý, nhưng nếu
+     * đề đòi một package chưa có trong ảnh thì bài sinh viên sẽ không biên dịch nổi. Cảnh báo
+     * đúng tên còn thiếu chính là chỗ duy nhất họ được phép mở ra để thêm.
+     *
+     * <p>Danh sách đề đòi đọc từ contract.json trong chính gói — không chép sang chỗ khác, vì
+     * đó mới là bản mà khâu chặn package lúc chấm thật sự đọc.
+     *
+     * <p>Không đọc được ảnh (Docker tắt) thì trả doc_duoc_anh=false và KHÔNG liệt kê thiếu:
+     * không biết thì đừng dọa người dùng là thiếu hết.
+     */
+    public Map<String, Object> goiConThieuCuaDe(String examId) {
+        Map<String, Object> ra = new LinkedHashMap<>();
+        List<String> deCan = new ArrayList<>();
+        try {
+            Path contract = testcaseDirOf(examId).resolve("contract.json");
+            if (Files.exists(contract)) {
+                JsonNode khai = mapper.readTree(Files.readString(contract, StandardCharsets.UTF_8))
+                        .get("allowed_packages");
+                if (khai != null && khai.isArray()) {
+                    khai.forEach(n -> {
+                        String ten = n.asText("").trim();
+                        if (!ten.isEmpty() && !deCan.contains(ten)) deCan.add(ten);
+                    });
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Không đọc được contract.json của {}: {}", examId, e.getMessage());
+        }
+        Set<String> coSan = goiCoTrongAnhCham();
+        ra.put("doc_duoc_anh", !coSan.isEmpty());
+        ra.put("de_can", deCan);
+        ra.put("thieu", coSan.isEmpty() ? List.of()
+                : deCan.stream().filter(ten -> !coSan.contains(ten)).sorted().toList());
+        return ra;
+    }
+
+    /**
+     * Gộp phần thiếu của MỌI bộ chấm đang có trên máy, kèm tên đề đang cần từng package.
+     *
+     * <p>Màn Thư viện chấm bên người chấm dùng cái này: họ không được sửa thư viện tùy ý, nên
+     * thứ duy nhất mở ra cho họ là đúng những tên đang thiếu, và phải nói rõ thiếu vì đề nào.
+     */
+    public Map<String, Object> goiConThieuTatCa() {
+        Set<String> coSan = goiCoTrongAnhCham();
+        Map<String, List<String>> theoGoi = new LinkedHashMap<>();
+        if (!coSan.isEmpty()) {
+            for (Map<String, Object> de : listExams()) {
+                String examId = String.valueOf(de.get("examId"));
+                Object thieu = goiConThieuCuaDe(examId).get("thieu");
+                if (!(thieu instanceof List<?> ds)) continue;
+                for (Object ten : ds) {
+                    theoGoi.computeIfAbsent(String.valueOf(ten), k -> new ArrayList<>()).add(examId);
+                }
+            }
+        }
+        List<Map<String, Object>> thieu = new ArrayList<>();
+        theoGoi.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .forEach(e -> {
+                    Map<String, Object> dong = new LinkedHashMap<>();
+                    dong.put("ten", e.getKey());
+                    dong.put("cac_de", e.getValue());
+                    thieu.add(dong);
+                });
+        Map<String, Object> ra = new LinkedHashMap<>();
+        ra.put("doc_duoc_anh", !coSan.isEmpty());
+        ra.put("thieu", thieu);
+        return ra;
     }
 
     /**

@@ -5,3 +5,9 @@ Dockerfile* text eol=lf
 *.yml       text eol=lf
 *.sql       text eol=lf
 grader/src/main/resources/behavior-replay-engine/*.dart text eol=lf
+
+# Batch cua Windows PHAI la CRLF. cmd.exe chiu duoc LF o lenh mot dong, nhung vo ngay
+# o khoi for/if co ngoac - bao ". was unexpected at this time" chu khong noi vi sao.
+# Da cắn build-exe.cmd va grader-setup.cmd (buoc cai dat dau tien tren may moi).
+*.cmd  text eol=crlf
+*.bat  text eol=crlf

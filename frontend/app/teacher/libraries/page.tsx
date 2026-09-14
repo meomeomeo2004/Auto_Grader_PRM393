@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import SidebarLayout from "@/components/layout/SidebarLayout";
 import Banner from "@/components/ui/Banner";
 import { API_BASE } from "@/lib/config";
+import { laNguoiCham } from "@/lib/vai";
 import {
   Package, Plus, Trash2, Loader2, Hammer, AlertTriangle, CheckCircle2,
   Info, RotateCcw, Lock,
@@ -14,6 +15,8 @@ interface BuildState {
   status: "IDLE" | "RESOLVING" | "BUILDING" | "READY" | "FAILED";
   message: string; log: string; at: number; building: boolean;
 }
+/** Một package mà bộ chấm đã nhận đòi hỏi nhưng ảnh chấm trên máy này chưa có. */
+interface GoiThieu { ten: string; cac_de: string[] }
 
 async function apiJson(path: string, method: string, body?: unknown) {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -39,6 +42,16 @@ export default function LibrariesPage() {
   const [newName, setNewName] = useState("");
   const [newVer, setNewVer] = useState("");
 
+  // ── Bên người chấm: thư viện là để XEM ───────────────────────────────────────
+  // Danh sách package là quyết định của người ra đề, người chấm không có cơ sở để sửa. Nhưng
+  // ảnh chấm thì bắt buộc phải có trên máy họ, nên khi bộ chấm vừa nhận đòi một package chưa
+  // có, đúng tên đó — và chỉ tên đó — được mở ra cho thêm.
+  const [thieu, setThieu] = useState<GoiThieu[]>([]);
+  const [docDuocAnh, setDocDuocAnh] = useState(true);
+  const [daMo, setDaMo] = useState<string[]>([]);
+  const chiXem = laNguoiCham;   // khong con ban thay ca hai vai nen khong phai tru bi
+  const moDuoc = (ten: string) => !chiXem || daMo.includes(ten);
+
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const stopPoll = () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
 
@@ -58,6 +71,18 @@ export default function LibrariesPage() {
     }
   }, []);
 
+  // Nạp phần thiếu của mọi bộ chấm đang có trên máy. Bản giảng viên cũng gọi, để người ra đề
+  // thấy được máy mình có khớp với đề mình vừa làm không.
+  const loadThieu = useCallback(async () => {
+    try {
+      const d = await fetch(`${API_BASE}/exam-setup/goi-con-thieu`).then((r) => r.json());
+      setThieu(Array.isArray(d.thieu) ? d.thieu : []);
+      setDocDuocAnh(d.doc_duoc_anh !== false);
+    } catch {
+      setThieu([]);
+    }
+  }, []);
+
   const startPoll = useCallback(() => {
     if (pollRef.current) return;
     pollRef.current = setInterval(async () => {
@@ -67,15 +92,18 @@ export default function LibrariesPage() {
       setBuild(s);
       if (!s.building) {
         stopPoll();
-        if (s.status === "READY") loadPackages();
+        // Dựng lại ảnh xong thì danh sách thiếu phải tính lại — nếu không người dùng vừa thêm
+        // đúng thứ đang thiếu mà cảnh báo vẫn còn nguyên, tưởng là không ăn thua.
+        if (s.status === "READY") { loadPackages(); loadThieu(); }
       }
     }, 4000);
-  }, [loadPackages]);
+  }, [loadPackages, loadThieu]);
 
   useEffect(() => {
     loadPackages();
+    loadThieu();
     return stopPoll;
-  }, [loadPackages]);
+  }, [loadPackages, loadThieu]);
 
   // Nếu mở trang lúc đang build dở → poll tiếp
   useEffect(() => { if (build?.building) startPoll(); }, [build?.building, startPoll]);
@@ -97,6 +125,14 @@ export default function LibrariesPage() {
   };
 
   const removePkg = (name: string) => setEditable((list) => list.filter((p) => p.name !== name));
+
+  /** Bấm vào một package đang cảnh báo = mở đúng nó ra để thêm, không mở cả bảng. */
+  const moGoiThieu = (ten: string) => {
+    setErr(null);
+    setDaMo((ds) => (ds.includes(ten) ? ds : [...ds, ten]));
+    setEditable((list) =>
+      list.some((p) => p.name === ten) ? list : [...list, { name: ten, version: "", protected: false }]);
+  };
 
   // Sửa version trực tiếp; để trống = backend tự resolve lại version tương thích khi áp dụng.
   const editVer = (name: string, version: string) =>
@@ -125,6 +161,49 @@ export default function LibrariesPage() {
       {build && build.status !== "IDLE" && <BuildBanner build={build} />}
 
       {err && <Banner tone="error" onClose={() => setErr(null)}>{err}</Banner>}
+
+      {/* Bộ chấm đã nhận đòi package mà ảnh chấm chưa có → bài sinh viên sẽ không biên dịch nổi.
+          Nói ra ngay lúc này, thay vì để phát hiện giữa lúc đang chấm cả lớp. */}
+      {thieu.length > 0 && (
+        <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-4">
+          <p className="flex items-center gap-2 text-sm font-bold text-amber-800">
+            <AlertTriangle size={16} /> Ảnh chấm còn thiếu {thieu.length} thư viện mà bộ chấm đòi hỏi
+          </p>
+          <p className="mt-1 text-xs leading-relaxed text-amber-700">
+            {chiXem
+              ? "Bấm vào tên bên dưới để thêm đúng thư viện đó, rồi dựng lại ảnh chấm. Thiếu thì bài sinh viên không biên dịch được và cả lượt chấm hỏng."
+              : "Bấm vào tên bên dưới để thêm vào ảnh chấm."}
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {thieu.map((g) => {
+              const daThem = daMo.includes(g.ten) || editable.some((p) => p.name === g.ten);
+              return (
+                <button
+                  key={g.ten}
+                  onClick={() => moGoiThieu(g.ten)}
+                  disabled={busy || daThem}
+                  title={`Đề cần: ${g.cac_de.join(", ")}`}
+                  className="flex items-center gap-1.5 rounded-lg border border-amber-300 bg-white px-2.5 py-1.5 font-mono text-xs font-semibold text-amber-800 transition-colors hover:border-amber-400 hover:bg-amber-100 disabled:opacity-50"
+                >
+                  {daThem ? <CheckCircle2 size={13} /> : <Plus size={13} />} {g.ten}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {!docDuocAnh && (
+        <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-3.5 text-xs text-slate-600">
+          <p className="flex items-center gap-2 font-semibold text-slate-700">
+            <Info size={15} /> Chưa đọc được ảnh chấm
+          </p>
+          <p className="mt-1 leading-relaxed">
+            Docker chưa bật hoặc ảnh chưa dựng, nên chưa đối chiếu được thư viện của máy với thư
+            viện mà bộ chấm đòi. Chưa biết thì chưa kết luận là thiếu.
+          </p>
+        </div>
+      )}
 
       {loading ? (
         <div className="flex items-center justify-center py-20 text-slate-400"><Loader2 size={24} className="animate-spin" /></div>
@@ -166,18 +245,26 @@ export default function LibrariesPage() {
                     <td className="px-5 py-2.5">
                       <input
                         value={p.version}
-                        disabled={busy}
+                        disabled={busy || !moDuoc(p.name)}
                         onChange={(e) => editVer(p.name, e.target.value)}
                         placeholder="tự chọn"
-                        title="Để trống = tự chọn version tương thích"
+                        title={moDuoc(p.name)
+                          ? "Để trống = tự chọn version tương thích"
+                          : "Bản người chấm chỉ xem. Sửa được khi thư viện này đang bị cảnh báo thiếu."}
                         className="w-32 rounded-md border border-slate-200 bg-white px-2 py-1 font-mono text-xs text-slate-600 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-100 disabled:bg-slate-100"
                       />
                     </td>
                     <td className="px-5 py-2.5 text-right">
-                      <button onClick={() => removePkg(p.name)} disabled={busy}
-                        className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600 disabled:opacity-40">
-                        <Trash2 size={14} />
-                      </button>
+                      {moDuoc(p.name) ? (
+                        <button onClick={() => removePkg(p.name)} disabled={busy}
+                          className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600 disabled:opacity-40">
+                          <Trash2 size={14} />
+                        </button>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">
+                          <Lock size={10} /> chỉ xem
+                        </span>
+                      )}
                     </td>
                   </tr>
                 );
@@ -185,7 +272,9 @@ export default function LibrariesPage() {
             </tbody>
           </table>
 
-          {/* Thêm package */}
+          {/* Thêm package — bản người chấm không có ô này. Họ chỉ thêm được qua chỗ cảnh báo
+              thiếu ở trên, tức là chỉ thêm đúng thứ bộ chấm đang đòi. */}
+          {!chiXem && (
           <div className="flex flex-wrap items-end gap-2 border-t border-slate-100 bg-slate-50/40 px-5 py-3.5">
             <label className="flex-1 min-w-[160px]">
               <span className="mb-1 block text-[11px] font-semibold text-slate-500">Tên package</span>
@@ -208,11 +297,14 @@ export default function LibrariesPage() {
               <Plus size={15} /> Thêm
             </button>
           </div>
+          )}
 
           {/* Áp dụng */}
           <div className="flex items-center justify-between border-t border-slate-100 px-5 py-3.5">
             <div className="text-xs text-slate-500">
-              {dirty ? "Có thay đổi chưa áp dụng." : "Chưa có thay đổi."}
+              {dirty ? "Có thay đổi chưa áp dụng."
+                : chiXem ? "Bản người chấm — danh sách này chỉ để xem."
+                : "Chưa có thay đổi."}
             </div>
             <div className="flex items-center gap-2">
               {dirty && !busy && (

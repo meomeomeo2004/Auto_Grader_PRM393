@@ -11,6 +11,9 @@ import 'package:flutter/services.dart'
     show FontLoader, MethodCall, SystemChannels;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/in_memory_shared_preferences_async.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_async_platform_interface.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import '../lib/main.dart' as student_app;
@@ -180,6 +183,9 @@ Future<void> _runBehaviorScenario(
     if (_bool(_asMap(testCase['initial_state'])['reset_storage'], true)) {
       await tester.runAsync(() => _resetDatabase(databaseContract));
     }
+    // Kho lưu nhanh dựng VÔ ĐIỀU KIỆN, kể cả khi đề không khai gì: thiếu nó thì bài
+    // nộp nào chạm vào SharedPreferences cũng chết ngay dòng đầu.
+    _capKhoLuuNhanh(_asMap(_asMap(testCase['initial_state'])['preferences']));
     await tester.runAsync(_loadRealFonts);
     stdout.writeln('${_stageMarker}STUDENT_APP_BOOT');
     await _bootStudentApp(tester, timeout);
@@ -617,6 +623,12 @@ Future<void> _assertCheckpoint(
     return;
   }
 
+  // GIÁ TRỊ ĐÃ LƯU trong bộ nhớ nhanh của app (SharedPreferences).
+  if (kind == 'preferences_observation') {
+    await _assertLuuNhanh(tester, checkpoint);
+    return;
+  }
+
   // KHONG VO BO CUC — ca luong (boot + moi buoc) khong co RenderFlex overflow nao.
   // Khong can gia tri chuan: tren Golden ma tran thi tieu chi nay truot ngay luc
   // capture, tuc nguoi ra de biet bai mau cua minh hong truoc khi sinh vien nop.
@@ -666,8 +678,9 @@ Future<void> _assertCheckpoint(
     );
     // THÀNH PHẦN LẶP: Golden có nhiều thể hiện thì "có mặt" nghĩa là có ở MỌI dòng,
     // không phải có ở một dòng. Thiếu chốt này thì bài vẽ nút Xóa đúng dòng đầu vẫn đạt.
+    // Cùng lý do với phép đo màu: chỉ áp luật "mỗi dòng một cái" cho nhóm LẶP THẬT.
     final lap = _asMap(_asMap(checkpoint['expect'])['repeat']);
-    if (visible && lap.isNotEmpty) {
+    if (visible && _bool(lap['per_row'], false)) {
       _kiemDuMoiDong(_finder(target).evaluate().toList(), lap, moTa);
     }
     return;
@@ -869,6 +882,8 @@ String _moTaTarget(Map<String, dynamic> target) {
     final v = _text(target, khoa);
     if (v.isNotEmpty) return '"$v"';
   }
+  final anh = _text(target, 'image');
+  if (anh.isNotEmpty) return 'ảnh "$anh"';
   final icon = _text(target, 'icon');
   if (icon.isNotEmpty) {
     final ma = _maIcon(icon);
@@ -1091,6 +1106,134 @@ Future<void> _resetDatabase(Map<String, dynamic> contract) async {
   }
   await target.parent.create(recursive: true);
   await fixture.copy(path);
+}
+
+// ============ KHO LƯU NHANH (SharedPreferences) ============
+// Vì sao engine phải TỰ dựng kho: trong flutter_test không có plugin nền tảng nào, nên
+// `SharedPreferences.getInstance()` ném ngay MissingPluginException ("No implementation
+// found for method getAll on channel plugins.flutter.io/shared_preferences") — đo
+// 8/9/2026. Không dựng kho thì mọi bài có dùng SharedPreferences chết ở dòng đầu tiên
+// dù code hoàn toàn đúng, và cả luồng phía sau mất trắng.
+//
+// Phải dựng CẢ HAI kho vì đo được chúng TÁCH BIỆT, kho này không thấy dữ liệu kho kia:
+//  - `setMockInitialValues` cho API cũ `SharedPreferences`;
+//  - `InMemorySharedPreferencesAsync` cho API mới `SharedPreferencesAsync` và
+//    `SharedPreferencesWithCache`.
+// Sinh viên viết theo API nào cũng phải chạy được, nên nạp cả hai và lúc đọc tra cả hai.
+
+/// Chuẩn hoá giá trị từ JSON của đề về kiểu SharedPreferences nhận: danh sách trong
+/// JSON là List<dynamic> nhưng kho chỉ nhận List<String>.
+Map<String, Object> _giaTriLuuNhanh(Map<String, dynamic> khai) {
+  final ra = <String, Object>{};
+  khai.forEach((khoa, giaTri) {
+    if (giaTri == null) return;
+    if (giaTri is List) {
+      ra[khoa] = giaTri.map((e) => e?.toString() ?? '').toList();
+    } else {
+      ra[khoa] = giaTri as Object;
+    }
+  });
+  return ra;
+}
+
+/// Dựng kho với trạng thái đầu của kịch bản. Gọi TRƯỚC khi mở app, luôn luôn — kể cả
+/// khi đề không khai gì, vì bài nộp vẫn có thể dùng kho và không được chết vì thiếu nó.
+void _capKhoLuuNhanh(Map<String, dynamic> banDau) {
+  final giaTri = _giaTriLuuNhanh(banDau);
+  SharedPreferences.setMockInitialValues(giaTri);
+  SharedPreferencesAsyncPlatform.instance =
+      InMemorySharedPreferencesAsync.withData(giaTri);
+}
+
+/// Đọc một khoá trong kho lưu nhanh, tra kho MỚI trước rồi tới kho cũ.
+///
+/// Vì sao đọc được ngay mà không cần khởi động lại app: test và app chạy cùng một
+/// isolate nên dùng chung kho. Nhờ vậy tiêu chí "có thật sự lưu không" phân biệt được
+/// bài lưu thật với bài chỉ `setState` — bài chỉ `setState` thì màn hình vẫn đổi đúng
+/// nhưng kho rỗng.
+Future<Object?> _docLuuNhanh(String khoa) async {
+  // Kho MỚI không có hàm "đọc tất cả" ở API công khai, chỉ có hàm đọc theo kiểu. Thử
+  // lần lượt từng kiểu và nuốt lỗi ép kiểu — dùng đúng API công khai thì không phụ
+  // thuộc chi tiết bên trong gói, đổi bản gói không vỡ.
+  try {
+    final moi = SharedPreferencesAsync();
+    if (await moi.containsKey(khoa)) {
+      for (final doc in <Future<Object?> Function()>[
+        () => moi.getBool(khoa),
+        () => moi.getInt(khoa),
+        () => moi.getDouble(khoa),
+        () => moi.getString(khoa),
+        () => moi.getStringList(khoa),
+      ]) {
+        try {
+          final v = await doc();
+          if (v != null) return v;
+        } catch (_) {
+          // Sai kiểu thì thử kiểu kế tiếp.
+        }
+      }
+    }
+  } catch (_) {
+    // Kho mới hỏng thì vẫn còn kho cũ; đừng để lỗi hạ tầng thành lỗi bài làm.
+  }
+  try {
+    final cu = await SharedPreferences.getInstance();
+    await cu.reload();
+    if (cu.containsKey(khoa)) return cu.get(khoa);
+  } catch (_) {
+    // Không dựng được kho cũ thì coi như chưa lưu gì.
+  }
+  return null;
+}
+
+/// Tiêu chí GIÁ TRỊ ĐÃ LƯU. Cùng khuôn với widget_state: lúc thu oracle chỉ đọc để
+/// tiêu chí khai sai nổ ngay tại chỗ, lúc chấm mới so với giá trị chuẩn.
+Future<void> _assertLuuNhanh(
+  WidgetTester tester,
+  Map<String, dynamic> checkpoint,
+) async {
+  final khoa = _text(checkpoint, 'key');
+  if (khoa.isEmpty) {
+    throw ArgumentError(
+      'Tiêu chí giá trị đã lưu phải khai "key" — không biết đọc khoá nào.',
+    );
+  }
+  Object? doDuoc;
+  await tester.runAsync(() async {
+    doDuoc = await _docLuuNhanh(khoa);
+  });
+  if (_dangThuOracle) return;
+
+  final mongDoi = _asMap(checkpoint['expect'])['value'];
+  // Khai rõ "không được lưu khoá này" — dùng cho tiêu chí kiểu đăng xuất phải xoá.
+  if (_bool(_asMap(checkpoint['expect'])['absent'], false)) {
+    if (doDuoc != null) {
+      throw StateError(
+        'Khoá "$khoa" lẽ ra phải bị xoá khỏi bộ nhớ của app, nhưng vẫn còn giá trị '
+        '${_chuanHoaTrangThai(doDuoc)}.',
+      );
+    }
+    return;
+  }
+  if (mongDoi == null) {
+    throw StateError(
+      'Tiêu chí giá trị đã lưu của khoá "$khoa" chưa có giá trị chuẩn — '
+      'hãy capture lại oracle rồi publish lại.',
+    );
+  }
+  if (doDuoc == null) {
+    throw StateError(
+      'App không lưu gì vào khoá "$khoa". Đổi trên màn hình thôi chưa đủ, '
+      'lựa chọn phải được ghi lại để lần mở sau còn đọc ra.',
+    );
+  }
+  _soGiaTriChuan(
+    mongDoi,
+    doDuoc,
+    _double(checkpoint['tolerance_pct'], 0),
+    'Bộ nhớ của app',
+    'khoá "$khoa"',
+  );
 }
 
 /// Chụp cây widget hiện tại thành ảnh RGBA. Chạy BÊN TRONG tester.runAsync vì
@@ -1479,6 +1622,52 @@ Finder _laPhanTu(Element x) => find.byElementPredicate(
   description: 'phần tử ${x.widget.runtimeType}',
 );
 
+// ============================ ẢNH ============================
+// Cùng một bệnh với nút icon: một tấm ảnh không có nhãn thì trên web KHÔNG có aria-label
+// nào, nên "Quét UI" qua DOM không thấy nó. Đúng những thứ cần chấm — ảnh đại diện — lại
+// là thứ trình duyệt không phơi ra. Máy chấm nhìn thẳng cây widget nên thấy đủ.
+//
+// Nhận CẢ Image lẫn CircleAvatar và ảnh nền của Container: bắt sinh viên phải dùng đúng
+// một cách vẽ chỉ để máy tìm được là lại đẻ ra việc thừa, đúng cái đã bỏ ở gói icon.
+
+/// Nguồn ảnh của một widget, không phụ thuộc cách vẽ.
+ImageProvider? _nguonAnhCua(Widget w) {
+  if (w is Image) return w.image;
+  if (w is CircleAvatar) return w.backgroundImage ?? w.foregroundImage;
+  if (w is FadeInImage) return w.image;
+  if (w is Container) {
+    final trangTri = w.decoration;
+    if (trangTri is BoxDecoration) return trangTri.image?.image;
+  }
+  if (w is DecoratedBox) {
+    final trangTri = w.decoration;
+    if (trangTri is BoxDecoration) return trangTri.image?.image;
+  }
+  return null;
+}
+
+/// Tên nguồn ảnh để so và để in ra cho người đọc log.
+String _tenNguonAnh(ImageProvider nguon) {
+  if (nguon is AssetImage) return nguon.assetName;
+  if (nguon is ExactAssetImage) return nguon.assetName;
+  if (nguon is NetworkImage) return nguon.url;
+  if (nguon is MemoryImage) return 'memory';
+  return nguon.runtimeType.toString();
+}
+
+/// Đề khai `assets/avatar_2.jpg` hay chỉ `avatar_2.jpg` đều khớp: người ra đề nghĩ theo
+/// tên file, còn đường dẫn đầy đủ là chuyện của cách đóng gói.
+bool _khopTenAnh(String khai, String that) {
+  final k = khai.trim();
+  if (k.isEmpty) return false;
+  return that == k || that.endsWith('/$k');
+}
+
+Finder _timTheoAnh(String khai) => find.byWidgetPredicate((Widget w) {
+  final nguon = _nguonAnhCua(w);
+  return nguon != null && _khopTenAnh(khai, _tenNguonAnh(nguon));
+}, description: 'ảnh "$khai"');
+
 Finder _timIconThuan(int ma) => find.byWidgetPredicate(
   (Widget w) => w is Icon && w.icon?.codePoint == ma,
   description: 'Icon 0x${ma.toRadixString(16)}',
@@ -1656,9 +1845,14 @@ Future<void> _assertComponentColor(
   // Thành phần lặp thì đo MỌI thể hiện: tô đúng nút Xóa dòng đầu rồi bỏ quên các dòng
   // sau là lỗi người chấm nhìn thấy ngay, máy cũng phải thấy.
   final khungs = <Rect>[];
-  final cac = _asMap(_asMap(checkpoint['expect'])['repeat']).isEmpty
-      ? const <Element>[]
-      : _finder(target).evaluate().toList();
+  // CHỈ đo mọi thể hiện khi chúng là một nhóm LẶP THẬT (mỗi dòng một cái, đứng cùng chỗ).
+  // Cùng một tấm ảnh có thể vừa nằm ở ô chọn vừa nằm trên dòng, hai chỗ cắt khác nhau nên
+  // màu chủ đạo khác nhau; đo cả hai rồi so với MỘT màu chuẩn thì chính Golden trượt —
+  // đã xảy ra thật với avatar_3 và avatar_4 ngày 8/9/2026.
+  final lapMau = _asMap(_asMap(checkpoint['expect'])['repeat']);
+  final cac = _bool(lapMau['per_row'], false)
+      ? _finder(target).evaluate().toList()
+      : const <Element>[];
   if (cac.length >= 2) {
     for (final e in cac) {
       khungs.add(tester.getRect(_laPhanTu(e)));
@@ -1868,6 +2062,16 @@ Map<String, dynamic>? _doLap(WidgetTester tester, Finder finder) {
       }
     }
   }
+  // Cùng một tấm ảnh có thể vừa nằm ở ô chọn vừa nằm trên dòng danh sách. Chúng KHÔNG
+  // phải một nhóm lặp: chỗ đứng trong khung của chúng khác hẳn nhau. Nếu vẫn coi là lặp
+  // thì tiêu chí vị trí so từng cái với giá trị TRUNG BÌNH, và cả hai đều lệch — Golden
+  // trượt chính tiêu chí của mình. Chỉ nhận là lặp khi chúng đứng giống nhau.
+  const double lechToiDa = 5;
+  if (theoDong && phai.isNotEmpty) {
+    double bienDo(List<double> l) =>
+        l.reduce((a, b) => a > b ? a : b) - l.reduce((a, b) => a < b ? a : b);
+    if (bienDo(phai) > lechToiDa || bienDo(doc) > lechToiDa) theoDong = false;
+  }
   ra['per_row'] = theoDong;
   if (theoDong) {
     double tb(List<double> l) => l.reduce((a, b) => a + b) / l.length;
@@ -1970,6 +2174,45 @@ List<Map<String, dynamic>> _kiemKeIcon(WidgetTester tester) {
     });
   });
   ra.sort((a, b) => _int(a['code'], 0).compareTo(_int(b['code'], 0)));
+  return ra;
+}
+
+/// KIỂM KÊ ẢNH trên màn hình lúc capture, cùng mục đích với kiểm kê icon: bày ra cho
+/// người ra đề tick, vì ảnh không nhãn thì "Quét UI" qua DOM không thấy.
+List<Map<String, dynamic>> _kiemKeAnh(WidgetTester tester) {
+  final theoTen = <String, int>{};
+  for (final e in find.byElementPredicate(
+    (Element x) => _nguonAnhCua(x.widget) != null,
+    description: 'widget có ảnh',
+  ).evaluate()) {
+    final nguon = _nguonAnhCua(e.widget);
+    if (nguon == null) continue;
+    final ten = _tenNguonAnh(nguon);
+    theoTen[ten] = (theoTen[ten] ?? 0) + 1;
+  }
+  final ra = <Map<String, dynamic>>[];
+  theoTen.forEach((String ten, int _) {
+    final finder = _timTheoAnh(ten);
+    final cac = finder.evaluate().toList();
+    Rect? khung;
+    try {
+      if (cac.isNotEmpty) khung = tester.getRect(_laPhanTu(cac.first));
+    } catch (_) {
+      // Ảnh ngoài khung nhìn thì chưa có toạ độ; vẫn liệt kê để người ra đề thấy.
+    }
+    final lap = cac.length >= 2 ? _doLap(tester, finder) : null;
+    ra.add(<String, dynamic>{
+      'image': ten,
+      'count': cac.length,
+      if (cac.isNotEmpty) 'widget_type': cac.first.widget.runtimeType.toString(),
+      if (khung != null) 'center_x': khung.center.dx,
+      if (khung != null) 'center_y': khung.center.dy,
+      if (khung != null) 'width': khung.width,
+      if (khung != null) 'height': khung.height,
+      if (lap != null) 'per_row': _bool(lap['per_row'], false),
+    });
+  });
+  ra.sort((a, b) => _text(a, 'image').compareTo(_text(b, 'image')));
   return ra;
 }
 
@@ -2568,11 +2811,22 @@ Future<void> _luuBoCucChuan(
     // TRẠNG THÁI WIDGET: đọc ngay tại đây, cùng khoảnh khắc với vị trí và màu.
     // Không có thao tác nào xen giữa chỗ này và vòng assert nên giá trị đo được
     // đúng bằng giá trị mà tiêu chí sẽ nhìn thấy lúc chấm.
-    if (kind == 'widget_state' || kind == 'text_style' || kind == 'theme_value') {
+    if (kind == 'widget_state' ||
+        kind == 'text_style' ||
+        kind == 'theme_value' ||
+        kind == 'preferences_observation') {
       try {
+        // Giá trị đã lưu phải đọc bất đồng bộ (kho trả Future) nên tách ra trước.
+        Object? daLuu;
+        if (kind == 'preferences_observation') {
+          await tester.runAsync(() async {
+            daLuu = await _docLuuNhanh(_text(checkpoint, 'key'));
+          });
+        }
         final giaTri = switch (kind) {
           'text_style' => _docKieuChu(tester, checkpoint),
           'theme_value' => _docGiaTriTheme(tester, _text(checkpoint, 'property')),
+          'preferences_observation' => daLuu,
           _ => _docTrangThai(tester, checkpoint),
         };
         if (giaTri != null) {
@@ -2621,10 +2875,12 @@ Future<void> _luuBoCucChuan(
     };
   }
   final kiemKeIcon = _kiemKeIcon(tester);
+  final kiemKeAnh = _kiemKeAnh(tester);
   if (thanhPhan.isEmpty &&
       _moTaNhanDaThu.isEmpty &&
       _dinhDanhDaThu.isEmpty &&
-      kiemKeIcon.isEmpty) {
+      kiemKeIcon.isEmpty &&
+      kiemKeAnh.isEmpty) {
     return;
   }
   final tep = File(
@@ -2649,15 +2905,16 @@ Future<void> _luuBoCucChuan(
       // Định danh theo khoá cũ của bước (Gói 1 kế hoạch Định danh Semantics); backend
       // nướng vào target bước, giữ nhãn cạnh bên làm đường lui.
       'identifiers': _dinhDanhDaThu,
-      // Kiểm kê icon cho màn soạn đề: nút chỉ có hình không quét được qua DOM web.
+      // Kiểm kê icon và ảnh cho màn soạn đề: cả hai đều không quét được qua DOM web.
       'icons': kiemKeIcon,
+      'images': kiemKeAnh,
     }),
   );
   stdout.writeln(
     'Đã đo bố cục chuẩn: ${thanhPhan.length} thành phần, '
     '${_moTaNhanDaThu.length} nhãn có đường dự phòng, '
     '${_dinhDanhDaThu.length} bước có định danh, '
-    '${kiemKeIcon.length} loại icon.',
+    '${kiemKeIcon.length} loại icon, ${kiemKeAnh.length} ảnh.',
   );
 }
 
@@ -3007,13 +3264,10 @@ Object? _docThuocTinhWidget(Widget w, String ten) {
       if (w is Icon) return w.icon?.codePoint;
       break;
     case 'image_source':
-      if (w is Image) {
-        final nguon = w.image;
-        if (nguon is AssetImage) return nguon.assetName;
-        if (nguon is NetworkImage) return nguon.url;
-        if (nguon is MemoryImage) return 'memory';
-        return nguon.runtimeType.toString();
-      }
+      // Qua _nguonAnhCua nen doc duoc ca CircleAvatar va anh nen cua Container, khong
+      // bat sinh vien phai dung dung mot cach ve chi de may cham doc duoc.
+      final nguonAnh = _nguonAnhCua(w);
+      if (nguonAnh != null) return _tenNguonAnh(nguonAnh);
       break;
     case 'current_index':
       if (w is BottomNavigationBar) return w.currentIndex;
@@ -3796,6 +4050,16 @@ Finder _finder(Map<String, dynamic> target, {bool duPhong = false}) {
       }
     }
   }
+  // ẢNH — khai thẳng tên file trong hợp đồng đề ("assets/avatar_2.jpg"). Cùng lý do với
+  // icon: một tấm ảnh không có nhãn thì không còn đường nào khác để trỏ tới nó.
+  final khaiAnh = _text(target, 'image');
+  if (khaiAnh.isNotEmpty) {
+    final finder = _timTheoAnh(khaiAnh);
+    if (_locatorDungDuoc(finder, target, action: duPhong)) return finder;
+    if (label.isEmpty && hint.isEmpty && _text(target, 'text').isEmpty) {
+      return find.byWidgetPredicate((_) => false);
+    }
+  }
   if (label.isNotEmpty) {
     final semantics = find.bySemanticsLabel(label);
     if (_locatorDungDuoc(semantics, target, action: duPhong)) return semantics;
@@ -3906,6 +4170,7 @@ Finder _finder(Map<String, dynamic> target, {bool duPhong = false}) {
     'value_key',
     'key',
     'icon',
+    'image',
     'label',
     'hint',
     'text',

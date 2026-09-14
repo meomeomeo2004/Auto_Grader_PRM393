@@ -73,7 +73,7 @@ echo   - Neu VUA cai Docker lan dau: khoi dong lai may, mo Docker Desktop 1 lan,
 echo     roi chay lai  grader-setup  (de build anh grading-base).
 echo   - Chay app: double-click  GraderLauncher.exe  hoac go  run
 echo     trong terminal. Launcher chi mo backend va frontend.
-echo   - Sau do mo  http://localhost:3000
+echo   - Sau do mo dia chi ma trinh khoi dong in ra o dong cuoi
 echo.
 pause
 endlocal

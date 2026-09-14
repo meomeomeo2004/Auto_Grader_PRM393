@@ -92,3 +92,7 @@ fixtures/result-json-v2/submissions/*/pubspec.lock
 
 # Ghi chu rieng cho tro ly AI tren may nay, khong day len kho chung.
 /CLAUDE.md
+
+# Ban da cat theo vai do dong-goi.ps1 sinh ra - la ban sao, khong phai nguon.
+/dist/
+/vai.ps1

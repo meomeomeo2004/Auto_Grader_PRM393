@@ -10,6 +10,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import com.example.grader.config.Vai;
+import org.springframework.context.annotation.Profile;
 import org.springframework.web.bind.annotation.*;
 
 import java.io.ByteArrayOutputStream;
@@ -24,6 +26,7 @@ import java.util.zip.ZipOutputStream;
  * "Đọc & nhận xét bài làm bằng AI": cầu nối giữa kết quả chấm (result_json) và AI agent
  * prm393-feedback-bot. FE nhập MÃ ĐỀ → gọi lần lượt từng SV để dựng bảng nhận xét + xuất Excel.
  */
+@Profile(Vai.NGUOI_CHAM)   // Nhận xét AI đi kèm kết quả chấm — chỉ bản người chấm.
 @RestController
 @RequestMapping("/api/feedback")
 @CrossOrigin(origins = "*")

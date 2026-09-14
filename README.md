@@ -88,7 +88,7 @@ Vì vậy người mới clone repo vẫn chạy được sau khi có Docker, Ja
 ### Bước 1 — Khởi động MySQL
 
 ```bash
-docker compose up -d        # chạy MySQL 8.0 (cổng 3306), tự nạp mysql/init.sql
+docker compose up -d        # chạy MySQL 8.0 (cổng 3306) - không tạo sẵn database nào
 ```
 
 ### Bước 2 — Build ảnh nền chấm bài (chỉ 1 lần)
@@ -128,7 +128,7 @@ Copy-Item frontend/.env.example frontend/.env.local
 notepad frontend/.env.local
 ```
 
-> 💡 **Triển khai trọn gói trên 1 máy Linux**: `docker compose --profile full up -d --build` (bật cả service backend).
+> 💡 **Schema tự sinh**: không phải tạo database bằng tay. Mỗi vai dùng schema riêng (`chamthi_gv` / `chamthi_nc`, xem `vai-cau-hinh.ps1`) và chuỗi kết nối mang sẵn `createDatabaseIfNotExist=true`, nên lần chạy đầu backend tự dựng schema cùng toàn bộ bảng.
 
 ---
 
@@ -161,7 +161,7 @@ Tất cả có giá trị mặc định — chỉ ghi đè khi cần.
 
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
-| `SPRING_DATASOURCE_URL` | `jdbc:mysql://localhost:3306/chamthi_db` | Kết nối MySQL |
+| `SPRING_DATASOURCE_URL` | *không có mặc định* | Kết nối MySQL. Schema theo vai: `chamthi_gv` / `chamthi_nc`. Trình khởi động tự đặt biến này; thiếu nó là backend dừng ngay |
 | `SPRING_DATASOURCE_USERNAME` / `_PASSWORD` | `root` / `123456` | Tài khoản DB |
 | `GRADER_MAX_CONCURRENT` | `8` | Số bài chấm song song (= số container đồng thời) |
 | `GRADER_TIMEOUT_SECONDS` | `240` | Timeout mỗi bài (giây) |
@@ -239,11 +239,12 @@ Grader_App/
 │       ├── login·register·profile/
 │       └── components/     # SidebarLayout, AuthProvider
 ├── grader-base/            # Dockerfile.base + script chấm + pubspec base
-├── exams/                  # Testcase từng đề (mount lúc chấm)
-├── submissions/            # File ZIP bài nộp đã lưu (audit)
-├── mysql/init.sql          # Khởi tạo schema + bảng teachers
-└── docker-compose.yml      # MySQL (+ backend khi --profile full)
+├── dong-goi.ps1            # Cắt repo thành hai bản theo vai (gv / nc)
+├── vai-cau-hinh.ps1        # Cổng và schema của từng vai - một nguồn sự thật duy nhất
+└── docker-compose.yml      # Chỉ MySQL
 ```
+
+`exams/` và `submissions/` không nằm ở gốc repo nữa: chúng là **dữ liệu của từng bản chạy**, sinh ra trong `dist/gv/` hoặc `dist/nc/` khi bạn xuất bản đề và chấm bài.
 
 ---
 

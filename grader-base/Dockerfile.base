@@ -37,6 +37,9 @@ WORKDIR /app
 # nên ta resolve & "đóng băng" toàn bộ package ngay trong ảnh nền.
 COPY pubspec.base.yaml ./pubspec_base.yaml
 COPY pubspec.base.yaml ./pubspec.yaml
+# Thu muc assets phai TON TAI truoc khi pub get, khong thi pub get bao thieu thu muc.
+# De nao co anh se mount de len thu muc nay luc cham.
+RUN mkdir -p /app/assets && echo "cho de thi mount anh vao day" > /app/assets/.giu_cho
 RUN flutter pub get
 
 # Tải sẵn artifacts engine để lúc chấm KHÔNG cần internet.

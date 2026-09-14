@@ -24,6 +24,10 @@ dependencies:
   image_picker: ^1.2.3
   path_provider: ^2.1.6
   sembast_web: ^2.4.5+1
+  # Bộ nhớ nhanh của app. Engine cũng import gói này: nó phải TỰ dựng kho giả trước khi
+  # mở app, vì trong flutter_test không có plugin nền tảng nào nên bài nộp chạm vào
+  # SharedPreferences là chết ngay với MissingPluginException.
+  shared_preferences: ^2.5.0
 
 dev_dependencies:
   flutter_test:
@@ -32,3 +36,8 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  # Anh di kem de thi duoc mount vao /app/assets luc cham. Phai khai o day thi
+  # `flutter test` moi dong chung vao goi tai nguyen; thieu dong nay thi Image.asset
+  # nem "Unable to load asset" du file da nam dung cho (do 8/9/2026).
+  assets:
+    - assets/

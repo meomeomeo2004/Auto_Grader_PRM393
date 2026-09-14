@@ -5,6 +5,8 @@ import com.example.grader.service.BatchGradingService;
 import com.example.grader.service.GradingRuntimeSettingsService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
+import com.example.grader.config.Vai;
+import org.springframework.context.annotation.Profile;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.LinkedHashMap;
@@ -14,6 +16,7 @@ import java.util.Map;
  * Cấu hình HIỆU NĂNG chấm bài cho trang "Chấm bài tự động": CPU/RAM mỗi container Docker và số
  * bài chấm song song. Đổi được lúc đang chạy, không cần sửa application.yml rồi khởi động lại.
  */
+@Profile(Vai.NGUOI_CHAM)   // Cấu hình hiệu năng của máy chấm — chỉ bản người chấm.
 @RestController
 @RequestMapping("/api/grading-runtime")
 @CrossOrigin(origins = "*")

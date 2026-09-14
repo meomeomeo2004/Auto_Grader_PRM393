@@ -9,7 +9,7 @@ for %%d in (Framework64 Framework) do (
 )
 
 if not defined CSC (
-  echo [LOI] Khong tim thay csc.exe (.NET Framework 4).
+  echo [LOI] Khong tim thay csc.exe ^(.NET Framework 4^).
   echo       Cach khac: dung ps2exe ^(xem huong dan trong cau tra loi^).
   pause
   exit /b 1

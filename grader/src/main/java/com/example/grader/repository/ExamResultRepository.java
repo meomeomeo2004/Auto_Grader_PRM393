@@ -5,12 +5,10 @@ import com.example.grader.dto.ExamHistoryRow;
 import com.example.grader.entity.ExamResult;
 import com.example.grader.entity.ExamStatus;
 import com.example.grader.entity.GradingStatus;
-import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
-import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -25,59 +23,10 @@ public interface ExamResultRepository extends JpaRepository<ExamResult, Long> {
            "from ExamResult r where r.batchId = :batchId order by r.studentId")
     List<com.example.grader.dto.ResultRow> findRowsByBatchId(@Param("batchId") String batchId);
 
-    // NHẸ cho Thống kê: chỉ điểm/trạng thái/mốc thời gian (không kéo LONGTEXT)
-    @Query("select new com.example.grader.dto.ResultStat(r.studentId, r.mode, r.score, r.status, " +
-           "r.submittedAt, r.updatedAt) from ExamResult r")
-    List<com.example.grader.dto.ResultStat> findAllStats();
+    // Màn hình Thống kê đã bị bỏ khi tách hai vai (13/9/2026): các truy vấn tổng hợp, phổ điểm
+    // và tiến độ 7 ngày đi theo nó. Còn lại ở đây chỉ là những truy vấn Lịch sử chấm còn dùng.
 
-    @Query("select new com.example.grader.dto.ResultStat(r.studentId, r.mode, r.score, r.status, " +
-           "r.submittedAt, r.updatedAt) from ExamResult r where r.examId = :examId")
-    List<com.example.grader.dto.ResultStat> findStatsByExamId(@Param("examId") String examId);
-
-    @Query("""
-        select count(r),
-               count(distinct r.studentId),
-               coalesce(sum(case when r.status = :done then 1 else 0 end), 0),
-               coalesce(sum(case when r.status = :error then 1 else 0 end), 0),
-               coalesce(sum(case when r.status = :queued then 1 else 0 end), 0),
-               coalesce(sum(case when r.status = :grading then 1 else 0 end), 0),
-               coalesce(sum(case when r.status = :manualReview then 1 else 0 end), 0),
-               coalesce(sum(case when r.status = :done and r.score >= :passThreshold then 1 else 0 end), 0),
-               coalesce(sum(case when r.status = :done and r.score < :passThreshold then 1 else 0 end), 0),
-               coalesce(avg(case when r.status = :done and r.score is not null then r.score else null end), 0)
-        from ExamResult r
-        where (:examId is null or r.examId = :examId)
-          and (r.mode is null or lower(r.mode) = 'submit')
-    """)
-    Object[] aggregateStats(@Param("examId") String examId,
-                            @Param("done") GradingStatus done,
-                            @Param("error") GradingStatus error,
-                            @Param("queued") GradingStatus queued,
-                            @Param("grading") GradingStatus grading,
-                            @Param("manualReview") GradingStatus manualReview,
-                            @Param("passThreshold") float passThreshold);
-
-    @Query("""
-        select coalesce(sum(case when r.status = :done and r.score is not null and r.score < 2 then 1 else 0 end), 0),
-               coalesce(sum(case when r.status = :done and r.score >= 2 and r.score < 4 then 1 else 0 end), 0),
-               coalesce(sum(case when r.status = :done and r.score >= 4 and r.score < 6 then 1 else 0 end), 0),
-               coalesce(sum(case when r.status = :done and r.score >= 6 and r.score < 8 then 1 else 0 end), 0),
-               coalesce(sum(case when r.status = :done and r.score >= 8 then 1 else 0 end), 0)
-        from ExamResult r
-        where (:examId is null or r.examId = :examId)
-          and (r.mode is null or lower(r.mode) = 'submit')
-    """)
-    Object[] scoreBuckets(@Param("examId") String examId, @Param("done") GradingStatus done);
-
-    @Query("select new com.example.grader.dto.ResultStat(r.studentId, r.mode, r.score, r.status, " +
-           "r.submittedAt, r.updatedAt) from ExamResult r " +
-           "where (:examId is null or r.examId = :examId) " +
-           "and (r.mode is null or lower(r.mode) = 'submit') " +
-           "and (r.updatedAt >= :since or (r.updatedAt is null and r.submittedAt >= :since))")
-    List<com.example.grader.dto.ResultStat> findTrendStatsSince(@Param("examId") String examId,
-                                                                 @Param("since") Instant since);
-
-    // Lấy toàn bộ bài của 1 đề thi — dùng cho thống kê
+    // Lấy toàn bộ bài của 1 đề thi
     List<ExamResult> findByExamId(String examId);
 
     /** Dọn lịch sử chấm khi xoá đề — không xoá thì trang Lịch sử vẫn còn nguyên bảng điểm cũ. */
@@ -106,12 +55,8 @@ public interface ExamResultRepository extends JpaRepository<ExamResult, Long> {
     List<ExamHistoryRow> findHistoryRowsByExamIdAndMode(@Param("examId") String examId,
                                                         @Param("mode") String mode);
 
-    // Tìm kiếm (thanh search header): theo mã SV / tên SV / mã đề
-    @Query("SELECT r FROM ExamResult r WHERE (r.mode IS NULL OR r.mode = 'submit') AND (" +
-           "LOWER(r.studentId)   LIKE LOWER(CONCAT('%', :q, '%')) OR " +
-           "LOWER(r.studentName) LIKE LOWER(CONCAT('%', :q, '%')) OR " +
-           "LOWER(r.examId)      LIKE LOWER(CONCAT('%', :q, '%'))) ORDER BY r.updatedAt DESC")
-    List<ExamResult> searchSubmissions(@Param("q") String q, Pageable pageable);
+    // searchSubmissions đã bỏ cùng ô tìm kiếm trên thanh tiêu đề: trang Lịch sử chấm đã có ô lọc
+    // riêng ngay trong bảng, nên đây là đường tìm thứ hai không ai dùng.
 
     // Danh sách examId đã từng được chấm — dùng để lọc dropdown thống kê
     @Query("select distinct r.examId from ExamResult r where r.examId is not null")

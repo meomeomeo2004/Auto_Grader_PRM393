@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { clsx } from "clsx";
 import { type ErrorKind, errorCopy } from "@/lib/errors";
+import { TRANG_CHU } from "@/lib/vai";
 
 /**
  * Màn báo lỗi dùng chung. Nội dung chữ lấy từ {@link errorCopy} nên mỗi loại lỗi
@@ -66,9 +67,9 @@ export default function ErrorScreen({
   const Icon = ICON[kind];
   const isPage = variant === "page";
   // Trang lỗi độc lập thì luôn cần lối thoát; màn lỗi nhúng đã có sidebar nên không cần.
-  // Trỏ THẲNG /statistics (trang chủ thật sự), không dùng "/" — "/" chỉ là một redirect,
-  // đi vòng thêm một nhịp mà kết quả vẫn là /statistics.
-  const home = homeHref === undefined ? (isPage ? "/statistics" : null) : homeHref;
+  // Trỏ THẲNG trang đầu của bản đang chạy, không dùng "/" — "/" chỉ là một redirect, đi vòng
+  // thêm một nhịp mà kết quả vẫn là chỗ đó. Hai vai có trang đầu khác nhau nên phải hỏi TRANG_CHU.
+  const home = homeHref === undefined ? (isPage ? TRANG_CHU : null) : homeHref;
 
   const card = (
     <div className="card mx-auto w-full max-w-md p-8 text-center">

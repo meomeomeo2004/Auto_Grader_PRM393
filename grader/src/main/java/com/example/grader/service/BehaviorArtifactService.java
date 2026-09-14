@@ -236,7 +236,10 @@ public class BehaviorArtifactService {
             Optional<BehaviorArtifact> row = artifacts
                     .findFirstBySuiteIdAndArtifactTypeAndActiveTrueOrderByVersionDesc(suiteId, type);
             status.put(type.name(), row.map(this::view).orElse(null));
-            if (row.isEmpty()) missing.add(type.name());
+            // STUDENT_DATABASE khong con bat buoc: engine chi doc hidden_fixture_path, khong
+            // bao gio mo student.db, va viec canh schema da chuyen sang khau kiem dong bo
+            // khung phat. Van bao trang thai de bo de cu tai len tu truoc con nhin thay.
+            if (row.isEmpty() && type != BehaviorArtifactType.STUDENT_DATABASE) missing.add(type.name());
         }
         return Map.of(
                 "suite_id", suiteId,
@@ -248,13 +251,13 @@ public class BehaviorArtifactService {
     public void requireComplete(String suiteId) {
         Map<String, Object> readiness = readiness(suiteId);
         if (!Boolean.TRUE.equals(readiness.get("ready"))) {
-            throw new IllegalStateException("Bộ chấm chưa đủ 7 artifact: " + readiness.get("missing"));
+            throw new IllegalStateException("Bộ chấm chưa đủ 6 artifact: " + readiness.get("missing"));
         }
-        BehaviorArtifact studentDb = active(suiteId, BehaviorArtifactType.STUDENT_DATABASE);
         BehaviorArtifact hiddenDb = active(suiteId, BehaviorArtifactType.HIDDEN_DATABASE);
         BehaviorArtifact outputDb = active(suiteId, BehaviorArtifactType.OUTPUT_DATABASE);
-        compareSqliteSchema(Path.of(studentDb.getStoragePath()), Path.of(hiddenDb.getStoragePath()));
-        compareSqliteSchema(Path.of(studentDb.getStoragePath()), Path.of(outputDb.getStoragePath()));
+        // Output do chinh Golden sinh ra khi replay tren hidden: hai file phai cung cau truc,
+        // lech nghia la Golden doi schema giua chung.
+        compareSqliteSchema(Path.of(hiddenDb.getStoragePath()), Path.of(outputDb.getStoragePath()));
 
         BehaviorSuite suite = suites.findById(suiteId)
                 .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy behavior suite: " + suiteId));
@@ -280,10 +283,9 @@ public class BehaviorArtifactService {
 
     /** Các đầu vào tối thiểu phải ổn định trước khi ghi một luồng Golden. */
     public void requireRecordingInputs(String suiteId) {
-        BehaviorArtifact studentDb = active(suiteId, BehaviorArtifactType.STUDENT_DATABASE);
-        BehaviorArtifact hiddenDb = active(suiteId, BehaviorArtifactType.HIDDEN_DATABASE);
+        // Chi con hai dau vao that su can de ghi hinh: database an va Golden.
+        active(suiteId, BehaviorArtifactType.HIDDEN_DATABASE);
         active(suiteId, BehaviorArtifactType.GOLDEN_SOLUTION);
-        compareSqliteSchema(Path.of(studentDb.getStoragePath()), Path.of(hiddenDb.getStoragePath()));
     }
 
     /**
@@ -325,8 +327,13 @@ public class BehaviorArtifactService {
      */
     public void crossCheckGoldenDatabaseName(String suiteId, Path goldenZip) throws Exception {
         String declared = declaredDatabaseName(suiteId);
-        if (declared.isBlank()) return;
         Set<String> found = scanDartDatabaseNames(goldenZip);
+        // CHUA KHAI TEN: doc thang tu ma Golden thay vi bat nguoi ra de go tay. Chi tu dien khi
+        // ma Golden mo DUNG MOT file .db — nhieu ten thi khong doan bua, de nguoi ra de chon.
+        if (declared.isBlank()) {
+            if (found.size() == 1) ghiTenDatabase(suiteId, found.iterator().next());
+            return;
+        }
         if (!found.isEmpty() && !found.contains(declared)) {
             throw new IllegalArgumentException(
                     "Mã Golden mở database " + found + " nhưng hợp đồng bộ chấm khai '" + declared
@@ -354,6 +361,28 @@ public class BehaviorArtifactService {
                         throw new IllegalStateException("Không đọc được Golden ZIP để đối chiếu: " + e.getMessage(), e);
                     }
                 });
+    }
+
+    /** Ghi ten database vao hop dong cua bo cham, giu nguyen cac khoa khac. */
+    private void ghiTenDatabase(String suiteId, String ten) {
+        suites.findById(suiteId).ifPresent(suite -> {
+            try {
+                com.fasterxml.jackson.databind.node.ObjectNode contract =
+                        suite.getDatabaseContractJson() == null || suite.getDatabaseContractJson().isBlank()
+                                ? mapper.createObjectNode()
+                                : (com.fasterxml.jackson.databind.node.ObjectNode)
+                                        mapper.readTree(suite.getDatabaseContractJson());
+                contract.put("enabled", true);
+                contract.put("driver", "sqlite");
+                contract.put("database_name", ten);
+                suite.setDatabaseContractJson(mapper.writeValueAsString(contract));
+                suites.save(suite);
+            } catch (Exception e) {
+                // Khong ghi duoc thi de nguyen: nguoi ra de van go tay duoc o Buoc 1.
+                throw new IllegalStateException(
+                        "Khong ghi duoc ten database doc tu Golden: " + e.getMessage(), e);
+            }
+        });
     }
 
     private String declaredDatabaseName(String suiteId) {

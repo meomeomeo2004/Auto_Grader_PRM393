@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
+import { TRANG_CHU } from "@/lib/vai";
 
-/** Trang giáo viên mặc định mở dashboard thống kê. */
+/** Đường /teacher cũ còn trong bookmark — đẩy về trang đầu của bản đang chạy. */
 export default function TeacherHomeRedirect() {
-  redirect("/statistics");
+  redirect(TRANG_CHU);
 }

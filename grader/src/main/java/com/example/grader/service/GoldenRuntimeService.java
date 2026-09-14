@@ -30,12 +30,16 @@ import java.util.zip.ZipFile;
 public class GoldenRuntimeService {
     private static final long MAX_EXPANDED_BYTES = 1_000L * 1024 * 1024;
     private static final int MAX_ZIP_ENTRIES = 20_000;
-    // v22: bảng tick KHÔNG loại thành phần lặp lại nữa, bày một dòng kèm số lượng (v20 vứt
+    // v24: thêm lệnh snapshot_identifiers — liệt kê định danh của MỌI widget, kể cả widget
+    // không chữ (bảng tick bỏ qua chúng vì không có nhãn), để màn soạn đề gợi ý đích cho
+    // tiêu chí bố cục Ch.7 · v23: locator ĐỌC ĐƯỢC định danh của lớp bọc ngoài (v22 chỉ đọc trên chính node, nên
+    // nút chỉ có icon không ghi hình được và nút có chữ thì ghi bằng chữ chứ không bằng định
+    // danh) · v22: bảng tick KHÔNG loại thành phần lặp lại nữa, bày một dòng kèm số lượng (v20 vứt
     // sạch nút Xóa của mọi dòng vì nhãn trùng nhau) · v21: bảng tick giữ nhãn/chữ làm target và
     // gửi kèm định danh để HIỆN (v20 đổi target sang định danh, làm tiêu chí thôi kiểm nội
     // dung) · v20: locator duy nhất + chốt giá trị nhập theo ranh giới thao tác · v4: quét
     // thành phần CHỈ trong flutter-view.
-    private static final String RECORDER_BRIDGE_VERSION = "input-identity-v22";
+    private static final String RECORDER_BRIDGE_VERSION = "input-identity-v24";
 
     @Value("${grader.base-image:grading-base:latest}")
     private String baseImage;
@@ -223,7 +227,11 @@ public class GoldenRuntimeService {
         }
         Path basePubspec = resolveTemplateDir().resolve("pubspec.base.yaml");
         if (!Files.isRegularFile(basePubspec)) throw new IllegalStateException("Khong tim thay pubspec.base.yaml");
-        String pubspec = Files.readString(basePubspec, StandardCharsets.UTF_8);
+        // Bo khoi assets co san TRUOC khi noi khoi moi: pubspec.base.yaml nay da khai
+        // "assets: - assets/" (de duong cham nap duoc anh cua de). Noi them mot khoi nua
+        // thanh HAI khoa `assets:` trong cung mot mapping, va yaml chet ngay o dong do voi
+        // "Duplicate mapping key" — bao build hong ma khong noi vi sao.
+        String pubspec = boKhoiAssets(Files.readString(basePubspec, StandardCharsets.UTF_8));
         List<String> assetDirectories = new ArrayList<>();
         if (Files.isDirectory(target.resolve("assets"))) assetDirectories.add("assets/");
         if (Files.isDirectory(target.resolve("lib/assets"))) assetDirectories.add("lib/assets/");
@@ -240,6 +248,32 @@ public class GoldenRuntimeService {
      * projects may have any pubspec name, so internal package imports must be rewritten exactly
      * as they are in GoldenValidationService before the web build starts.
      */
+    /**
+     * Bo khoi "assets:" (va cac dong danh sach ben duoi no) khoi mot pubspec.
+     *
+     * Chi bo dung khoi do, giu nguyen moi thu khac ke ca chu thich, de ban web va ban cham
+     * van dung chung mot nguon phu thuoc.
+     */
+    static String boKhoiAssets(String pubspec) {
+        final char xuongDong = (char) 10;
+        StringBuilder ra = new StringBuilder(pubspec.length());
+        boolean dangBo = false;
+        for (String dong : pubspec.split(String.valueOf(xuongDong), -1)) {
+            String rut = dong.strip();
+            if (dangBo) {
+                // Con trong khoi khi dong la mot muc danh sach hoac dong trong.
+                if (rut.isEmpty() || rut.startsWith("- ")) continue;
+                dangBo = false;
+            }
+            if (rut.equals("assets:")) {
+                dangBo = true;
+                continue;
+            }
+            ra.append(dong).append(xuongDong);
+        }
+        return ra.toString();
+    }
+
     private void normalizeInternalPackageImports(Path sourceProject, Path copiedLib) throws Exception {
         Path sourcePubspec = sourceProject.resolve("pubspec.yaml");
         if (!Files.isRegularFile(sourcePubspec)) return;
@@ -304,7 +338,7 @@ public class GoldenRuntimeService {
                 Future<void> main() async {
                   WidgetsFlutterBinding.ensureInitialized();
                   // Dấu phiên bản để phân định bản build đang CHẠY với bản bị cache.
-                  debugPrint('recorder-entry input-identity-v22');
+                  debugPrint('recorder-entry input-identity-v24');
                   // Giữ handle sống suốt phiên để cây ngữ nghĩa luôn được dựng.
                   SemanticsBinding.instance.ensureSemantics();
                   // SQLite THẬT trên web + nạp hidden.db TRƯỚC khi app khởi động — đúng cách
@@ -470,7 +504,15 @@ public class GoldenRuntimeService {
                   }
                   function locatorFor(node, mode, elements) {
                     const role = roleOf(node);
-                    const semanticId = semanticIdOf(node);
+                    // Dinh danh cua CHINH node, hoac cua lop boc ngoai gan nhat. Vi sao phai leo:
+                    // Semantics(identifier:) boc quanh mot nut sinh ra DOM hai tang — tang mang
+                    // dinh danh KHONG co role, tang co role=button lai KHONG mang dinh danh. Chi
+                    // doc tren chinh node thi dinh danh khong bao gio duoc dung; nut chi co ICON
+                    // (khong chu, khong nhan) khong con duong nao va recorder tu choi ca cu bam.
+                    // identifierOf dung lai khi cha mang NHAN KHAC nen khong vo nham dinh danh
+                    // cua dong danh sach khi bam nut Xoa trong dong (do 4/9/2026).
+                    const semanticId = semanticIdOf(node)
+                        || identifierOf(node, node.getAttribute('aria-label') || '');
                     if (semanticId) {
                       if (uniqueLocator('semanticId', semanticId, elements)) {
                         return {target: {semanticId}, attribute: 'semanticId', attributeValue: semanticId};
@@ -806,6 +848,22 @@ public class GoldenRuntimeService {
                     return {target: {text}, attribute: 'text', attributeValue: text, role: checkpointRoleOf(node),
                             ...(soChu > 1 ? {count: soChu} : {}), ...(idChu ? {identifier: idChu} : {})};
                   }
+                  // LIET KE MOI DINH DANH dang co tren man, ke ca cua widget KHONG co chu.
+                  // Vi sao tach khoi inventory(): semanticState bo qua node khong nhan/khong
+                  // chu, ma dung nhung node do (ListView, Stack, Table boc Semantics) moi la
+                  // dich cua tieu chi bo cuc Ch.7. Bang tick giu nguyen, khong them dong nao.
+                  function identifierSnapshot() {
+                    const ids = [];
+                    const seen = new Set();
+                    allSemanticElements().forEach(node => {
+                      const id = semanticIdOf(node);
+                      if (!id || seen.has(id)) return;
+                      seen.add(id);
+                      ids.push(id);
+                    });
+                    window.parent.postMessage(
+                      {type: 'GOLDEN_RECORDER_IDENTIFIERS', payload: {identifiers: ids}}, '*');
+                  }
                   // LIET KE thanh phan man hinh hien tai cho bang tick ben trang soan de.
                   // Truoc day lenh nay goi ham semanticState CHUA TON TAI — ReferenceError,
                   // chet im lang, giao vien bam nut ma khong thay gi.
@@ -855,6 +913,9 @@ public class GoldenRuntimeService {
                     if (event.data.action === 'snapshot_ui') {
                       chotEnterText();
                       inventory();
+                    }
+                    if (event.data.action === 'snapshot_identifiers') {
+                      identifierSnapshot();
                     }
                     if (event.data.action === 'flush_input') {
                       const requestId = event.data.request_id || '';

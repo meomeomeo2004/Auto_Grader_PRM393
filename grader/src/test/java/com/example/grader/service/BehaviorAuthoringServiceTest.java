@@ -787,4 +787,57 @@ class BehaviorAuthoringServiceTest {
         assertThrows(IllegalArgumentException.class, () -> service.appendEvent(recordingId, Map.of(
                 "kind", "action", "action", "boot_with_uri", "uri", "/too-late")));
     }
+
+    /**
+     * Gói SharedPreferences: tiêu chí "giá trị đã lưu" phải bị chặn khi thiếu khoá, phải sống
+     * qua abstractRecording (nếu rơi thì scenario im lặng mất tiêu chí), và phải nhận được giá
+     * trị chuẩn do máy đo trên Golden thay vì người ra đề gõ tay.
+     */
+    @Test
+    void preferencesCriterionNeedsKeyAndTakesCapturedValue() throws Exception {
+        Map<String, Object> golden = service.registerGoldenApp(Map.of(
+                "name", "Golden prefs",
+                "runtime_url", "http://localhost:9010",
+                "ready", true));
+        Map<String, Object> suite = service.createSuite(Map.of(
+                "suite_code", "PREFS_BAKE",
+                "name", "Bake preferences",
+                "golden_app_id", golden.get("id")));
+        Map<String, Object> recording = service.startRecording(String.valueOf(suite.get("id")), Map.of(
+                "name", "Bat che do toi",
+                "viewport", Map.of("width", 412, "height", 915, "device_pixel_ratio", 1),
+                "initial_state", Map.of("reset_storage", true,
+                        "preferences", Map.of("che_do_toi", false))));
+        String recordingId = String.valueOf(recording.get("id"));
+
+        assertThrows(IllegalArgumentException.class, () -> service.appendEvent(recordingId, Map.of(
+                "kind", "preferences_observation", "action", "observe_ui")),
+                "thiếu khoá thì phải chặn ngay lúc ghi");
+
+        service.appendEvent(recordingId, Map.of("kind", "action", "action", "tap",
+                "target", Map.of("semanticId", "cong_tac_che_do")));
+        service.appendEvent(recordingId, Map.of("kind", "preferences_observation",
+                "action", "observe_ui", "key", "che_do_toi",
+                "name", "Bo nho app - da luu khoa che_do_toi"));
+        service.stopRecording(recordingId, Map.of());
+        Map<String, Object> scenario = service.abstractRecording(recordingId, Map.of(
+                "scenario_code", "DARK_MODE",
+                "name", "Bat che do toi",
+                "weight", 1.0,
+                "viewports", List.of(Map.of(
+                        "name", "phone", "width", 412, "height", 915, "device_pixel_ratio", 1))));
+        String scenarioId = String.valueOf(scenario.get("id"));
+
+        List<Map<String, Object>> chots = docChots(scenarioId);
+        assertEquals(1, chots.size(), "tiêu chí phải sống qua abstractRecording");
+        assertEquals("preferences_observation", chots.get(0).get("kind"));
+        assertEquals("che_do_toi", chots.get(0).get("key"));
+        // Trạng thái đầu của kho đi kèm scenario, engine đọc để dựng kho trước khi mở app.
+        Map<?, ?> banDau = (Map<?, ?>) scenario.get("initial_state");
+        assertEquals(Map.of("che_do_toi", false), banDau.get("preferences"));
+
+        assertEquals(1, service.applyCapturedLayout(scenarioId, Map.of(
+                String.valueOf(chots.get(0).get("id")), Map.of("observed", true))));
+        assertEquals(true, ((Map<?, ?>) docChots(scenarioId).get(0).get("expect")).get("value"));
+    }
 }

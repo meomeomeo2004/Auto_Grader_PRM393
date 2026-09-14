@@ -4,6 +4,8 @@ import com.example.grader.service.SyllabusService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
+import com.example.grader.config.Vai;
+import org.springframework.context.annotation.Profile;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -15,6 +17,7 @@ import java.util.Map;
  *  - Ghi (POST/PUT/DELETE): mở — app chạy cục bộ, không có đăng nhập.
  *  - DELETE = xóa MỀM (category: active=false; skill: deprecated=true).
  */
+@Profile(Vai.GIANG_VIEN)   // Khung năng lực — chỉ bản giảng viên.
 @RestController
 @RequestMapping("/api/syllabus")
 @CrossOrigin(origins = "*")

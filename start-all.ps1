@@ -8,7 +8,9 @@
 #>
 
 param(
-  [switch]$SkipMysql              # bo qua docker compose (neu MySQL da chay)
+  [switch]$SkipMysql,             # bo qua docker compose (neu MySQL da chay)
+  [ValidateSet('gv','nc')]
+  [string]$Vai                    # vai khi chay THANG trong repo; ban giao thi doc tu vai.ps1
 )
 
 # KHONG dung "Stop": 1 loi khong nghiem trong (vd Docker chua bat)
@@ -18,6 +20,38 @@ $root       = $PSScriptRoot          # = thu muc Grader_App (moi thu nam trong d
 $composeDir = $root                  # docker-compose.yml o goc Grader_App
 $beDir      = Join-Path $root "grader"
 $feDir      = Join-Path $root "frontend"
+
+# -- Vai cua ban dang chay -----------------------------------------------------
+# He thong KHONG con "ban day du". Ly do khong phai gon gang: ban day du la cau hinh duy nhat
+# khong di qua khau ban giao (giang vien xuat ban xong la hien ngay ben cham, vi chung mot co
+# so du lieu), nen no la cau hinh duy nhat co the CHE mot khau ban giao dang hong - ma do lai
+# la duong ma ca hai nguoi nhan deu phai di. Vi vay moi lan chay deu phai chon vai.
+#
+# Hai duong khai vai:
+#   - Ban giao (dist\gv, dist\nc): doc tu vai.ps1 do dong-goi.ps1 sinh ra.
+#   - Chay thang trong repo de phat trien: truyen -Vai gv  hoac  -Vai nc
+$BePort0 = $null
+$FePort  = $null
+$Schema  = $null
+
+$vaiFile = Join-Path $root "vai.ps1"
+if (Test-Path $vaiFile) {
+  . $vaiFile                       # ghi de $Vai, $BePort0, $FePort, $Schema
+} elseif ($Vai) {
+  $cauHinhFile = Join-Path $root "vai-cau-hinh.ps1"
+  if (-not (Test-Path $cauHinhFile)) { throw "Khong tim thay vai-cau-hinh.ps1 ben canh start-all.ps1." }
+  . $cauHinhFile
+  $c = $CauHinhVai[$Vai]
+  $BePort0 = $c.BePort; $FePort = $c.FePort; $Schema = $c.Schema
+} else {
+  Write-Host ""
+  Write-Host "[LOI] Chua chon vai. He thong da tach lam hai ban, khong con ban thay ca hai." -ForegroundColor Red
+  Write-Host "  Chay thang trong repo :  .\run -Vai gv      (hoac -Vai nc)" -ForegroundColor Yellow
+  Write-Host "  Chay ban da cat       :  vao dist\gv hoac dist\nc roi chay .\run" -ForegroundColor Yellow
+  Write-Host "  Cat ban giao          :  .\dong-goi.ps1" -ForegroundColor Yellow
+  Write-Host ""
+  exit 1
+}
 
 function Have($cmd) { return [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 function Section($t) { Write-Host "`n==== $t ====" -ForegroundColor Cyan }
@@ -140,7 +174,8 @@ if (-not $SkipMysql) {
           Write-Host "  MySQL dang chay (cong 3306)" -ForegroundColor Green
           Wait-MySqlReady 150 | Out-Null
         } elseif (Get-NetTCPConnection -LocalPort 3306 -State Listen -ErrorAction SilentlyContinue) {
-          # Cổng 3306 đã có DB local khác chiếm; backend vẫn dùng được nếu đúng database chamthi_db.
+          # Cong 3306 da co MySQL khac chiem; backend van dung duoc - chuoi ket noi mang
+          # createDatabaseIfNotExist=true nen no tu tao schema cua vai minh o do.
           Write-Host "  [CANH BAO] docker compose khong bind duoc 3306, dang dung MySQL san co tren cong 3306." -ForegroundColor Yellow
           Wait-MySqlReady 60 | Out-Null
         } else {
@@ -182,34 +217,41 @@ function Free-Port($port, $name, [string[]]$onlyProc) {
       } catch {}
     }
 }
-Free-Port 8080 "backend"  @('java','javaw')
-Free-Port 3000 "frontend" @('node')
+Free-Port $BePort0 "backend"  @('java','javaw')
+Free-Port $FePort  "frontend" @('node')
 
-# Backend: neu 8080 van bi chiem (vd Tomcat) -> tu chon cong trong ke tiep; frontend tro theo.
+# Backend: neu cong uu tien van bi chiem (vd Tomcat) -> tu chon cong trong ke tiep; frontend tro theo.
 function Test-PortFree($port) { -not (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) }
-$bePort = 8080
-if (-not (Test-PortFree 8080)) {
-  $cand = 8081; while ($cand -le 8099 -and -not (Test-PortFree $cand)) { $cand++ }
+$bePort = $BePort0
+if (-not (Test-PortFree $BePort0)) {
+  $cand = $BePort0 + 1; $tran = $BePort0 + 19
+  while ($cand -le $tran -and -not (Test-PortFree $cand)) { $cand++ }
   $bePort = $cand
-  Write-Host "  Cong 8080 dang ban -> backend dung cong $bePort (khong dung tien trinh khac)." -ForegroundColor Yellow
+  Write-Host "  Cong $BePort0 dang ban -> backend dung cong $bePort (khong dung tien trinh khac)." -ForegroundColor Yellow
 }
 # Ghi NEXT_PUBLIC_API_BASE vao frontend/.env.local (giu cac dong khac) de FE goi dung cong backend.
 $apiBase  = "http://localhost:$bePort/api"
 $envLocal = Join-Path $feDir ".env.local"
-$keep = @(); $oldApiBase = ""
+$keep = @(); $oldApiBase = ""; $oldVai = ""
 if (Test-Path $envLocal) {
   $all  = Get-Content $envLocal
-  $keep = $all | Where-Object { $_ -notmatch '^\s*NEXT_PUBLIC_API_BASE\s*=' }
+  $keep = $all | Where-Object { $_ -notmatch '^\s*NEXT_PUBLIC_(API_BASE|ROLE)\s*=' }
   $hit  = $all | Where-Object { $_ -match '^\s*NEXT_PUBLIC_API_BASE\s*=' } | Select-Object -First 1
   if ($hit) { $oldApiBase = ($hit -replace '^\s*NEXT_PUBLIC_API_BASE\s*=\s*', '').Trim() }
+  $hitVai = $all | Where-Object { $_ -match '^\s*NEXT_PUBLIC_ROLE\s*=' } | Select-Object -First 1
+  if ($hitVai) { $oldVai = ($hitVai -replace '^\s*NEXT_PUBLIC_ROLE\s*=\s*', '').Trim() }
 }
 # Next.js NHUNG CUNG NEXT_PUBLIC_* vao bundle luc bien dich, khong doc lai luc chay. Neu cong
 # backend doi ma cache .next van con chunk cu thi trinh duyet goi sang cong CU -> loi
 # "Failed to fetch" du backend van song. Doi cong = phai xoa cache, khong co cach nao khac.
-if ($oldApiBase -ne $apiBase) {
+if ($oldApiBase -ne $apiBase -or $oldVai -ne $Vai) {
   $nextDir = Join-Path $feDir ".next"
   if (Test-Path $nextDir) {
-    if ($oldApiBase -eq "") {
+    if ($oldVai -ne $Vai) {
+      # VAI cung la NEXT_PUBLIC_*, cung bi nhung vao bundle luc bien dich. Doi vai ma giu cache
+      # cu la menu van hien theo vai truoc do - nhin thi tuong phep tach khong an.
+      Write-Host "  Doi vai ($oldVai -> $Vai) -> xoa cache frontend." -ForegroundColor Yellow
+    } elseif ($oldApiBase -eq "") {
       Write-Host "  Chua ro cong backend lan truoc -> xoa cache frontend cho chac." -ForegroundColor Yellow
     } else {
       Write-Host "  Backend doi cong ($oldApiBase -> $apiBase) -> xoa cache frontend." -ForegroundColor Yellow
@@ -225,7 +267,7 @@ if ($oldApiBase -ne $apiBase) {
 }
 # Ghi KHONG BOM: 'Set-Content -Encoding utf8' tren PS 5.1 chen BOM -> Next.js doc sai bien
 # dau dong (NEXT_PUBLIC_API_BASE) -> FE goi sai cong backend. Dung UTF8 khong BOM.
-$lines = @($keep) + "NEXT_PUBLIC_API_BASE=$apiBase"
+$lines = @($keep) + "NEXT_PUBLIC_ROLE=$Vai" + "NEXT_PUBLIC_API_BASE=$apiBase"
 [System.IO.File]::WriteAllText($envLocal, (($lines -join "`r`n") + "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
 
 # powershell.exe day du duong dan (tranh 'khong thay file')
@@ -254,6 +296,11 @@ if ('$backendJdkHome') {
   return
 }
 `$env:SERVER_PORT = '$bePort'
+# Vai quyet dinh controller nao duoc nap; schema rieng de hai ban chay song song tren cung
+# mot MySQL ma khong nhin thay du lieu cua nhau.
+`$env:GRADER_ROLE = '$Vai'
+`$env:SPRING_DATASOURCE_URL = 'jdbc:mysql://localhost:3306/$Schema' + '?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&createDatabaseIfNotExist=true'
+Write-Host "Vai: $Vai | Schema: $Schema" -ForegroundColor DarkGray
 Write-Host 'Doi MySQL/JDBC san sang...' -ForegroundColor DarkGray
 for (`$i = 0; `$i -lt 60; `$i++) {
   try {
@@ -266,16 +313,17 @@ Write-Host 'Backend: http://localhost:$bePort' -ForegroundColor Green
 "@
 Launch "Backend (:$bePort)" $beCmd
 
-# Frontend Next.js: :3000
+# Frontend Next.js. Cong truyen thang cho next chu KHONG qua .env: bien PORT trong .env.local
+# khong chac duoc doc truoc luc server bind, ma sai cong thi hai ban dam nhau.
 $feCmd = @"
 Set-Location '$feDir'
 if (-not (Test-Path 'node_modules')) { Write-Host 'npm install (lan dau)...' -ForegroundColor Yellow; npm install }
-Write-Host 'Frontend: http://localhost:3000' -ForegroundColor Green
-npm run dev
+Write-Host 'Frontend: http://localhost:$FePort' -ForegroundColor Green
+npm run dev -- -p $FePort
 "@
-Launch "Frontend (:3000)" $feCmd
+Launch "Frontend (:$FePort)" $feCmd
 
 Section "Xong"
-Write-Host "  Frontend : http://localhost:3000"
+Write-Host "  Frontend : http://localhost:$FePort"
 Write-Host "  Backend  : http://localhost:$bePort"
 Write-Host "  Tat: dong tung cua so service (hoac Ctrl+C trong cua so do)." -ForegroundColor DarkGray

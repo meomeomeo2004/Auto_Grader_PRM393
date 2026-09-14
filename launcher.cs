@@ -9,9 +9,26 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Text.RegularExpressions;
 
 class Launcher
 {
+    // He thong duoc cat lam hai ban theo vai, moi ban mot cong frontend khac nhau. Ban giao di
+    // co file vai.ps1 nam canh; doc cong tu do thay vi in cung mot con so cho ca hai — in sai
+    // cong thi nguoi dung mo ra trang trang va tuong he thong hong.
+    static int DocCongFrontend(string exeDir)
+    {
+        try
+        {
+            string vaiFile = Path.Combine(exeDir, "vai.ps1");
+            if (!File.Exists(vaiFile)) return 3000;   // ban day du trong repo
+            var m = Regex.Match(File.ReadAllText(vaiFile), @"\$FePort\s*=\s*(\d+)");
+            if (m.Success) return int.Parse(m.Groups[1].Value);
+        }
+        catch { }
+        return 3000;
+    }
+
     static int Main(string[] args)
     {
         Console.Title = "Grader - Trinh khoi dong";
@@ -57,7 +74,7 @@ class Launcher
 
         Console.WriteLine();
         Console.WriteLine("Cac cua so dich vu da mo (backend/frontend).");
-        Console.WriteLine("Mo trinh duyet: http://localhost:3000");
+        Console.WriteLine("Mo trinh duyet: http://localhost:" + DocCongFrontend(exeDir));
         Console.WriteLine("Co the dong cua so nay. Nhan phim bat ky de thoat...");
         Console.ReadKey();
         return 0;

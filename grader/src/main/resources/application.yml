@@ -2,10 +2,27 @@ spring:
 
   application:
     name: grader
+
+  # VAI của bản đang chạy — quyết định controller nào được nạp (xem config/Vai.java).
+  #   GRADER_ROLE=gv  → bản giảng viên     GRADER_ROLE=nc  → bản người chấm
+  # KHÔNG có mặc định, và không còn "bản thấy cả hai vai": bản đó là cấu hình duy nhất không đi
+  # qua khâu bàn giao, nên cũng là cấu hình duy nhất che được một khâu bàn giao đang hỏng.
+  # Bỏ trống thì VaiBatBuoc chặn ngay lúc khởi động, không để chạy lên rồi mọi API trả 404.
+  profiles:
+    active: ${GRADER_ROLE:}
   datasource:
-    # Default khớp với MySQL trong docker-compose.yml (root/123456) → clone về chạy
-    # được ngay. Ghi đè bằng biến môi trường SPRING_DATASOURCE_* nếu DB của bạn khác.
-    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/chamthi_db?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC}
+    # KHÔNG có giá trị mặc định, và đó là cố ý — giống spring.profiles.active ngay phía trên.
+    # Schema do VAI quyết định (chamthi_gv / chamthi_nc), mà vai thì start-all.ps1 đọc từ
+    # vai-cau-hinh.ps1 rồi đặt vào biến này kèm createDatabaseIfNotExist=true. Ghi một mặc
+    # định ở đây là dựng nguồn sự thật thứ hai cho tên schema, sớm muộn cũng lệch với
+    # vai-cau-hinh.ps1 — và lệch kiểu đó thì backend vẫn chạy, chỉ là ghi vào nhầm schema.
+    # Thà chết ngay lúc khởi động với đúng tên biến còn thiếu.
+    #
+    # Giá trị mặc định dưới đây KHÔNG phải một chuỗi kết nối — nó là lời nhắn. Để trống hẳn
+    # thì Hikari in ra "Driver claims to not accept jdbcUrl, ${SPRING_DATASOURCE_URL}", đọc
+    # như lỗi driver và không ai đoán ra phải làm gì. Nhét câu hướng dẫn vào đúng chỗ MySQL
+    # in ra thì thông báo lỗi tự nói ra cách sửa.
+    url: ${SPRING_DATASOURCE_URL:CHUA-DAT-BIEN-SPRING_DATASOURCE_URL---hay-chay-bang---run--Vai-gv---hoac---run--Vai-nc---vi-schema-do-vai-quyet-dinh}
     username: ${SPRING_DATASOURCE_USERNAME:root}
     password: ${SPRING_DATASOURCE_PASSWORD:123456}
     driver-class-name: com.mysql.cj.jdbc.Driver
@@ -32,6 +49,9 @@ spring:
       file-size-threshold: 256KB                    # part lớn ghi ra đĩa tạm, không giữ trong RAM
 
 server:
+  # Hai bản có thể chạy song song trên cùng một máy nên cổng phải đổi được:
+  # bản người chấm giữ 8080 như cũ, bản giảng viên dùng 8090 (script đóng gói ghi sẵn).
+  port: ${SERVER_PORT:8080}
   tomcat:
     # Nộp CẢ LỚP trong một lần = mỗi bài một part. Tomcat mặc định chỉ cho 50 part/request,
     # nên upload 116 bài bị chặn ở tầng Tomcat TRƯỚC khi Spring nhìn thấy: trả 413 và cắt

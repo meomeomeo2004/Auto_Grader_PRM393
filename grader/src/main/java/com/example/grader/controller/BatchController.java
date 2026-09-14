@@ -5,6 +5,8 @@ import com.example.grader.service.BatchGradingService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
+import com.example.grader.config.Vai;
+import org.springframework.context.annotation.Profile;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -12,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 
 @Slf4j
+@Profile(Vai.NGUOI_CHAM)   // Chấm bài chỉ có ở bản người chấm.
 @RestController
 @RequestMapping("/api/batch")
 @CrossOrigin(origins = "*")

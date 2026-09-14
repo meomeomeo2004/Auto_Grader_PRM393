@@ -10,6 +10,8 @@ import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import com.example.grader.config.Vai;
+import org.springframework.context.annotation.Profile;
 import org.springframework.web.bind.annotation.*;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
@@ -28,6 +30,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 /** Cung cấp JSON kết quả đầy đủ cho lịch sử, năng lực và xuất dữ liệu. */
+@Profile(Vai.NGUOI_CHAM)   // Kết quả chấm chỉ có ở bản người chấm.
 @RestController
 @RequestMapping("/api/results")
 @CrossOrigin(origins = "*")
@@ -84,24 +87,7 @@ public class ResultController {
         }
     }
 
-    /** Tìm kiếm nhanh (thanh search header) theo mã SV / tên / mã đề — trả tối đa 8 kết quả. */
-    @GetMapping("/search")
-    public ResponseEntity<?> search(@RequestParam("q") String q) {
-        if (q == null || q.trim().length() < 1) return ResponseEntity.ok(List.of());
-        List<ExamResult> rows = resultRepo.searchSubmissions(
-                q.trim(), org.springframework.data.domain.PageRequest.of(0, 8));
-        List<Map<String, Object>> out = new ArrayList<>();
-        for (ExamResult r : rows) {
-            Map<String, Object> m = new LinkedHashMap<>();
-            m.put("examId", r.getExamId());
-            m.put("studentId", r.getStudentId());
-            m.put("studentName", r.getStudentName());
-            m.put("score", r.getScore());
-            m.put("status", r.getStatus());
-            out.add(m);
-        }
-        return ResponseEntity.ok(out);
-    }
+    // /search đã bỏ cùng ô tìm kiếm trên thanh tiêu đề — nó không có người gọi nào khác.
 
     /** Chi tiết 1 bài cho trang chấm tay: result_json (test_cases) + điểm tự động + điểm tay đã lưu. */
     @GetMapping("/{examId}/{studentId}/detail")

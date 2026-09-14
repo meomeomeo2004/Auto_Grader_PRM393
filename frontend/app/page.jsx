@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
+import { TRANG_CHU } from "@/lib/vai";
 
-/** Trang đầu của hệ thống luôn mở dashboard thống kê. */
+/** Trang đầu tùy theo bản đang chạy: người chấm vào Chấm tự động, giảng viên vào Bộ chấm Golden. */
 export default function HomeRedirect() {
-  redirect("/statistics");
+  redirect(TRANG_CHU);
 }

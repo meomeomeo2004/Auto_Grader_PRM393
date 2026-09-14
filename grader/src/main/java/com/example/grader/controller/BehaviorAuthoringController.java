@@ -15,6 +15,8 @@ import org.springframework.core.io.Resource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import com.example.grader.config.Vai;
+import org.springframework.context.annotation.Profile;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -24,6 +26,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 
 /** API duy nhất cho luồng Golden App → Record → Abstract → Publish. */
+@Profile(Vai.GIANG_VIEN)   // Soạn bộ chấm Golden — chỉ bản giảng viên.
 @RestController
 @RequestMapping("/api/behavior-authoring")
 @CrossOrigin(origins = "*")
@@ -277,6 +280,7 @@ public class BehaviorAuthoringController {
                 // và bảng icon không bao giờ hiện.
                 result.put("identifier_step_count", capture.get("identifier_step_count"));
                 result.put("icons", capture.get("icons"));
+                result.put("images", capture.get("images"));
             }
             return result;
         });
@@ -301,6 +305,7 @@ public class BehaviorAuthoringController {
                 // Kiểm kê icon cũng phải theo đường sửa scenario: người ra đề thêm tiêu chí
                 // icon xong là capture chạy lại ngay, bảng icon phải cập nhật theo.
                 scenario.put("icons", capture.get("icons"));
+                scenario.put("images", capture.get("images"));
             }
             writeTestcaseDefinition(suiteId, scenario.get("scenario_code"));
             return scenario;

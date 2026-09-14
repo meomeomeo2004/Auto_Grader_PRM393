@@ -48,7 +48,12 @@ public class GradingBatch {
     @Column(name = "created_by", length = 100)
     private String createdBy;
 
-    @ColumnDefault("CURRENT_TIMESTAMP")
+    // CURRENT_TIMESTAMP(6) chứ không phải CURRENT_TIMESTAMP: Hibernate sinh cột này là
+    // datetime(6), mà MySQL 8 đòi giá trị mặc định phải cùng độ chính xác — không thì báo
+    // "Invalid default value" và BẢNG KHÔNG ĐƯỢC TẠO. Lỗi nằm im rất lâu vì hồi đó
+    // mysql/init.sql dựng sẵn bảng bằng tay, Hibernate không phải tạo nên không ai thấy.
+    // Nay init.sql đã bỏ: mọi schema đều do Hibernate dựng, sai độ chính xác là lộ ngay.
+    @ColumnDefault("CURRENT_TIMESTAMP(6)")
     @Column(name = "created_at")
     private Instant createdAt;
 

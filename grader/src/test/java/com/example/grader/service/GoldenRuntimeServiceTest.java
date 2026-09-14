@@ -77,6 +77,11 @@ class GoldenRuntimeServiceTest {
         assertThat(html).contains("GOLDEN_RECORDER_COMMAND");
         assertThat(html).contains("GOLDEN_RECORDER_FLUSHED");
         assertThat(html).contains("snapshot_ui");
+        // Định danh của widget KHÔNG có chữ (ListView, Stack, Table bọc Semantics) không
+        // bao giờ lọt vào bảng tick, mà chính chúng là đích của tiêu chí bố cục Ch.7 —
+        // màn soạn đề lấy danh sách đó qua lệnh riêng này.
+        assertThat(html).contains("snapshot_identifiers");
+        assertThat(html).contains("GOLDEN_RECORDER_IDENTIFIERS");
         assertThat(html).contains("flush_input");
         assertThat(html).contains("GOLDEN_RECORDER_ROUTE");
         assertThat(html).contains("perform_route_action");

@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import SidebarLayout from "@/components/layout/SidebarLayout";
+import SidebarLayout, { MO_LICH_SU, MoLichSuDetail } from "@/components/layout/SidebarLayout";
 import { API_BASE, PASS_THRESHOLD } from "@/lib/config";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { Tooltip } from "@/components/ui/Tooltip";
@@ -254,13 +254,28 @@ export default function HistoryPage() {
     return () => { document.body.style.overflow = prev; };
   }, [detailRow, viewRow]);
 
-  // Đọc query param từ thanh search header (?exam=...&q=...) — ưu tiên trước khi chọn mặc định
+  // Đọc query param từ thanh tiêu đề (?exam=...&q=...) — ưu tiên trước khi chọn mặc định
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const ex = params.get("exam");
     const query = params.get("q");
     if (query) setQ(query);
     if (ex) setSelected(ex);
+  }, []);
+
+  // Khi ĐANG đứng sẵn ở trang này mà bấm một thông báo trên chuông: Next chỉ đổi query chứ
+  // không remount, nên effect trên không chạy lại. Thanh tiêu đề bắn kèm sự kiện cho ca đó.
+  useEffect(() => {
+    const nghe = (e: Event) => {
+      const d = (e as CustomEvent<MoLichSuDetail>).detail;
+      if (!d) return;
+      setSelected(d.examId);
+      // Chuông chỉ chỉ ra BỘ, không chỉ ra bài nào — phải dọn ô lọc cũ, nếu không bảng vẫn
+      // bị lọc theo mã sinh viên của lần trước và trông như bộ này không có bài nào.
+      setQ(d.studentId ?? "");
+    };
+    window.addEventListener(MO_LICH_SU, nghe);
+    return () => window.removeEventListener(MO_LICH_SU, nghe);
   }, []);
 
   // Nạp danh sách bộ testcase đã chấm
@@ -686,7 +701,6 @@ export default function HistoryPage() {
   return (
     <SidebarLayout
       title="Lịch sử chấm"
-      subtitle="Xem lại kết quả các bài đã chấm theo bộ testcase"
       activePath="/history"
       /* Cùng khuôn với trang Chấm tự động: nới trần bề ngang và chốt cột trái 320px. Danh sách
          bộ testcase không dài ra thì cũng không dễ đọc hơn — chỗ dôi ra dồn cho bảng kết quả. */

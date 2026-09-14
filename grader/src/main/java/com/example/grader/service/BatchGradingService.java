@@ -41,6 +41,13 @@ public class BatchGradingService {
     @Value("${grader.workers.enabled:true}")
     private boolean workersEnabled;
 
+    /**
+     * Bản đang chạy có màn soạn đề hay không — dùng để chọn lời hướng dẫn cho đúng người đọc.
+     * Bật khi profile "gv" đang hoạt động (xem config/Vai.java).
+     */
+    @Value("#{environment.acceptsProfiles(T(org.springframework.core.env.Profiles).of('gv'))}")
+    private boolean coManSoanDe;
+
     /** Lưu lại file zip bài nộp để audit/chấm lại khi tranh chấp. */
     @Value("${grader.save-submissions:true}")
     private boolean saveSubmissions;
@@ -57,6 +64,7 @@ public class BatchGradingService {
     @Autowired private GradingBatchRepository batchRepo;
     @Autowired private ExamRepository examRepo;
     @Autowired private GradingRuntimeSettingsService runtimeSettings;
+    @Autowired private StarterSyncService starterSyncService;
 
     /** Bản hợp đồng `result.json` mà backend này phát hành — xem SPEC_grader_result_json/. */
     private static final String SCHEMA_VERSION = "2";
@@ -207,6 +215,29 @@ public class BatchGradingService {
     }
 
     // ── GV upload hàng loạt ──────────────────────────────────────
+    /**
+     * Chặn chấm khi khung phát cho sinh viên chưa được đối chiếu với Golden.
+     *
+     * Vì sao chặn ở đây chứ không chỉ ẩn trên giao diện: lệch schema hay lệch định danh giữa
+     * khung phát và Golden làm hỏng CẢ LỚP, và không khâu nào khác nhìn thấy nó. Bộ đề publish
+     * từ trước khi có khâu này được miễn trừ nên không đề nào đang chạy bị chặn oan.
+     */
+    /**
+     * Lời báo phải nói đúng việc mà NGƯỜI ĐANG ĐỌC làm được. Bản người chấm không có màn soạn
+     * đề lẫn Golden, nên bảo họ "vào phần soạn đề mà kiểm" là chỉ vào một màn hình không tồn
+     * tại — họ sẽ ngồi bấm quanh rồi kết luận hệ thống hỏng.
+     */
+    private void chanNeuChuaDongBo(String examId) {
+        if (starterSyncService.chamDuoc(examId)) return;
+        String trangThai = starterSyncService.trangThai(examId);
+        String cachSua = coManSoanDe
+                ? "Vào phần soạn đề, chọn đề rồi nạp gói khung phát cho sinh viên để đối chiếu với Golden."
+                : "Bản này không có Golden nên không tự kiểm được. Báo người ra đề kiểm đồng bộ khung phát"
+                  + " rồi xuất lại gói bàn giao và gửi sang.";
+        throw new IllegalStateException("Đề này chưa qua kiểm đồng bộ khung phát (" + trangThai
+                + "). " + cachSua + " Đạt thì mới chấm được.");
+    }
+
     public BatchSubmitResponse enqueueBatch(List<MultipartFile> files, List<String> usernames,
                                             String examId, String createdBy) throws Exception {
         if (usernames == null || usernames.size() != files.size())
@@ -214,6 +245,7 @@ public class BatchGradingService {
                     "Mỗi file .zip phải đi kèm đúng tên thư mục username.");
         Exam exam = examRepo.findByExamId(examId)
                 .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy đề thi: " + examId));
+        chanNeuChuaDongBo(examId);
         // Không còn nút "Build Sandbox" thủ công: sandbox được chuẩn bị ngay lúc publish/import.
         // Lần đó có thể hỏng vì Docker chưa bật, nên thử lại tại đây — chấm bài vốn đã cần Docker.
         if (exam.getStatus() != ExamStatus.READY) {
@@ -332,6 +364,7 @@ public class BatchGradingService {
         String examId = batch.getExamId();
         Exam exam = examRepo.findByExamId(examId)
                 .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy đề thi: " + examId));
+        chanNeuChuaDongBo(examId);
         if (exam.getStatus() != ExamStatus.READY)
             throw new IllegalStateException("Đề thi chưa sẵn sàng để chấm: " + exam.getStatus());
 
@@ -1661,6 +1694,33 @@ public class BatchGradingService {
         res.put("deleted", deleted);
         res.put("keptManual", keptManual);
         return res;
+    }
+
+    /**
+     * Dừng MỌI phiên chấm còn sống của một bộ testcase. Gọi ngay trước khi xóa bộ đó.
+     *
+     * <p>Xóa bộ là xóa thẳng hàng `grading_batches` và `exam_results` của nó. Nếu lúc ấy còn
+     * worker đang cầm job của bộ này, nó chấm xong rồi ghi kết quả trở lại — sinh ra bản ghi
+     * mồ côi trỏ vào một bộ không còn tồn tại, mà màn hình thì không còn đường nào gỡ vì bộ
+     * đã biến mất khỏi danh sách. Dừng trước thì hàng đợi được rút và container bị giết, nên
+     * đến lúc xóa không còn ai viết vào nữa.
+     *
+     * @return số phiên thực sự phải dừng
+     */
+    public int dungMoiPhienCuaDe(String examId) {
+        int daDung = 0;
+        for (GradingBatch b : batchRepo.findByExamIdOrderByCreatedAtDesc(examId)) {
+            BatchStatus st = b.getStatus();
+            // COMPLETED/CANCELLED/PARTIAL là phiên đã kết thúc — không còn worker nào cầm job.
+            if (st != BatchStatus.IN_PROGRESS && st != BatchStatus.PAUSED) continue;
+            try {
+                stopBatch(b.getBatchId());
+                daDung++;
+            } catch (Exception e) {
+                log.warn("Không dừng được phiên {} của bộ {}: {}", b.getBatchId(), examId, e.getMessage());
+            }
+        }
+        return daDung;
     }
 
     /** Xóa cả cây thư mục, nuốt mọi lỗi (Windows có thể đang khóa file trong thư mục). */
