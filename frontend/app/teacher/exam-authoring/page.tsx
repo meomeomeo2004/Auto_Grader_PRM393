@@ -298,8 +298,6 @@ export default function ExamAuthoringPage() {
           </div>
           {loadingList ? (
             <p className="flex items-center gap-2 text-xs text-slate-400"><Loader2 size={14} className="animate-spin" /> Đang tải…</p>
-          ) : authored.length === 0 ? (
-            <p className="text-xs text-slate-400">Chưa có đề nào — soạn đề đầu tiên ở dưới.</p>
           ) : (
             <div className="grid gap-2 sm:grid-cols-2">
               {authored.map((item) => (
@@ -318,15 +316,15 @@ export default function ExamAuthoringPage() {
         {/* Bước 1: mô tả yêu cầu */}
         <Step index={1} icon={Wand2} title={source === "ai" ? "Mô tả yêu cầu đề" : "Tải đề có sẵn lên"} done={!!deBai}>
           <div className="mb-4">
-            <Field label="Mã đề *" hint="Đặt tên ngắn gọn, ví dụ PE_PRM393_QLCT — dùng để mở lại đề này và để chọn sinh Golden Solution sau">
+            <Field label="Mã đề">
               <input value={examId} onChange={(e) => setExamId(e.target.value.toUpperCase().replace(/[^A-Z0-9_-]/g, "_"))}
                 placeholder="VD: PE_PRM393_QLCT" className={`${inputClass} font-mono`} />
             </Field>
           </div>
           <div className="mb-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
             {([
-              { id: "ai" as const, icon: Sparkles, title: "Tạo đề bằng AI", desc: "Mô tả yêu cầu, AI soạn đề rồi bạn sửa lại" },
-              { id: "upload" as const, icon: Upload, title: "Tải đề có sẵn lên", desc: "PDF, Word (.docx) hoặc .txt — AI đọc lại để bạn xem" },
+              { id: "ai" as const, icon: Sparkles, title: "Tạo đề bằng AI"},
+              { id: "upload" as const, icon: Upload, title: "Tải đề có sẵn lên", desc: "PDF, Word (.docx) hoặc .txt" },
             ]).map((choice) => (
               <button key={choice.id} type="button" onClick={() => setSource(choice.id)}
                 className={`flex items-start gap-2.5 rounded-xl border p-3 text-left transition-colors ${
