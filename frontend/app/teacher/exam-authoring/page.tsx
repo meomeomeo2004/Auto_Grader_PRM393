@@ -7,7 +7,8 @@
 //
 // Bước "Tạo Golden" (khung starter, Golden Solution) đã chuyển sang trang riêng /teacher/golden-authoring.
 
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import SidebarLayout from "@/components/layout/SidebarLayout";
 import { API_BASE } from "@/lib/config";
 import { downloadBlob } from "@/lib/mockup-image";
@@ -28,7 +29,7 @@ interface SeedTable {
   hidden_rows: (string | number | boolean | null)[][];
 }
 
-export default function ExamAuthoringPage() {
+function ExamAuthoringEditor() {
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -120,6 +121,14 @@ export default function ExamAuthoringPage() {
       setBusy(null);
     }
   };
+
+  // Mở sẵn 1 đề khi vào trang qua link có ?examId=... (vd từ nút "Clone" ở Kho đề).
+  const searchParams = useSearchParams();
+  useEffect(() => {
+    const id = searchParams.get("examId");
+    if (id) void openExam(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Ghi nháp form (chỉ req — de_bai đã có endpoint lưu riêng) mỗi khi đổi, hoãn 800ms.
   useEffect(() => {
@@ -264,6 +273,27 @@ export default function ExamAuthoringPage() {
       setInfo(`Đã tải bản .docx của đề ${exam}.`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Không tải được bản .docx.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const downloadPdf = async () => {
+    if (!examId.trim()) return;
+    const exam = examId.trim();
+    setBusy("pdf"); setError(null);
+    try {
+      const pdfRes = await fetch(`${API_BASE}/exam-setup/${encodeURIComponent(exam)}/de-bai/pdf`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ images: [] }),
+      });
+      if (!pdfRes.ok) {
+        const data = await pdfRes.json().catch(() => ({}));
+        throw new Error(data?.error || "Không tải được bản .pdf — hãy lưu đề trước.");
+      }
+      downloadBlob(await pdfRes.blob(), `${exam}_de_bai.pdf`);
+      setInfo(`Đã tải bản .pdf của đề ${exam}.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Không tải được bản .pdf.");
     } finally {
       setBusy(null);
     }
@@ -431,6 +461,10 @@ export default function ExamAuthoringPage() {
                 title={examAccepted ? undefined : "Lưu đề trước đã"}>
                 {busy === "docx" ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Tải .docx
               </button>
+              <button onClick={downloadPdf} disabled={busy !== null || !examAccepted} className={ghostBtn}
+                title={examAccepted ? undefined : "Lưu đề trước đã"}>
+                {busy === "pdf" ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Tải .pdf
+              </button>
             </div>
           </Step>
         )}
@@ -495,6 +529,20 @@ export default function ExamAuthoringPage() {
         )}
       </div>
     </SidebarLayout>
+  );
+}
+
+export default function ExamAuthoringPage() {
+  return (
+    <Suspense fallback={
+      <SidebarLayout activePath="/teacher/exam-authoring" title="Tạo đề bằng AI">
+        <div className="flex min-h-[50vh] items-center justify-center text-slate-400">
+          <Loader2 className="animate-spin" size={28} />
+        </div>
+      </SidebarLayout>
+    }>
+      <ExamAuthoringEditor />
+    </Suspense>
   );
 }
 

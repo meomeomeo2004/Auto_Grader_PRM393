@@ -6,6 +6,7 @@ import com.example.grader.service.BanGiaoService;
 import com.example.grader.service.ExamService;
 import com.example.grader.service.StarterSyncService;
 import com.example.grader.service.SyllabusService;
+import com.example.grader.service.ai.ExamDocumentReader;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -34,6 +35,8 @@ public class ExamSetupController {
     private StarterSyncService starterSyncService;
     @Autowired
     private BanGiaoService banGiaoService;
+    @Autowired
+    private ExamDocumentReader examDocumentReader;
 
     /**
      * KIỂM ĐỒNG BỘ KHUNG PHÁT. Chọn một đề đã publish testcase, nạp gói khung phát cho sinh
@@ -133,6 +136,28 @@ public class ExamSetupController {
         return examRepo.findByExamId(examId)
                 .map(ResponseEntity::ok)
                 .orElse(ResponseEntity.notFound().build());
+    }
+
+    /**
+     * Nhân bản CHỈ đề bài (không đụng testcase/Golden Suite) sang một mã đề mới — dùng cho nút
+     * "Clone" ở Kho đề. Body: {@code { target_exam_id, exam_name? } }.
+     */
+    @PostMapping("/{examId}/clone-handout")
+    public ResponseEntity<?> cloneHandout(@PathVariable String examId,
+                                          @RequestBody(required = false) Map<String, Object> body) {
+        try {
+            Object targetRaw = body == null ? null : body.get("target_exam_id");
+            String targetId = targetRaw == null ? null : String.valueOf(targetRaw);
+            Object nameRaw = body == null ? null : body.get("exam_name");
+            String examName = nameRaw == null ? null : String.valueOf(nameRaw);
+            return ResponseEntity.ok(examService.cloneExamHandout(examId, targetId, examName, AppActor.DEFAULT));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(409).body(Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", "Không nhân bản được đề bài: " + e.getMessage()));
+        }
     }
 
     // Đường /list đã chuyển sang ExamCatalogController: cả hai vai đều cần nó (bản người chấm
@@ -324,6 +349,96 @@ public class ExamSetupController {
     }
 
     /**
+     * Upload NGUYÊN file đề bài gốc (.docx/.pdf) giáo viên tự soạn ở ngoài — Kho tài liệu đề.
+     * Nếu mã đề chưa tồn tại thì tự tạo một Exam nháp (dùng {@code examName} nếu có).
+     *
+     * <p>Nếu đề CHƯA có đề bài dạng văn bản ({@code de_bai.md}) — tức chỉ mới upload nguyên
+     * file, chưa từng soạn qua "Tạo đề" — tự bóc chữ từ file vừa tải lên (tái dùng
+     * {@link ExamDocumentReader}, engine sẵn có của {@code /ai/exam/import}) và lưu thành
+     * {@code de_bai.md}, để đề hiện được ngay ở "Tạo đề"/"Tạo Golden" (hai nơi đó đọc danh
+     * sách qua {@code /authored-list}, vốn CHỈ liệt kê đề đã có {@code de_bai.md} — thiếu bước
+     * này thì đề vừa upload chỉ nằm im ở Kho tài liệu, không nơi nào khác thấy được). Bóc chữ
+     * lỗi (PDF scan, file hỏng...) KHÔNG làm hỏng việc lưu file gốc — chỉ báo qua
+     * {@code de_bai_extract_warning}, giáo viên vẫn tải/xem lại file gốc bình thường.
+     * KHÔNG đè lên đề bài đã có sẵn — chỉ tự điền khi đề đang trống.
+     */
+    @PostMapping(value = "/{examId}/handout/original", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<?> uploadOriginalHandout(@PathVariable String examId,
+                                                   @RequestParam(value = "examName", required = false) String examName,
+                                                   @RequestPart("file") MultipartFile file) {
+        try {
+            byte[] bytes = file.getBytes();
+            Map<String, Object> out = new java.util.LinkedHashMap<>(
+                    examService.saveOriginalHandoutFile(examId, examName, file.getOriginalFilename(), bytes));
+            String existing = examService.readDeBai(examId);
+            if (existing == null || existing.isBlank()) {
+                try {
+                    Map<String, Object> extracted = examDocumentReader.read(file.getOriginalFilename(), bytes);
+                    examService.saveDeBaiWithMockups(examId, String.valueOf(extracted.get("text")), java.util.List.of());
+                    out.put("de_bai_extracted", true);
+                } catch (Exception e) {
+                    out.put("de_bai_extracted", false);
+                    out.put("de_bai_extract_warning", e.getMessage());
+                }
+            } else {
+                out.put("de_bai_extracted", false);
+            }
+            return ResponseEntity.ok(out);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", "Không lưu được file đề bài: " + e.getMessage()));
+        }
+    }
+
+    /** Thông tin file đề bài gốc đã upload của 1 đề, để Kho tài liệu đề biết có hiện hay không. */
+    @GetMapping("/{examId}/handout/original/info")
+    public ResponseEntity<?> originalHandoutInfo(@PathVariable String examId) {
+        try {
+            return ResponseEntity.ok(examService.originalHandoutInfo(examId));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", "Lỗi máy chủ"));
+        }
+    }
+
+    /** Tải xuống nguyên file đề bài gốc đã upload. 404 nếu chưa upload. */
+    @GetMapping("/{examId}/handout/original")
+    public ResponseEntity<?> downloadOriginalHandout(@PathVariable String examId) {
+        try {
+            byte[] bytes = examService.readOriginalHandoutFile(examId);
+            if (bytes == null) return ResponseEntity.status(404)
+                    .body(Map.of("error", "Đề " + examId + " chưa có file đề bài gốc nào được tải lên."));
+            String fileName = examService.originalHandoutFileName(examId);
+            MediaType contentType = fileName != null && fileName.endsWith(".pdf")
+                    ? MediaType.APPLICATION_PDF
+                    : MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + examId + "_" + fileName + "\"")
+                    .contentType(contentType)
+                    .body(bytes);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", "Lỗi máy chủ"));
+        }
+    }
+
+    /** Xoá file đề bài gốc đã upload của 1 đề. */
+    @DeleteMapping("/{examId}/handout/original")
+    public ResponseEntity<?> deleteOriginalHandout(@PathVariable String examId) {
+        try {
+            examService.deleteOriginalHandoutFile(examId);
+            return ResponseEntity.ok(Map.of("exam_id", examId, "deleted", true));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", "Lỗi máy chủ"));
+        }
+    }
+
+    /**
      * Lưu KHUNG STARTER (lib/…) phát cho sinh viên. Body: { files: [{name, content}] }.
      * Chỉ thay thư mục starter, không đụng đề bài/hình/lời giải mẫu.
      */
@@ -421,6 +536,27 @@ public class ExamSetupController {
                             + ".wordprocessingml.document")
                     .header("Content-Disposition", "attachment; filename=\"" + examId + "_de_bai.docx\"")
                     .body(docx);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /** Tải đề bài dạng .pdf — cùng body/nội dung với {@code /de-bai/docx}, khác định dạng xuất. */
+    @SuppressWarnings("unchecked")
+    @PostMapping("/{examId}/de-bai/pdf")
+    public ResponseEntity<?> downloadDeBaiPdf(@PathVariable String examId,
+                                              @RequestBody(required = false) Map<String, Object> body) {
+        try {
+            Object raw = body == null ? null : body.get("images");
+            java.util.List<Map<String, Object>> images = raw instanceof java.util.List
+                    ? (java.util.List<Map<String, Object>>) raw : java.util.List.of();
+            byte[] pdf = examService.buildHandoutPdf(examId, images);
+            return ResponseEntity.ok()
+                    .header("Content-Type", "application/pdf")
+                    .header("Content-Disposition", "attachment; filename=\"" + examId + "_de_bai.pdf\"")
+                    .body(pdf);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         } catch (Exception e) {

@@ -504,6 +504,60 @@ public class ExamService {
     }
 
     /**
+     * Nhân bản CHỈ đề bài (đề bài + starter + lời giải mẫu trong {@code handout/}) sang một mã
+     * đề mới — KHÔNG đụng testcase/Golden Suite/database mẫu-ẩn đang chấm. Dùng cho nút "Clone"
+     * trong Kho đề khi giáo viên muốn viết lại đề dựa trên đề cũ (sửa tay hoặc nhờ AI) mà không
+     * kéo theo bộ chấm đang publish. Khác {@link #cloneImportedExam}: hàm đó bắt buộc có thư mục
+     * testcase nguồn và clone cả testcase; hàm này chỉ cần {@code handout/} của nguồn (có thể
+     * không có gì, khi đó bản sao chỉ là một Exam trống).
+     */
+    public synchronized Map<String, Object> cloneExamHandout(String rawSourceId, String rawTargetId,
+                                                              String examName, String actor) {
+        String sourceId = safeId(rawSourceId, "đề nguồn");
+        String targetId = safeId(rawTargetId, "đề mới");
+        if (targetId.length() > 50)
+            throw new IllegalArgumentException("Mã đề mới không được dài quá 50 ký tự.");
+        if (sourceId.equalsIgnoreCase(targetId))
+            throw new IllegalArgumentException("Mã đề bản sao phải khác mã đề nguồn.");
+        if (examRepository.existsByExamId(targetId))
+            throw new IllegalStateException("Mã đề " + targetId + " đã tồn tại.");
+
+        // Nguồn có thể chỉ tồn tại trên đĩa (handout) mà chưa có hàng DB — vẫn cho phép clone,
+        // khác cloneImportedExam vốn đòi hỏi cả thư mục testcase nguồn.
+        Exam source = examRepository.findByExamId(sourceId).orElse(null);
+
+        Exam clone = new Exam();
+        clone.setExamId(targetId);
+        clone.setExamName((examName == null || examName.isBlank())
+                ? (source != null ? source.getExamName() : targetId)
+                : examName.trim());
+        clone.setTeacherNote(source != null && source.getTeacherNote() != null ? source.getTeacherNote() : "");
+        clone.setAllowedPackages(source != null ? source.getAllowedPackages() : null);
+        clone.setTestcaseConfigJson(source != null ? source.getTestcaseConfigJson() : null);
+        clone.setStatus(ExamStatus.BUILDING);
+        clone.setCreatedBy(actor);
+        // KHÔNG set testcasePath/testcaseStatus/testcaseVersion — bản sao chưa có testcase.
+        try {
+            examRepository.save(clone);
+        } catch (Exception e) {
+            throw new IllegalStateException("Không lưu được đề bản sao: " + e.getMessage(), e);
+        }
+
+        try {
+            cloneHandout(sourceId, targetId);
+        } catch (Exception e) {
+            log.warn("Chép đề bài từ {} sang {} lỗi: {}", sourceId, targetId, e.getMessage());
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("exam_id", targetId);
+        out.put("exam_name", clone.getExamName());
+        out.put("source_exam_id", sourceId);
+        log.info("📑 Đã nhân bản đề bài {} → {} (chưa có testcase)", sourceId, targetId);
+        return out;
+    }
+
+    /**
      * Lấy bản ghi của một bộ testcase, TỰ ĐĂNG KÝ nếu nó mới chỉ có thư mục trên đĩa.
      *
      * <p>Thư mục {@code exams/<id>/testcase} có thể tồn tại mà không có hàng trong bảng exams
@@ -642,6 +696,123 @@ public class ExamService {
                     Files.createDirectories(output.getParent());
                     Files.copy(path, output, StandardCopyOption.REPLACE_EXISTING);
                 }
+            }
+        }
+    }
+
+    private static final Set<String> ORIGINAL_HANDOUT_EXTENSIONS = Set.of("docx", "pdf");
+
+    /**
+     * Tạo một hàng {@link Exam} tối thiểu nếu mã đề CHƯA có gì cả (chưa DB, chưa cả thư mục
+     * testcase) — dùng khi giáo viên upload file đề bài gốc cho một mã đề hoàn toàn mới. Khác
+     * {@link #ensureExamRecord}: hàm đó bắt buộc đã có {@code skills_matrix.json} trên đĩa (dùng
+     * cho bộ testcase mồ côi DB), còn ở đây chưa có gì để "nhận nuôi" — phải tạo mới hẳn.
+     */
+    public synchronized Exam ensureExamStub(String examId, String examName) {
+        safeId(examId, "đề");
+        return examRepository.findByExamId(examId).orElseGet(() -> {
+            Exam exam = new Exam();
+            exam.setExamId(examId);
+            exam.setExamName(examName == null || examName.isBlank() ? examId : examName.trim());
+            exam.setTeacherNote("");
+            exam.setStatus(ExamStatus.BUILDING);
+            return examRepository.save(exam);
+        });
+    }
+
+    /**
+     * Lưu NGUYÊN file đề bài gốc (.docx/.pdf) giáo viên tự soạn ở ngoài — khác {@code de_bai.md}
+     * (văn bản do AI soạn/giáo viên gõ tay). Luôn tối đa 1 file mỗi đề, ghi đè khi upload lại.
+     */
+    public Map<String, Object> saveOriginalHandoutFile(String examId, String examName, MultipartFile file) throws Exception {
+        if (file == null || file.isEmpty()) throw new IllegalArgumentException("Vui lòng chọn file đề bài.");
+        return saveOriginalHandoutFile(examId, examName, file.getOriginalFilename(), file.getBytes());
+    }
+
+    /**
+     * @param bytes nội dung file — nhận thẳng byte[] (không phải {@link MultipartFile}) để gọi
+     *              lại được từ nơi đã đọc bytes trước đó (vd để bóc chữ tự động, xem
+     *              {@code ExamSetupController#uploadOriginalHandout}) mà không đọc file 2 lần.
+     */
+    public Map<String, Object> saveOriginalHandoutFile(String examId, String examName, String originalFileName, byte[] bytes) throws Exception {
+        safeId(examId, "đề");
+        if (bytes == null || bytes.length == 0) throw new IllegalArgumentException("Vui lòng chọn file đề bài.");
+        String originalName = originalFileName == null ? "" : originalFileName;
+        int dot = originalName.lastIndexOf('.');
+        String ext = dot < 0 ? "" : originalName.substring(dot + 1).toLowerCase(Locale.ROOT);
+        if (!ORIGINAL_HANDOUT_EXTENSIONS.contains(ext))
+            throw new IllegalArgumentException("Chỉ nhận file .docx hoặc .pdf.");
+
+        ensureExamStub(examId, examName);
+        Path dir = handoutDirOf(examId);
+        Files.createDirectories(dir);
+        deleteExistingOriginalHandoutFiles(dir);
+        Path target = dir.resolve("original." + ext);
+        Files.write(target, bytes);
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("exam_id", examId);
+        out.put("file_name", "original." + ext);
+        out.put("size_bytes", Files.size(target));
+        return out;
+    }
+
+    /** Thông tin file đề bài gốc đã upload của 1 đề, nếu có. */
+    public Map<String, Object> originalHandoutInfo(String examId) {
+        safeId(examId, "đề");
+        Path found = findOriginalHandoutFile(examId);
+        Map<String, Object> out = new LinkedHashMap<>();
+        if (found == null) {
+            out.put("exists", false);
+            return out;
+        }
+        out.put("exists", true);
+        out.put("file_name", found.getFileName().toString());
+        try {
+            out.put("size_bytes", Files.size(found));
+        } catch (Exception ignored) {
+            out.put("size_bytes", 0);
+        }
+        return out;
+    }
+
+    /** Đọc nguyên byte file đề bài gốc đã upload; {@code null} nếu chưa có. */
+    public byte[] readOriginalHandoutFile(String examId) throws Exception {
+        safeId(examId, "đề");
+        Path found = findOriginalHandoutFile(examId);
+        return found == null ? null : Files.readAllBytes(found);
+    }
+
+    /** Tên file thật (để đặt Content-Type/Content-Disposition khi tải xuống); {@code null} nếu chưa có. */
+    public String originalHandoutFileName(String examId) {
+        safeId(examId, "đề");
+        Path found = findOriginalHandoutFile(examId);
+        return found == null ? null : found.getFileName().toString();
+    }
+
+    /** Xoá file đề bài gốc đã upload, nếu có — không lỗi nếu chưa từng upload. */
+    public void deleteOriginalHandoutFile(String examId) {
+        safeId(examId, "đề");
+        Path dir = handoutDirOf(examId);
+        if (Files.isDirectory(dir)) deleteExistingOriginalHandoutFiles(dir);
+    }
+
+    private Path findOriginalHandoutFile(String examId) {
+        Path dir = handoutDirOf(examId);
+        if (!Files.isDirectory(dir)) return null;
+        for (String ext : ORIGINAL_HANDOUT_EXTENSIONS) {
+            Path candidate = dir.resolve("original." + ext);
+            if (Files.isRegularFile(candidate)) return candidate;
+        }
+        return null;
+    }
+
+    private void deleteExistingOriginalHandoutFiles(Path dir) {
+        for (String ext : ORIGINAL_HANDOUT_EXTENSIONS) {
+            try {
+                Files.deleteIfExists(dir.resolve("original." + ext));
+            } catch (Exception e) {
+                log.warn("Không xoá được file đề bài gốc cũ trong {}: {}", dir, e.getMessage());
             }
         }
     }
@@ -818,6 +989,63 @@ public class ExamService {
             }
         }
         return docx.build();
+    }
+
+    /**
+     * Bản .pdf của đề bài — cùng nội dung/khối với {@link #buildHandoutDocx} (đọc lại
+     * {@link HandoutDocument#parse}, cùng ảnh chụp Golden App), chỉ khác {@link PdfWriter} là nơi
+     * dựng. Hai hàm không dùng chung interface: chỉ 2 nơi gọi, tách interface cho 2 chỗ chưa đáng.
+     */
+    public byte[] buildHandoutPdf(String examId, List<Map<String, Object>> images) throws Exception {
+        safeId(examId, "đề");
+        Exam exam = examRepository.findByExamId(examId).orElse(null);
+        String md = readDeBai(examId);
+        if ((md == null || md.isBlank()) && (images == null || images.isEmpty()))
+            throw new IllegalArgumentException("Bộ " + examId + " chưa có đề bài để tải về.");
+
+        try (PdfWriter pdf = new PdfWriter()) {
+            pdf.heading(exam != null && exam.getExamName() != null && !exam.getExamName().isBlank()
+                    ? exam.getExamName() : examId, 1);
+            pdf.paragraph("Mã bộ testcase: " + examId);
+
+            int ordered = 0;
+            for (HandoutDocument.Block block : HandoutDocument.parse(md == null ? "" : md)) {
+                switch (block.type()) {
+                    case "h1", "h2" -> { pdf.heading(block.text(), 2); ordered = 0; }
+                    case "h3" -> { pdf.heading(block.text(), 3); ordered = 0; }
+                    case "li" -> { pdf.bullet(block.text(), false, 0); ordered = 0; }
+                    case "ol" -> pdf.bullet(block.text(), true, ++ordered);
+                    case "code" -> { pdf.code(block.text()); ordered = 0; }
+                    case "table" -> { pdf.table(HandoutDocument.splitTableRows(block.text())); ordered = 0; }
+                    default -> { pdf.paragraph(block.text()); ordered = 0; }
+                }
+            }
+
+            Map<String, byte[]> screenshots = readGoldenScreenshots(examId);
+            if ((images != null && !images.isEmpty()) || !screenshots.isEmpty()) {
+                pdf.heading("Hình minh họa giao diện", 2);
+                for (Map<String, Object> image : images == null ? List.<Map<String, Object>>of() : images) {
+                    if (image == null) continue;
+                    String base64 = String.valueOf(image.getOrDefault("png_base64", ""));
+                    if (base64.isBlank()) continue;
+                    int comma = base64.indexOf(',');
+                    if (base64.startsWith("data:") && comma > 0) base64 = base64.substring(comma + 1);
+                    byte[] png;
+                    try { png = java.util.Base64.getDecoder().decode(base64.trim()); }
+                    catch (Exception e) { continue; }
+                    pdf.image(png, (int) toDouble(image.get("width"), 0), (int) toDouble(image.get("height"), 0));
+                }
+                for (Map.Entry<String, byte[]> entry : screenshots.entrySet()) {
+                    java.awt.image.BufferedImage img;
+                    try { img = javax.imageio.ImageIO.read(new java.io.ByteArrayInputStream(entry.getValue())); }
+                    catch (Exception e) { continue; }
+                    if (img == null) continue;
+                    pdf.paragraph(entry.getKey());
+                    pdf.image(entry.getValue(), img.getWidth(), img.getHeight());
+                }
+            }
+            return pdf.build();
+        }
     }
 
     /**

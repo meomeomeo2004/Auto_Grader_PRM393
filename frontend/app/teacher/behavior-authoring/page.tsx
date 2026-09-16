@@ -7,7 +7,7 @@ import SidebarLayout from "@/components/layout/SidebarLayout";
 import { API_BASE } from "@/lib/config";
 import {
   Check, CheckCircle2, ChevronDown, Circle, Code2, Copy, Database, Download, FileArchive, FileJson,
-  Loader2, MonitorPlay, Pencil, Play, Plus, Radio, Send, ShieldCheck, Sparkles,
+  Loader2, MonitorPlay, Pencil, Play, Plus, Radio, Send, ShieldCheck,
   Square, Trash2, UploadCloud, X, XCircle,
 } from "lucide-react";
 
@@ -871,6 +871,24 @@ function BehaviorAuthoringEditor() {
       setAvailableSuites((current) => current.filter((item) => item.id !== selected.id));
       if (suite?.id === selected.id) closeSuite();
       setNotice(`Đã xóa bộ chấm ${selected.suite_code}.`);
+    });
+  };
+
+  /**
+   * Nhân bản CHỈ đề bài (không đụng testcase/Golden Suite đang chạy) sang một mã đề mới, rồi mở
+   * thẳng sang "Tạo đề" để sửa tay hoặc nhờ AI sửa tiếp — không nhân bản chính bộ chấm này.
+   */
+  const cloneSuiteExam = (selected: Suite) => {
+    if (!selected.exam_id) { setError("Bộ này chưa gắn mã đề, không có đề bài để nhân bản."); return; }
+    const targetId = window.prompt(`Nhập mã đề MỚI cho bản sao đề bài của "${selected.exam_id}":`, `${selected.exam_id}_COPY`);
+    if (!targetId || !targetId.trim()) return;
+    run(`clone-exam-${selected.id}`, async () => {
+      const result = await api<{ exam_id: string }>(`/exam-setup/${selected.exam_id}/clone-handout`, {
+        method: "POST",
+        body: JSON.stringify({ target_exam_id: targetId.trim() }),
+      });
+      setNotice(`Đã nhân bản đề bài sang "${result.exam_id}" — đang mở "Tạo đề" để sửa tiếp.`);
+      window.open(`/teacher/exam-authoring?examId=${encodeURIComponent(result.exam_id)}`, "_blank");
     });
   };
 
@@ -1986,7 +2004,7 @@ function BehaviorAuthoringEditor() {
               </div>
             </div>
           </div>
-          {!suite && <><button onClick={createSuite} disabled={Boolean(busy)} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-3 font-bold text-white hover:bg-indigo-500 disabled:opacity-50">{busy === "create" ? <Loader2 className="animate-spin" size={18} /> : <Plus size={18} />} Tạo bộ chấm mới</button>{availableSuites.length > 0 && <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">{availableSuites.map((item) => <div key={item.id} className="relative rounded-xl border border-slate-200 transition hover:border-indigo-400 hover:bg-indigo-50/50 dark:border-slate-700 dark:hover:bg-indigo-950/20"><button onClick={() => void openSuite(item)} className="block w-full p-4 pr-14 text-left"><div className="flex items-center justify-between gap-2"><span className="font-bold">{item.name}</span><span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">{item.status}</span></div><p className="mt-1 font-mono text-xs text-indigo-500">{item.suite_code}</p><p className="mt-2 text-xs text-slate-500">Mã đề: {item.exam_id || "chưa gắn"}</p></button><button onClick={() => deleteSuite(item)} disabled={Boolean(busy)} title="Xóa bộ chấm" className="absolute bottom-3 right-3 rounded-lg border border-rose-300 p-2 text-rose-500 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-800 dark:hover:bg-rose-950"><Trash2 size={16} /></button></div>)}</div>}
+          {!suite && <><button onClick={createSuite} disabled={Boolean(busy)} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-3 font-bold text-white hover:bg-indigo-500 disabled:opacity-50">{busy === "create" ? <Loader2 className="animate-spin" size={18} /> : <Plus size={18} />} Tạo bộ chấm mới</button>{availableSuites.length > 0 && <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">{availableSuites.map((item) => <div key={item.id} className="relative rounded-xl border border-slate-200 transition hover:border-indigo-400 hover:bg-indigo-50/50 dark:border-slate-700 dark:hover:bg-indigo-950/20"><button onClick={() => void openSuite(item)} className="block w-full p-4 pr-14 text-left"><div className="flex items-center justify-between gap-2"><span className="font-bold">{item.name}</span><span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">{item.status}</span></div><p className="mt-1 font-mono text-xs text-indigo-500">{item.suite_code}</p><p className="mt-2 text-xs text-slate-500">Mã đề: {item.exam_id || "chưa gắn"}</p></button><div className="absolute bottom-3 right-3 flex gap-2"><button onClick={() => cloneSuiteExam(item)} disabled={Boolean(busy) || !item.exam_id} title={item.exam_id ? "Nhân bản đề bài sang mã đề mới" : "Bộ này chưa gắn mã đề"} className="rounded-lg border border-indigo-300 p-2 text-indigo-500 hover:bg-indigo-50 disabled:opacity-40 dark:border-indigo-800 dark:hover:bg-indigo-950">{busy === `clone-exam-${item.id}` ? <Loader2 className="animate-spin" size={16} /> : <Copy size={16} />}</button><button onClick={() => deleteSuite(item)} disabled={Boolean(busy)} title="Xóa bộ chấm" className="rounded-lg border border-rose-300 p-2 text-rose-500 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-800 dark:hover:bg-rose-950"><Trash2 size={16} /></button></div></div>)}</div>}
               <div className="mt-6 rounded-xl border border-amber-300 bg-amber-50/40 p-4 dark:border-amber-800 dark:bg-amber-950/20">
                 <p className="text-sm font-bold">Kiểm đồng bộ khung phát cho sinh viên</p>
                 <p className="mt-1 text-[11px] text-slate-500">
@@ -2055,16 +2073,6 @@ function BehaviorAuthoringEditor() {
               </div>
 </>}
         </section>
-
-        <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-indigo-200 bg-indigo-50/60 p-4 dark:border-indigo-900 dark:bg-indigo-950/20">
-          <Sparkles size={18} className="shrink-0 text-indigo-500" />
-          <div className="min-w-0 flex-1">
-            <p className="text-sm font-bold text-indigo-700 dark:text-indigo-300">Soạn đề &amp; sinh Golden Solution bằng AI đã chuyển sang 2 trang riêng</p>
-            <p className="mt-0.5 text-xs text-indigo-600/80 dark:text-indigo-300/70">“Tạo đề” để soạn/sửa đề bài · “Tạo Golden” để chọn mã đề rồi sinh khung starter + Golden Solution (tự gắn vào đúng bộ chấm này).</p>
-          </div>
-          <a href="/teacher/exam-authoring" className="shrink-0 rounded-lg border border-indigo-300 bg-white px-3 py-2 text-xs font-bold text-indigo-600 hover:bg-indigo-50 dark:border-indigo-700 dark:bg-slate-900">Tạo đề →</a>
-          <a href="/teacher/golden-authoring" className="shrink-0 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-bold text-white hover:bg-indigo-500">Tạo Golden →</a>
-        </div>
 
         {suite && <>
           <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
