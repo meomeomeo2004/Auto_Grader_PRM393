@@ -334,11 +334,19 @@ Launch "Backend (:$bePort)" $beCmd
 
 # Frontend Next.js. Cong truyen thang cho next chu KHONG qua .env: bien PORT trong .env.local
 # khong chac duoc doc truoc luc server bind, ma sai cong thi hai ban dam nhau.
+#
+# GOI THANG next.cmd, KHONG qua "npm run dev -- -p X": khi npm tren may nay tro vao npm.ps1
+# (vd nvm4w) va cua so duoc mo qua powershell -Command nhu o day, PowerShell AM THAM lam rot
+# token "--" luc goi mot script .ps1 kieu nay (da kiem chung: $args ben trong npm.ps1 chi con
+# 'run','dev','-p','3100', MAT "--"). Thieu "--" thi npm hieu -p la co CUA CHINH NPM, nuot mat,
+# chi con "3100" troi xuong lam tham so cho "next dev" - Next hieu nham thanh duong dan thu muc
+# va bao "Invalid project directory ...\3100". Goi thang next.cmd trong node_modules\.bin thi
+# khong con "--" nao de bi rot, "-p" toi thang next.
 $feCmd = @"
 Set-Location '$feDir'
 if (-not (Test-Path 'node_modules')) { Write-Host 'npm install (lan dau)...' -ForegroundColor Yellow; npm install }
 Write-Host 'Frontend: http://localhost:$FePort' -ForegroundColor Green
-npm run dev -- -p $FePort
+& '.\node_modules\.bin\next.cmd' dev -p $FePort
 "@
 Launch "Frontend (:$FePort)" $feCmd
 
