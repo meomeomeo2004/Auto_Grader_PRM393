@@ -309,13 +309,15 @@ final class AiPrompts {
                 + "\n\n---\nYÊU CẦU CHỈNH SỬA:\n" + instruction;
     }
 
-    // ── 4. Database mẫu (phát cho SV) + database ẩn (chống hardcode) ─
+    // ── 4. Database ẩn (dữ liệu máy chấm nạp) ─
 
     /**
-     * Sinh dữ liệu cho ĐÚNG HAI database mà mục "Bảy thành phần của bộ chấm" cần
-     * (STUDENT_DATABASE + HIDDEN_DATABASE): cùng cấu trúc bảng, khác dữ liệu — hệ thống chấm đối
-     * chiếu schema hai bên phải giống hệt nhau ({@code BehaviorArtifactService#compareSqliteSchema}),
-     * còn dữ liệu khác nhau mới chặn được sinh viên hardcode kết quả theo bộ mẫu công khai.
+     * Sinh dữ liệu cho ĐÚNG MỘT database: HIDDEN_DATABASE — thứ máy chấm nạp vào trước khi mở app.
+     *
+     * <p>Bản trước sinh thêm một database mẫu phát cho sinh viên, nhưng ô artifact đó đã bỏ hẳn
+     * (16/9/2026): engine chỉ đọc {@code hidden_fixture_path}, không bao giờ mở student.db, nên
+     * file kia chỉ tồn tại để không ai dùng. Sinh viên nhận CẤU TRÚC bảng qua mục "Hợp đồng dữ
+     * liệu" của đề chứ không nhận sẵn dữ liệu — và đó chính là thứ chặn hardcode.
      *
      * <p>Không tự chạy SQL của AI trực tiếp lên database thật: {@code ExamService#saveDatabaseSeed}
      * chỉ chấp nhận đúng câu lệnh bắt đầu bằng "CREATE TABLE", còn dữ liệu luôn bind qua
@@ -323,10 +325,11 @@ final class AiPrompts {
      */
     static String seedSystem() {
         return """
-               Bạn là giảng viên chuẩn bị HAI file SQLite cho một bài thi PRM393 đã ra đề xong:
-               - Database PHÁT CHO SINH VIÊN: dữ liệu mẫu, sinh viên nhìn thấy khi mở app.
-               - Database ẨN: CÙNG CẤU TRÚC BẢNG (tên bảng/cột/kiểu giống hệt), nhưng DỮ LIỆU KHÁC
-                 hẳn — dùng để chấm bài mà sinh viên không đoán/hardcode được kết quả từ dữ liệu mẫu.
+               Bạn là giảng viên chuẩn bị MỘT file SQLite cho một bài thi PRM393 đã ra đề xong:
+               Database ẨN — dữ liệu mà hệ thống chấm nạp vào app trước khi chạy bài của sinh viên.
+               Sinh viên KHÔNG được phát dữ liệu này; họ chỉ biết cấu trúc bảng qua mục "Hợp đồng
+               dữ liệu" của đề. Vì vậy dữ liệu ở đây phải đủ phong phú để lộ ra bài nào hardcode
+               kết quả thay vì thật sự tính toán.
 
                Chỉ trả về MỘT object JSON:
                {
@@ -335,33 +338,32 @@ final class AiPrompts {
                      "name": "<tên bảng, đúng như trong mục Hợp đồng dữ liệu của đề>",
                      "create_sql": "<câu lệnh CREATE TABLE IF NOT EXISTS ... NGUYÊN VĂN từ đề>",
                      "columns": ["<cột 1>", "<cột 2>", "..."],
-                     "student_rows": [[<giá trị cột 1>, <giá trị cột 2>, "..."], ["..."]],
-                     "hidden_rows": [["..."], ["..."]]
+                     "hidden_rows": [[<giá trị cột 1>, <giá trị cột 2>, "..."], ["..."]]
                    }
                  ],
-                 "notes": ["<vd: đổi hẳn ngày tháng nên tổng theo tháng của 2 bộ khác nhau>"]
+                 "notes": ["<vd: có 2 tháng khác nhau nên tổng theo tháng không trùng tổng tất cả>"]
                }
 
                QUY TẮC BẮT BUỘC:
                - "create_sql" PHẢI khớp NGUYÊN VĂN câu lệnh ở mục "Hợp đồng dữ liệu" của đề — sai
                  một chữ là hệ thống chấm đọc nhầm bảng, mất điểm oan cho sinh viên.
                - KHÔNG bịa thêm bảng nào ngoài những bảng đã khai trong "Hợp đồng dữ liệu".
-               - Mỗi bảng: 5–10 dòng cho MỖI bộ (student_rows và hidden_rows tách riêng).
+               - Mỗi bảng 5–10 dòng.
                - "columns" liệt kê đúng tên cột sẽ điền giá trị, ĐÚNG THỨ TỰ với từng phần tử trong
-                 mỗi dòng của student_rows/hidden_rows. Được bỏ qua cột khóa chính tự tăng (vd "id")
-                 để SQLite tự đánh số.
+                 mỗi dòng của hidden_rows. Được bỏ qua cột khóa chính tự tăng (vd "id") để SQLite
+                 tự đánh số.
                - Dữ liệu phải THỰC TẾ, đúng kiểu (số là số, không để chữ vào cột số, ngày đúng định
                  dạng đề yêu cầu), đúng các mã cố định nếu đề có khai (vd mã danh mục viết hoa
                  không dấu).
-               - "student_rows" và "hidden_rows" PHẢI khác nhau đủ nhiều (tên, số tiền, ngày tháng,
-                 số dòng...) để không thể suy ra kết quả tính toán (tổng, đếm, lọc, sắp xếp...) của
-                 bộ này từ bộ kia.
+               - Dữ liệu phải đủ ĐA DẠNG để mọi phép tính của đề cho ra kết quả KHÁC NHAU: có nhiều
+                 danh mục, nhiều tháng, số tiền chênh lệch rõ, có dòng biên (nhỏ nhất/lớn nhất). Bài
+                 nào hardcode một con số sẽ trượt ngay; bài tính thật thì đúng.
                """;
     }
 
     static String seedUser(String deBai) {
         return "ĐỀ BÀI:\n\n" + deBai
-                + "\n\nHãy soạn dữ liệu mẫu (student_rows) và dữ liệu ẩn (hidden_rows) cho đúng"
+                + "\n\nHãy soạn dữ liệu cho database ẩn (hidden_rows) cho đúng"
                 + " (các) bảng đã khai ở mục Hợp đồng dữ liệu.";
     }
 

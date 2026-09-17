@@ -147,7 +147,6 @@ class ExamServiceSandboxTest {
     private ExamService serviceWithReadyBaseImage(ExamRepository repository) {
         ExamService service = new ExamService();
         ReflectionTestUtils.setField(service, "examRepository", repository);
-        ReflectionTestUtils.setField(service, "syllabusService", mock(SyllabusService.class));
         ReflectionTestUtils.setField(service, "templateDir", tempDir.resolve("grader-base").toString());
         ReflectionTestUtils.setField(service, "examsDir", tempDir.resolve("exams").toString());
         ReflectionTestUtils.setField(service, "baseImage", "grading-base:test");

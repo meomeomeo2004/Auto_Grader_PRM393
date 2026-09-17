@@ -101,8 +101,6 @@ public class ExamService {
     @org.springframework.context.annotation.Lazy
     private StarterSyncService starterSyncService;
     @Autowired
-    private SyllabusService syllabusService;
-    @Autowired
     private com.example.grader.repository.ExamResultRepository resultRepository;
     @Autowired
     private com.example.grader.repository.GradingBatchRepository batchRepository;
@@ -146,22 +144,6 @@ public class ExamService {
     /** Thư mục gốc chứa các đề (exams/), nơi mỗi đề là <exams>/<id>/testcase/. */
     private Path examsRoot() {
         return resolveExamsDir(locateTemplateDir());
-    }
-
-    /**
-     * Đọc nguyên văn skills_matrix.json của 1 đề. Ưu tiên testcasePath trong DB; nếu không
-     * có thì đọc trực tiếp thư mục trên đĩa <exams>/<examId>/testcase/ (đề mẫu chưa upload).
-     */
-    public String readSkillsMatrixJson(String examId) throws Exception {
-        safeId(examId, "đề");
-        Exam exam = examRepository.findByExamId(examId).orElse(null);
-        if (exam != null && exam.getTestcasePath() != null && !exam.getTestcasePath().isBlank()) {
-            Path f = Path.of(exam.getTestcasePath()).resolve("skills_matrix.json");
-            if (Files.exists(f)) return Files.readString(f, StandardCharsets.UTF_8);
-        }
-        Path disk = examsRoot().resolve(examId).resolve("testcase").resolve("skills_matrix.json");
-        if (Files.exists(disk)) return Files.readString(disk, StandardCharsets.UTF_8);
-        throw new IllegalArgumentException("Không tìm thấy skills_matrix.json của đề " + examId);
     }
 
     /**
@@ -395,9 +377,8 @@ public class ExamService {
             pending.put(clean, content);
         }
         if (pending.isEmpty()) throw new IllegalArgumentException("Không có file hợp lệ nào để lưu.");
-        String matrixWarning = pending.containsKey("skills_matrix.json")
-                ? checkEditedSkillsMatrix(dir.resolve("skills_matrix.json"), pending.get("skills_matrix.json"))
-                : null;
+        // Khung nang luc da bo: khong con canh bao nao tu skills_matrix.json.
+        String matrixWarning = null;
 
         snapshotCurrentTestcase(examId);
         List<String> written = new ArrayList<>();
@@ -1093,14 +1074,16 @@ public class ExamService {
     }
 
     /**
-     * Dựng THẬT hai file SQLite (handout/student.db, handout/hidden.db) từ bản mô tả bảng+dữ liệu
-     * do {@code AiExamAuthorService#proposeDatabaseSeed} soạn — để tải trực tiếp ở trang "Tạo đề",
-     * rồi giáo viên tự tải lên đúng ô STUDENT_DATABASE/HIDDEN_DATABASE ở trang "Tạo Golden"/"Bộ
-     * chấm Golden".
+     * Dựng THẬT file SQLite handout/hidden.db từ bản mô tả bảng+dữ liệu do
+     * {@code AiExamAuthorService#proposeDatabaseSeed} soạn — để tải trực tiếp ở trang "Tạo đề",
+     * rồi giáo viên tự tải lên ô Database ẩn ở trang "Bộ chấm Golden".
      *
-     * <p>Hai file LUÔN chạy CÙNG {@code create_sql} cho mỗi bảng — chỉ khác dữ liệu — nên cấu trúc
-     * hai bên khớp nhau đúng như {@code BehaviorArtifactService#compareSqliteSchema} đòi hỏi; AI
-     * chỉ quyết định DỮ LIỆU khác nhau thế nào để chống hardcode.
+     * <p>Bản trước dựng thêm handout/student.db. Ô artifact đó đã bỏ hẳn (16/9/2026) vì engine
+     * chỉ đọc {@code hidden_fixture_path} và không bao giờ mở student.db — dựng thêm một file
+     * không ai nạp chỉ khiến giáo viên tưởng còn một bước tải lên nữa.
+     *
+     * <p>Xoá nốt student.db cũ nếu đề từng sinh ra nó, để thư mục handout không còn một file mà
+     * quy trình hiện tại không nhận.
      */
     public void saveDatabaseSeed(String examId, List<Map<String, Object>> tables) throws Exception {
         safeId(examId, "đề");
@@ -1108,21 +1091,18 @@ public class ExamService {
             throw new IllegalArgumentException("Chưa có bảng dữ liệu nào để dựng database.");
         Path handout = handoutDirOf(examId);
         Files.createDirectories(handout);
-        Path studentDb = handout.resolve("student.db");
         Path hiddenDb = handout.resolve("hidden.db");
-        Files.deleteIfExists(studentDb);
+        Files.deleteIfExists(handout.resolve("student.db"));
         Files.deleteIfExists(hiddenDb);
         try {
-            buildSqlite(studentDb, tables, "student_rows");
             buildSqlite(hiddenDb, tables, "hidden_rows");
         } catch (Exception e) {
-            // Nửa vời (student có, hidden lỗi) còn tệ hơn không có cái nào — giáo viên tưởng đã
-            // xong mà thật ra thiếu HIDDEN_DATABASE, sẽ bị chặn ở bước upload sau mà không hiểu vì sao.
-            Files.deleteIfExists(studentDb);
+            // Nửa vời còn tệ hơn không có: giáo viên tưởng đã xong mà file hỏng, đến lúc tải lên
+            // mới bị chặn và không hiểu vì sao.
             Files.deleteIfExists(hiddenDb);
             throw e;
         }
-        log.info("🗄️ Đã dựng student.db + hidden.db cho đề {} ({} bảng)", examId, tables.size());
+        log.info("🗄️ Đã dựng hidden.db cho đề {} ({} bảng)", examId, tables.size());
     }
 
     /**
@@ -1365,7 +1345,6 @@ public class ExamService {
             unzip(zipBytes, staging);
             validateRequiredFiles(staging);
             ensurePortableContract(staging);
-            validateSkillCodes(staging);
 
             Files.createDirectories(examDir);
             try {
@@ -1510,7 +1489,6 @@ public class ExamService {
         normalizeGraderExecution(testcaseDir);     // Chặn retry/process treo quá thời gian.
         ensureTestcaseImportsAvailable(testcaseDir);
         validateTestcaseImports(testcaseDir);
-        validateSkillCodes(testcaseDir);
     }
 
     /** Giữ tương thích với nơi chỉ yêu cầu đổi mã. */
@@ -2767,81 +2745,13 @@ Future<ProcessResult> _runProcess(
         return allowed;
     }
 
-    /**
-     * Kiểm tra skill_code trong skills_matrix.json (nếu giảng viên có khai) phải nằm trong
-     * syllabus và chưa bị deprecate. Testcase KHÔNG khai skill_code được bỏ qua (tương thích đề cũ).
-     */
-    private void validateSkillCodes(Path testcaseDir) throws Exception {
-        Path f = testcaseDir.resolve("skills_matrix.json");
-        if (!Files.exists(f)) return;
-        checkSkillsMatrixProblems(Files.readString(f, StandardCharsets.UTF_8));
-    }
-
-    /**
-     * Kiểm skill_code khi SỬA FILE — nới hơn lúc upload ZIP một bậc: lỗi ĐÃ CÓ SẴN trong bộ đang
-     * lưu chỉ được cảnh báo. Chặn cứng thì những bộ cũ (mã kỹ năng về sau bị bỏ khỏi syllabus)
-     * không bao giờ lưu lại được, mà bấm Lưu lại chính là bước chuyển Nháp → Hoàn tất: bản clone
-     * của các bộ đó sẽ mắc kẹt ở Nháp vĩnh viễn. Lỗi MỚI phát sinh trong lần sửa này vẫn chặn.
-     *
-     * @return cảnh báo cần hiện cho giáo viên, hoặc null nếu matrix sạch
-     */
-    private String checkEditedSkillsMatrix(Path currentFile, String newJson) {
-        List<Map<String, Object>> problems = skillCodeErrors(newJson);
-        if (problems.isEmpty()) return null;
-
-        Set<String> before = new HashSet<>();
-        try {
-            if (Files.isRegularFile(currentFile))
-                skillCodeErrors(Files.readString(currentFile, StandardCharsets.UTF_8))
-                        .forEach(p -> before.add(problemKey(p)));
-        } catch (Exception ignored) {
-            // Đọc bản cũ hỏng thì coi như không có lỗi cũ → mọi lỗi tính là mới (chặt tay hơn).
-        }
-        List<Map<String, Object>> added = problems.stream()
-                .filter(p -> !before.contains(problemKey(p))).toList();
-        if (!added.isEmpty())
-            throw new IllegalArgumentException(
-                    "skills_matrix.json có skill_code không hợp lệ: " + describeProblems(added));
-
-        List<Map<String, Object>> shown = problems.size() > 5 ? problems.subList(0, 5) : problems;
-        return "Bộ này vẫn còn " + problems.size() + " skill_code không có trong syllabus ("
-                + describeProblems(shown) + (problems.size() > 5 ? "; …" : "")
-                + ") — các tiêu chí đó không vào được bảng năng lực.";
-    }
-
-    private List<Map<String, Object>> skillCodeErrors(String matrixJson) {
-        return syllabusService.validateSkillsMatrix(matrixJson).stream()
-                .filter(p -> !"warning".equals(p.get("severity"))).toList();
-    }
-
-    private String problemKey(Map<String, Object> problem) {
-        return problem.get("testId") + "|" + problem.get("skillCode") + "|" + problem.get("issue");
-    }
-
-    /** Dùng cho lúc upload ZIP — chặt tay: mọi skill_code lạ đều chặn. */
-    private void checkSkillsMatrixProblems(String matrixJson) {
-        List<Map<String, Object>> problems = syllabusService.validateSkillsMatrix(matrixJson);
-        if (problems.isEmpty()) return;
-
-        // "error" (skill_code sai/deprecated, difficulty không hợp lệ) → CHẶN upload.
-        // "warning" (vd weight lệch độ khó) → chỉ ghi log, vẫn cho upload (grader tự suy weight từ difficulty).
-        List<Map<String, Object>> errors   = problems.stream()
-                .filter(p -> !"warning".equals(p.get("severity"))).toList();
-        List<Map<String, Object>> warnings = problems.stream()
-                .filter(p ->  "warning".equals(p.get("severity"))).toList();
-
-        if (!warnings.isEmpty())
-            log.warn("⚠️ skills_matrix.json có {} cảnh báo: {}", warnings.size(), describeProblems(warnings));
-        if (!errors.isEmpty())
-            throw new IllegalArgumentException(
-                    "skills_matrix.json có skill_code không hợp lệ: " + describeProblems(errors));
-    }
-
-    private String describeProblems(List<Map<String, Object>> problems) {
-        return problems.stream()
-                .map(p -> p.get("testId") + " → " + p.get("skillCode") + " (" + p.get("issue") + ")")
-                .collect(java.util.stream.Collectors.joining("; "));
-    }
+    // Khung năng lực đã bỏ hẳn (17/9/2026), nên không còn phép kiểm skill_code nào ở đây.
+    //
+    // Trước đây có HAI cửa với hai độ chặt khác nhau: cửa sửa file bên giảng viên chỉ chặn lỗi
+    // MỚI, còn cửa nạp .zip chặn mọi lỗi. Khi hai vai còn chạy chung một hệ thống thì bộ chấm
+    // đi thẳng từ màn soạn sang màn chấm nên không bao giờ qua cửa nạp — chênh lệch đó vô hại.
+    // Tách vai xong, đường duy nhất giữa hai bên là gói .zip, và nó đi qua đúng cửa chặt: gói
+    // do chính hệ thống sinh ra lại bị chính hệ thống từ chối. Bỏ cả hai cửa là hết nghịch lý.
 
     /**
      * Lưu phiên bản testcase CŨ trước khi upload đè (di chuyển sang testcase-archive/&lt;epochMillis&gt;/)

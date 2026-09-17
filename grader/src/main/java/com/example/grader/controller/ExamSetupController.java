@@ -5,8 +5,7 @@ import com.example.grader.repository.ExamRepository;
 import com.example.grader.service.BanGiaoService;
 import com.example.grader.service.ExamService;
 import com.example.grader.service.StarterSyncService;
-import com.example.grader.service.SyllabusService;
-import com.example.grader.service.ai.ExamDocumentReader;
+import com.example.grader.service.ExamDocumentReader;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -29,8 +28,6 @@ public class ExamSetupController {
     private ExamService examService;
     @Autowired
     private ExamRepository examRepo;
-    @Autowired
-    private SyllabusService syllabusService;
     @Autowired
     private StarterSyncService starterSyncService;
     @Autowired
@@ -177,23 +174,6 @@ public class ExamSetupController {
         }
     }
 
-    /**
-     * ĐÁNH GIÁ ĐỘ PHỦ của đề theo SYLLABUS hiện tại (resolve trực tiếp → sửa syllabus là
-     * phản chiếu ngay). Trả: testcase ↔ kiến thức/độ khó, độ phủ theo category & độ khó,
-     * skill chưa phủ (gaps), issues.
-     */
-    @GetMapping("/coverage/{examId}")
-    public ResponseEntity<?> coverage(@PathVariable String examId) {
-        try {
-            String matrix = examService.readSkillsMatrixJson(examId);
-            return ResponseEntity.ok(syllabusService.evaluateCoverage(matrix));
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.status(404).body(Map.of("error", e.getMessage()));
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
-        }
-    }
-
     /** Rubric (danh sách tiêu chí) của đề — cho trang chấm tay. */
     @GetMapping("/criteria/{examId}")
     public ResponseEntity<?> getCriteria(@PathVariable String examId) {
@@ -300,9 +280,9 @@ public class ExamSetupController {
     }
 
     /**
-     * Dựng THẬT hai file SQLite (handout/student.db, handout/hidden.db) từ bản mô tả bảng+dữ liệu
-     * AI đã soạn ({@code /api/ai/database/propose}). Body: { tables: [{name, create_sql, columns,
-     * student_rows, hidden_rows}] }.
+     * Dựng THẬT file SQLite handout/hidden.db từ bản mô tả bảng+dữ liệu AI đã soạn
+     * ({@code /api/ai/database/propose}). Body: { tables: [{name, create_sql, columns,
+     * hidden_rows}] }.
      */
     @SuppressWarnings("unchecked")
     @PostMapping("/{examId}/database-seed")
@@ -320,11 +300,9 @@ public class ExamSetupController {
         }
     }
 
-    /** Tải database mẫu phát cho sinh viên (handout/student.db). 404 nếu chưa sinh. */
-    @GetMapping("/{examId}/download/student-db")
-    public ResponseEntity<?> downloadStudentDb(@PathVariable String examId) {
-        return downloadHandoutFile(examId, "student.db");
-    }
+    // Điểm tải handout/student.db đã gỡ cùng lúc với ô artifact "Database phát cho sinh viên":
+    // saveDatabaseSeed không dựng file đó nữa (còn xoá nốt bản cũ), nên giữ lại chỉ là một
+    // đường dẫn luôn trả 404.
 
     /** Tải database ẩn dùng để chấm chống hardcode (handout/hidden.db). 404 nếu chưa sinh. */
     @GetMapping("/{examId}/download/hidden-db")

@@ -89,12 +89,31 @@ $BoManTheoVai = @{
   #   2. vai: 'gv' cho hai muc menu "Tao de" va "Tao Golden" trong SidebarLayout - muc khong khai
   #      vai bi hieu la "ca hai ban deu co".
   nc = @("frontend\app\teacher\behavior-authoring", "frontend\app\teacher\archive",
-         "frontend\app\teacher\exam-view", "frontend\app\syllabus",
+         "frontend\app\teacher\exam-view",
          "frontend\app\teacher\exam-authoring", "frontend\app\teacher\golden-authoring",
+         # Kho tai lieu de: man hinh nay goi /api/exam-setup/{id}/handout/** - toan bo nam trong
+         # ExamSetupController, ma controller do bi bo khoi ban nc ngay duoi day. Menu da an no
+         # bang vai: 'gv' nen khong ai bam vao duoc, nhung go thang URL thi trang van len roi moi
+         # 404 tung request mot. Cung loai voi ca AI ra de: an o menu KHONG phai la bo khoi ban.
+         "frontend\app\teacher\exam-documents",
          "frontend\components\testcases", "frontend\lib\aiAuthorDrafts.ts",
          "grader\src\test",
-         # Backend cua khoi AI - xem doan "Ngoai le AI" o dau file. Bon duong nay la TAT CA
-         # nhung gi con lai cua no; ngoai chung ra khong file nao import vao khoi AI.
+         # Controller chi cua giang vien: @Profile(Vai.GIANG_VIEN) nen ban nc khong bao gio nap
+         # no. Hai cho nhac ten no - ExamCatalogController va ExamService - deu chi la javadoc,
+         # bo tep di khong hong phep dich nao.
+         "grader\src\main\java\com\example\grader\controller\ExamSetupController.java",
+         # Backend cua khoi AI - xem doan "Ngoai le AI" o dau file. Ngoai AiAuthorController
+         # (cung bi bo ngay duoi day) khong file nao import vao khoi AI.
+         #
+         # Bat bien do TUNG BI PHA ngay 16/9/2026: commit "Kho de" cho ExamSetupController dung
+         # ExamDocumentReader nam trong service/ai, nen ban nc khong dich noi ngay lenh chay dau
+         # tien cua nguoi nhan - "package com.example.grader.service.ai does not exist". Khau kiem
+         # import luc do chi quet frontend nen khong thay gi.
+         # Hai viec da lam de no khong tai dien:
+         #   1. Chuyen ExamDocumentReader ra com.example.grader.service. No boc chu tu docx/pdf
+         #      bang java.util.zip va regex, khong goi AI gi ca - nam trong service/ai chi vi
+         #      duoc viet cho tinh nang do.
+         #   2. Them khau kiem import JAVA o cuoi ham dong goi, doi xung voi khau kiem frontend.
          "grader\src\main\java\com\example\grader\service\ai",
          "grader\src\main\java\com\example\grader\controller\AiAuthorController.java",
          "grader\src\main\java\com\example\grader\entity\AiSetting.java",
@@ -148,8 +167,14 @@ $LoaiTru    = @("node_modules", ".next", "target", "tsconfig.tsbuildinfo", ".env
 # Cach giu: DOI RA mot thu muc ben canh roi tra lai sau khi don. KHONG dung /XD cua robocopy -
 # da thu va no van xoa mat, doi lay mot lan npm install oan. Doi trong cung o dia nen chi la
 # doi ten, khong ton thoi gian du thu muc nang vai tram MB.
-# grader\target cung giu: Maven tu bien dich lai phan nguon doi, giu lai chi de khoi build
-# tu dau moi lan dong goi.
+#
+# KHONG giu grader\target (bo ngay 16/9/2026). Maven bien dich lai nguon DOI, nhung KHONG xoa
+# .class cua nguon da bi XOA hay DOI CHO - do la ly do lenh clean ton tai. Dung nay da can
+# that: doi ExamDocumentReader tu service\ai\ len service\ roi dong goi lai thi .class cu con
+# nam lai trong target\classes, hai lop cung mang @Component + @Profile(gv), Spring thay hai
+# bean cung kieu va chet ngay luc khoi dong. Bien dich lai ca module tu con so khong chi mat
+# 10 giay (do 16/9/2026, 139 class) - khong dang doi lay mot ban dong goi co the mang theo ma
+# da bien dich cua phien ban cu.
 #
 # GIU LAI CA DU LIEU (them 14/9/2026). Bon thu muc duoi day SINH RA TRONG BAN CHAY va khong
 # co ban nao trong repo de chep lai - don thu muc dich la mat that. Truoc khi co dong nay, cu
@@ -163,7 +188,7 @@ $LoaiTru    = @("node_modules", ".next", "target", "tsconfig.tsbuildinfo", ".env
 #
 # HE QUA PHAI BIET: tu day <Dich> la BAN LAM VIEC, khong phai ban giao di. Xem canh bao o dau
 # file - ban giao phai cat ra mot thu muc MOI bang -Dich.
-$GiuLai = @("frontend\node_modules", "frontend\.next", "grader\target",
+$GiuLai = @("frontend\node_modules", "frontend\.next",
             "exams", "submissions",
             "grader\behavior-artifacts", "grader\golden-runtimes")
 
@@ -288,9 +313,10 @@ function Dong-Goi-Vai($ma) {
   # Ca thuc te tung suyt gay: app/teacher/archive chi la mot dong
   #     export { default } from "../behavior-authoring/page"
   # bo behavior-authoring ma quen archive la ban giao di co mot trang chet.
-  # So theo duong dan da GIAI, khong so theo chuoi: app/syllabus co import components/grading,
-  # ma man vua bo cung ten "grading" - so chuoi thi bao dong gia va phai bo qua, bo qua roi thi
-  # lan sau co gay that cung khong ai tin nua.
+  # So theo duong dan da GIAI, khong so theo chuoi: mot man bi bo co the import mot thu muc
+  # TRUNG TEN voi no (vi du app/syllabus cu import components/grading, ma "grading" cung la
+  # ten mot man khac) - so chuoi thi bao dong gia va phai bo qua, bo qua roi thi lan sau co
+  # gay that cung khong ai tin nua.
   $feGoc  = [System.IO.Path]::GetFullPath((Join-Path $dich "frontend"))
   $daBo   = $c.BoMan | ForEach-Object { [System.IO.Path]::GetFullPath((Join-Path $dich $_)) }
   $hong   = @()
@@ -318,6 +344,44 @@ function Dong-Goi-Vai($ma) {
     throw "Ban $ma con import vao man da bo - dung lai de khong giao di mot ban gay."
   }
   Ok "Khong con lenh import nao tro vao man da bo"
+
+  # Khau kiem tren chi quet frontend. Phia JAVA cung bo tep theo vai (khoi AI, controller rieng
+  # cua giang vien), va chi can MOT tep con lai import vao phan vua bo la ca ban khong dich duoc.
+  # Da xay ra that 16/9/2026 - xem chu thich o $BoManTheoVai. Doi xung hai ben de lan sau loi kieu
+  # do no ngay o day, chu khong phai o may nguoi nhan.
+  #
+  # So theo TEN GOI da giai tu duong dan, khong so theo chuoi: "service\ai" thanh goi
+  # "com.example.grader.service.ai", roi bat moi import bang hoac nam duoi goi do.
+  $javaGoc = [System.IO.Path]::GetFullPath((Join-Path $dich "grader\src\main\java"))
+  $goiDaBo = @()
+  foreach ($b in $c.BoMan) {
+    $duong = [System.IO.Path]::GetFullPath((Join-Path $dich $b))
+    if (-not $duong.StartsWith($javaGoc, [StringComparison]::OrdinalIgnoreCase)) { continue }
+    $tuongDoi = $duong.Substring($javaGoc.Length).TrimStart('\')
+    if ($tuongDoi.EndsWith(".java")) { $tuongDoi = $tuongDoi.Substring(0, $tuongDoi.Length - 5) }
+    $goiDaBo += ($tuongDoi -replace '\\', '.')
+  }
+  if ($goiDaBo.Count -gt 0) {
+    $hongJava = @()
+    $tepJava = Get-ChildItem -Path $javaGoc -Recurse -File -Include *.java -ErrorAction SilentlyContinue
+    foreach ($f in $tepJava) {
+      $noiDung = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction SilentlyContinue
+      if (-not $noiDung) { continue }
+      foreach ($m in [regex]::Matches($noiDung, '(?m)^\s*import\s+(?:static\s+)?([A-Za-z0-9_.]+)\s*;')) {
+        $khai = $m.Groups[1].Value
+        foreach ($goi in $goiDaBo) {
+          if ($khai -eq $goi -or $khai.StartsWith($goi + ".")) {
+            $hongJava += "$($f.FullName) van import '$khai' -> nam trong phan da bo"
+          }
+        }
+      }
+    }
+    if ($hongJava.Count -gt 0) {
+      foreach ($h in $hongJava) { Canh $h }
+      throw "Ban $ma con import Java vao phan da bo - dung lai de khong giao di mot ban khong dich duoc."
+    }
+    Ok "Khong con lenh import Java nao tro vao phan da bo"
+  }
 
   Write-Host "  Ban $ma nam tai: $dich" -ForegroundColor White
 }

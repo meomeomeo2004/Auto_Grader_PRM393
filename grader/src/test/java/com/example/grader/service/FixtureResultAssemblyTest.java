@@ -1,8 +1,6 @@
 package com.example.grader.service;
 
 import com.example.grader.entity.Exam;
-import com.example.grader.entity.Skill;
-import com.example.grader.entity.SkillCategory;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -27,8 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Chạy CODE THẬT của khâu gắn nhãn trên DỮ LIỆU THẬT do grader sinh ra, rồi ghi
  * {@code target/fixture-result-<bài>.json} để {@code verify_result.py} nghiệm thu ngoài.
  *
- * <p>Không cần MySQL: {@link SyllabusService.Resolver} dựng thẳng từ {@code syllabus.json},
- * đúng như {@code seedOnStartup} nạp vào DB.
+ * <p>Không cần MySQL: khâu gắn nhãn đọc thẳng skills_matrix.json của fixture.
  *
  * <p>Phần bọc ngoài (student/exam/grading_result) được DỰNG LẠI giống
  * {@code BatchGradingService.assembleResultJson} — method đó là private và cần repository,
@@ -51,14 +48,13 @@ class FixtureResultAssemblyTest {
 
     @Test
     void assemblesLabelsForEveryFixtureSubmission() throws Exception {
-        SyllabusService.Resolver resolver = resolverFromSeedFile();
         int done = 0;
 
         for (String variant : FIXTURE_VARIANTS) {
             Path graderOut = FIXTURE.resolve(".build/out/" + variant + ".json");
             if (!Files.exists(graderOut)) continue;
 
-            Map<String, Object> assembled = assemble(graderOut, resolver, variant);
+            Map<String, Object> assembled = assemble(graderOut, variant);
             Path target = Path.of("target", "fixture-result-" + variant + ".json");
             Files.createDirectories(target.getParent());
             Files.writeString(target, MAPPER.writerWithDefaultPrettyPrinter()
@@ -126,7 +122,7 @@ class FixtureResultAssemblyTest {
         Map<String, Map<String, Object>> byId = new LinkedHashMap<>();
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> tcs = (List<Map<String, Object>>)
-                assemble(graderOut, resolverFromSeedFile(), "high").get("test_cases");
+                assemble(graderOut, "high").get("test_cases");
         for (Map<String, Object> tc : tcs) byId.put(String.valueOf(tc.get("test_id")), tc);
 
         // B1: layer suy từ runner
@@ -141,7 +137,7 @@ class FixtureResultAssemblyTest {
         assertEquals("THEM_USER", byId.get("TC_ADD_USER").get("rubric"));
         assertEquals("RESPONSIVE", byId.get("TC_RESPONSIVE_TARGET").get("rubric"));
 
-        // A5: chapter khớp category trong syllabus
+        // A5: chapter và category lấy từ skills_matrix.json của fixture
         assertEquals("UI_BASIC_WIDGETS", byId.get("TC_APP_BOOT").get("category"));
         assertEquals(4, byId.get("TC_APP_BOOT").get("chapter"));
         assertEquals("ADVANCED_WIDGETS", byId.get("TC_LIST_VISIBLE").get("category"));
@@ -268,8 +264,7 @@ class FixtureResultAssemblyTest {
 
     // ── dựng lại luồng ghép, gọi THẬT các bước P1 đã đổi ───────────────────
     @SuppressWarnings("unchecked")
-    private Map<String, Object> assemble(Path graderOut, SyllabusService.Resolver resolver,
-                                         String variant) throws Exception {
+    private Map<String, Object> assemble(Path graderOut, String variant) throws Exception {
         JsonNode grader = MAPPER.readTree(Files.readString(graderOut, StandardCharsets.UTF_8));
 
         List<Map<String, Object>> tcs = new ArrayList<>();
@@ -311,37 +306,5 @@ class FixtureResultAssemblyTest {
         Method m = target.getClass().getDeclaredMethod(name, types);
         m.setAccessible(true);
         return m.invoke(target, args);
-    }
-
-    /** Dựng Resolver từ syllabus.json y như SyllabusService.seedOnStartup nạp vào DB. */
-    private SyllabusService.Resolver resolverFromSeedFile() throws Exception {
-        JsonNode root;
-        try (var in = getClass().getResourceAsStream("/syllabus.json")) {
-            assertNotNull(in, "Không tìm thấy syllabus.json trên classpath");
-            root = MAPPER.readTree(in);
-        }
-
-        Map<String, SkillCategory> cats = new LinkedHashMap<>();
-        for (JsonNode c : root.path("categories")) {
-            SkillCategory cat = new SkillCategory();
-            cat.setCode(c.path("code").asText());
-            cat.setName(c.path("name").asText());
-            cat.setCompetencyLabel(c.path("competency_label").asText(null));
-            cat.setDisplayOrder(c.path("order").asInt(0));
-            if (c.hasNonNull("chapter")) cat.setChapter(c.path("chapter").asInt());
-            cats.put(cat.getCode(), cat);
-        }
-
-        Map<String, Skill> skills = new LinkedHashMap<>();
-        for (JsonNode s : root.path("skills")) {
-            Skill sk = new Skill();
-            sk.setCode(s.path("code").asText());
-            sk.setCategoryCode(s.path("category").asText());
-            sk.setName(s.path("name").asText());
-            sk.setDefaultDifficulty(s.path("default_difficulty").asText("basic"));
-            skills.put(sk.getCode(), sk);
-        }
-
-        return new SyllabusService.Resolver(cats, skills);
     }
 }

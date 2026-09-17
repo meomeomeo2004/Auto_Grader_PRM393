@@ -2,7 +2,7 @@
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import SidebarLayout from "@/components/layout/SidebarLayout";
 import { API_BASE } from "@/lib/config";
 import {
@@ -35,13 +35,16 @@ interface StaticRule { id: string; name: string; kind: "lint" | "source_pattern"
 interface StaticRulesView { suite_id: string; golden_available: boolean; rules: StaticRule[]; presets: StaticRule[] }
 
 const ARTIFACTS: { type: ArtifactType; title: string; owner: "teacher" | "system"; accept: string; hint: string; icon: typeof Database }[] = [
-  { type: "STUDENT_DATABASE", title: "1. Database phát cho sinh viên (không bắt buộc)", owner: "teacher", accept: ".db,.sqlite,.sqlite3", hint: "Không còn cần: máy chấm chỉ nạp Database ẩn. Giữ lại cho bộ đề cũ.", icon: Database },
-  { type: "HIDDEN_DATABASE", title: "2. Database ẩn", owner: "teacher", accept: ".db,.sqlite,.sqlite3", hint: "Cùng schema, dữ liệu khác để chống hardcode.", icon: ShieldCheck },
-  { type: "GOLDEN_SOLUTION", title: "3. Golden Solution", owner: "teacher", accept: ".zip", hint: "ZIP đáp án chuẩn dùng để tạo oracle.", icon: FileArchive },
-  { type: "AUTOMATION_RECORD", title: "4. Bản ghi thao tác", owner: "system", accept: ".json", hint: "Hệ thống sinh khi dừng phiên record.", icon: Radio },
-  { type: "GRADING_ENVIRONMENT", title: "5. Môi trường chấm", owner: "system", accept: ".json", hint: "API, driver, browser và timeout của suite.", icon: MonitorPlay },
-  { type: "TESTCASE_DEFINITION", title: "6. File testcase", owner: "system", accept: ".json", hint: "7 cột Stage, Attribute, AttributeValue, ValueType, Value, Action, Browser.", icon: FileJson },
-  { type: "OUTPUT_DATABASE", title: "7. Output Database", owner: "system", accept: ".db,.sqlite,.sqlite3", hint: "Hệ thống replay Golden trên DB ẩn rồi tự capture trạng thái DB sau thao tác.", icon: Database },
+  // Ô "Database phát cho sinh viên" đã bỏ hẳn: máy chấm chỉ nạp Database ẩn (engine đọc
+  // hidden_fixture_path, không bao giờ mở student.db), còn việc canh cấu trúc bảng đã chuyển
+  // sang khâu kiểm đồng bộ khung phát. Giữ một ô không ai dùng chỉ khiến người ra đề tưởng
+  // mình thiếu bước.
+  { type: "HIDDEN_DATABASE", title: "1. Database ẩn", owner: "teacher", accept: ".db,.sqlite,.sqlite3", hint: "Dữ liệu máy chấm nạp trước khi mở app. Cũng chính là dữ liệu bạn thấy trong khung Golden.", icon: ShieldCheck },
+  { type: "GOLDEN_SOLUTION", title: "2. Golden Solution", owner: "teacher", accept: ".zip", hint: "ZIP đáp án chuẩn dùng để tạo oracle.", icon: FileArchive },
+  { type: "AUTOMATION_RECORD", title: "3. Bản ghi thao tác", owner: "system", accept: ".json", hint: "Hệ thống sinh khi dừng phiên record.", icon: Radio },
+  { type: "GRADING_ENVIRONMENT", title: "4. Môi trường chấm", owner: "system", accept: ".json", hint: "API, driver, browser và timeout của suite.", icon: MonitorPlay },
+  { type: "TESTCASE_DEFINITION", title: "5. File testcase", owner: "system", accept: ".json", hint: "7 cột Stage, Attribute, AttributeValue, ValueType, Value, Action, Browser.", icon: FileJson },
+  { type: "OUTPUT_DATABASE", title: "6. Output Database", owner: "system", accept: ".db,.sqlite,.sqlite3", hint: "Hệ thống replay Golden trên DB ẩn rồi tự capture trạng thái DB sau thao tác.", icon: Database },
 ];
 
 // Khớp BASE_PACKAGES trong SubmissionPackagePolicy.java — dùng làm mặc định khi tạo suite mới và
@@ -281,29 +284,233 @@ const CH7_LOAI: {
 ];
 
 /**
- * KHUNG MÁY CHẤM — cố định, không cho sửa.
+ * KHUNG MÁY CHẤM — cố định, không cho sửa. Là KHUNG APP THẬT NHẬN ĐƯỢC, không phải cỡ màn.
  *
- * Pixel 7: 1080×2400 pixel ở mật độ 2,625 tức 411,42×914,28 dp, làm tròn 412×915. Đây là
- * máy ảo Android Studio hay dùng nhất nên bài thi phải đúng khung này.
+ * Màn Pixel 7 là 1080×2400 pixel ở mật độ 2,625, tức 411,43×914,29 dp. Nhưng hệ điều hành
+ * không giao cả màn cho app. Hỏi thẳng máy ảo Pixel 7 API 34 ngày 15/9/2026 bằng
+ * `adb shell dumpsys window displays`:
+ *
+ *   mAppBounds=Rect(0, 136 - 1080, 2337)   overrideConfig: w411dp h838dp
+ *
+ * Thanh trạng thái giữ 136 px (cao vì lỗ camera), thanh cử chỉ giữ 63 px; chia cho 2,625 là
+ * 51,8 + 24 = 77 dp. App thật chỉ còn 838,48 dp, làm tròn 838.
+ *
+ * Vì sao KHÔNG dàn ở 915 rồi che 77 dp cuối: máy thật không cắt bớt 915 — nó DÀN LẠI trong
+ * 838. Đo 15/9/2026 trên bài Chi tiêu cá nhân: dàn ở 915 thì FAB nằm 843–899, dàn ở 838 thì
+ * nằm 766–822. Che chỉ giấu nút đi, không đưa nó về đúng chỗ.
  *
  * Vì sao KHÔNG cho giảng viên gõ số: gõ một cỡ không máy nào có (ví dụ 412×700) thì bố cục
  * lúc chấm khác hẳn bố cục trên mọi máy thật, mà hậu quả chỉ lộ ra sau khi đã chấm. Đo
  * 9/9/2026 trên bài User Manager: ở 915 cả 8 dòng nằm gọn trong màn, ở 700 thì ba dòng cuối
  * chưa dựng — cùng một bài, hai kết quả.
+ *
+ * Làm tròn 838,48 → 838 không đổi điểm nào: expect.center_* và số đo bài sinh viên đều do
+ * engine sinh ra với CÙNG một viewport, nên làm tròn dịch cả hai vế như nhau. Chênh 0,48 dp
+ * so với hạn mức 5% của 838 (41,9 dp) là 1,1%.
+ *
+ * PHẢI KHỚP mặc định trong exam_test.dart._applyViewport và BehaviorSuiteMaterializer.
  */
 const KHUNG_RONG = 412;
-const KHUNG_CAO = 915;
+const KHUNG_CAO = 838;
 
 /**
  * Các mức thu nhỏ khung xem thử. Chỉ đổi cỡ HIỂN THỊ bằng CSS transform; iframe vẫn dàn bố
- * cục ở đúng 412×915 nên thứ giảng viên nhìn là thứ máy chấm nhìn.
+ * cục ở đúng 412×838 nên thứ giảng viên nhìn là thứ máy chấm nhìn.
  */
 const MUC_THU_NHO: [number, string][] = [
-  [1, "1:1 (412×915)"],
+  [1, "1:1"],
+  [0.8, "4:5"],
   [0.75, "3:4"],
   [0.6, "3:5"],
-  [0.5, "1:2"],
 ];
+
+/**
+ * KHUNG DESKTOP — chỉ dùng cho kĩ năng responsive.
+ *
+ * PHẢI khớp BehaviorSuiteMaterializer.KHUNG_DESKTOP. Lệch một số là giảng viên soạn ở khung
+ * này còn máy chấm đo ở khung khác, mà hậu quả chỉ lộ ra sau khi đã chấm.
+ */
+const KHUNG_DESKTOP_RONG = 1280;
+const KHUNG_DESKTOP_CAO = 800;
+
+/** Một thành phần đo được trên màn; toạ độ theo pixel client của chính lượt đo đó. */
+interface KhungThanhPhan {
+  key: string; identifier: string; label: string; role: string;
+  x: number; y: number; w: number; h: number; dup: number;
+}
+interface AnhChupKhung { screen: { w: number; h: number }; items: KhungThanhPhan[] }
+
+/** Một cặp thành phần ĐỔI quan hệ khi chuyển từ khung điện thoại sang khung desktop. */
+interface CapDoiBoCuc {
+  a: KhungThanhPhan; b: KhungThanhPhan;
+  dienThoai: string; desktop: string; checked: boolean;
+}
+
+/**
+ * Một BẰNG CHỨNG co giãn THẬT — loại mà reflow miễn phí của Flutter không tạo ra được.
+ *
+ * Vì sao phải tách: Wrap tự xếp lại, chữ hết xuống dòng, Expanded nở ra — app KHÔNG viết một
+ * dòng responsive nào vẫn đổi quan hệ bố cục khi màn rộng ra. Đo thật trên bài Chi tiêu cá
+ * nhân: sáu chip tổng bề ngang ~526 dp, ở khung 412 xếp hai hàng, ở 1280 gọn một hàng — đổi
+ * quan hệ mà chẳng ai viết breakpoint nào. Chấm cái đó là cho điểm một kĩ năng không tồn tại.
+ *
+ * Ba thứ dưới đây thì reflow miễn phí không làm được:
+ *  - hien_them / bien_mat: đổi TẬP thành phần, phải có `if (width > ...)` mới xảy ra.
+ *  - vi_tri_kim: nội dung KHÔNG nở theo màn, tức có ràng buộc bề ngang tối đa.
+ *  - doi_cot: một nhóm lặp đổi số cột, tức list thành grid.
+ */
+interface BangChungCoGian {
+  loai: "hien_them" | "bien_mat" | "vi_tri_kim";
+  it: KhungThanhPhan;
+  moTa: string;
+  checked: boolean;
+}
+interface KetQuaDoCoGian {
+  bangChung: BangChungCoGian[];
+  /** Tỉ lệ bề ngang nội dung chiếm trên màn, ở hai khung. */
+  beNgang: { dienThoai: number; desktop: number };
+  /** Nhóm lặp đổi số cột: list thành grid. */
+  doiCot: { key: string; nhan: string; dienThoai: number; desktop: number }[];
+  capReflow: CapDoiBoCuc[];
+}
+
+/** Tên tiếng Việt của quan hệ, để giảng viên đọc được bảng gợi ý. */
+const TEN_QUAN_HE: Record<string, string> = {
+  above: "nằm trên", below: "nằm dưới", left_of: "bên trái", right_of: "bên phải",
+  same_row: "cùng hàng", same_column: "cùng cột", inside: "nằm trong",
+  contains: "bao ngoài", overlap: "chồng lên",
+};
+
+/**
+ * Suy quan hệ bố cục giữa hai thành phần — CHÉP NGUYÊN luật của engine
+ * (exam_test.dart `_deriveLayoutRelation`), kể cả cái đuôi trả về above/below chứ không phải
+ * not_overlap.
+ *
+ * Vì sao phải chép đúng từng nhánh: bảng gợi ý mà dùng luật khác engine thì nó sẽ chỉ ra một
+ * chỗ máy chấm không hề thấy đổi — giảng viên tick vào, và bài bố cục cứng vẫn ăn trọn điểm
+ * responsive.
+ *
+ * Toạ độ vào theo pixel client, không phải dp. Quan hệ bất biến với tỉ lệ nên không sao, miễn
+ * là hai thành phần đến từ CÙNG một lượt đo.
+ */
+const quanHeBoCuc = (a: KhungThanhPhan, b: KhungThanhPhan, man: { w: number; h: number }): string => {
+  const tolX = man.w * 0.05;
+  const tolY = man.h * 0.05;
+  const no = Math.max(tolX, tolY);
+  const namTrong = (ngoai: KhungThanhPhan, trong: KhungThanhPhan) =>
+    trong.x >= ngoai.x - no && trong.y >= ngoai.y - no
+    && trong.x + trong.w <= ngoai.x + ngoai.w + no
+    && trong.y + trong.h <= ngoai.y + ngoai.h + no;
+  if (namTrong(b, a)) return "inside";
+  if (namTrong(a, b)) return "contains";
+  if (a.y + a.h <= b.y && a.x + a.w >= b.x && a.x <= b.x + b.w) return "above";
+  if (a.y >= b.y + b.h && a.x + a.w >= b.x && a.x <= b.x + b.w) return "below";
+  if (a.x + a.w <= b.x && a.y + a.h >= b.y && a.y <= b.y + b.h) return "left_of";
+  if (a.x >= b.x + b.w && a.y + a.h >= b.y && a.y <= b.y + b.h) return "right_of";
+  const tamA = { x: a.x + a.w / 2, y: a.y + a.h / 2 };
+  const tamB = { x: b.x + b.w / 2, y: b.y + b.h / 2 };
+  if (Math.abs(tamA.y - tamB.y) <= tolY) return "same_row";
+  if (Math.abs(tamA.x - tamB.x) <= tolX) return "same_column";
+  const chongNhau = a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+  return chongNhau ? "overlap" : (tamA.y < tamB.y ? "above" : "below");
+};
+
+/** Đích cho checkpoint: ưu tiên định danh, không có thì dùng nhãn. */
+const dichCuaThanhPhan = (it: KhungThanhPhan): JsonMap =>
+  it.identifier ? { semanticId: it.identifier } : { label: it.label };
+
+/** Số thành phần nhiều nhất cùng nằm một hàng trong một nhóm lặp. */
+const soCotToiDa = (rects: KhungThanhPhan[], tolY: number): number => {
+  let max = 1;
+  for (const r of rects) {
+    const tam = r.y + r.h / 2;
+    const cung = rects.filter((o) => Math.abs((o.y + o.h / 2) - tam) <= tolY).length;
+    if (cung > max) max = cung;
+  }
+  return max;
+};
+
+/** So hai lượt đo, TÁCH bằng chứng co giãn thật khỏi reflow tự nhiên. */
+const phanTichCoGian = (dienThoai: AnhChupKhung, desktop: AnhChupKhung): KetQuaDoCoGian => {
+  const donP = dienThoai.items.filter((it) => it.dup === 1);
+  const donD = desktop.items.filter((it) => it.dup === 1);
+  const mapP = new Map(donP.map((it) => [it.key, it]));
+  const mapD = new Map(donD.map((it) => [it.key, it]));
+  const bangChung: BangChungCoGian[] = [];
+
+  donD.filter((it) => !mapP.has(it.key)).forEach((it) => bangChung.push({
+    loai: "hien_them", it, checked: false,
+    moTa: `"${it.label || it.identifier}" chỉ hiện ở khung desktop`,
+  }));
+
+  // BIẾN MẤT chỉ tính khi CÒN thành phần nằm dưới nó vẫn hiện ở desktop. Nếu mọi thứ từ nó trở
+  // xuống đều mất thì đó là hết màn (khung desktop thấp hơn: 800 so với 838), không phải app cố
+  // ý giấu — tính vào là đếm nhầm cái fold thành mã responsive.
+  donP.filter((it) => !mapD.has(it.key)).forEach((it) => {
+    if (!donP.some((o) => o.y > it.y && mapD.has(o.key))) return;
+    bangChung.push({
+      loai: "bien_mat", it, checked: false,
+      moTa: `"${it.label || it.identifier}" biến mất ở khung desktop`,
+    });
+  });
+
+  const beNgangCua = (anh: AnhChupKhung, don: KhungThanhPhan[]) => {
+    if (don.length === 0 || anh.screen.w <= 0) return 0;
+    const trai = Math.min(...don.map((it) => it.x));
+    const phai = Math.max(...don.map((it) => it.x + it.w));
+    return (phai - trai) / anh.screen.w;
+  };
+  const beNgang = { dienThoai: beNgangCua(dienThoai, donP), desktop: beNgangCua(desktop, donD) };
+  if (beNgang.dienThoai - beNgang.desktop > 0.15) {
+    [...donD]
+      .filter((it) => mapP.has(it.key))
+      .map((it) => ({ it, lech: Math.abs(it.x / desktop.screen.w - mapP.get(it.key)!.x / dienThoai.screen.w) }))
+      .sort((a, b) => b.lech - a.lech)
+      .slice(0, 6)
+      .forEach(({ it }) => bangChung.push({
+        loai: "vi_tri_kim", it, checked: false,
+        moTa: `"${it.label || it.identifier}" không bám mép như ở điện thoại — nội dung bị kìm bề ngang`,
+      }));
+  }
+
+  const nhomLap = (items: KhungThanhPhan[]) => {
+    const m = new Map<string, KhungThanhPhan[]>();
+    items.filter((it) => it.dup > 1).forEach((it) => {
+      const ds = m.get(it.key) || [];
+      ds.push(it);
+      m.set(it.key, ds);
+    });
+    return m;
+  };
+  const nhomP = nhomLap(dienThoai.items);
+  const nhomD = nhomLap(desktop.items);
+  const doiCot: KetQuaDoCoGian["doiCot"] = [];
+  nhomP.forEach((dsP, key) => {
+    const dsD = nhomD.get(key);
+    if (!dsD) return;
+    const cotP = soCotToiDa(dsP, dienThoai.screen.h * 0.02);
+    const cotD = soCotToiDa(dsD, desktop.screen.h * 0.02);
+    if (cotD > cotP) doiCot.push({ key, nhan: dsP[0].label || dsP[0].identifier || key, dienThoai: cotP, desktop: cotD });
+  });
+
+  const chung = donP.filter((it) => mapD.has(it.key));
+  const capReflow: CapDoiBoCuc[] = [];
+  for (let i = 0; i < chung.length; i++) {
+    for (let j = i + 1; j < chung.length; j++) {
+      const a = chung[i];
+      const b = chung[j];
+      const qhP = quanHeBoCuc(a, b, dienThoai.screen);
+      const qhD = quanHeBoCuc(mapD.get(a.key)!, mapD.get(b.key)!, desktop.screen);
+      if (qhP !== qhD) capReflow.push({ a, b, dienThoai: qhP, desktop: qhD, checked: false });
+    }
+  }
+  const dangQuy = (c: CapDoiBoCuc) =>
+    (c.dienThoai === "below" || c.dienThoai === "above")
+      && (c.desktop === "same_row" || c.desktop === "right_of" || c.desktop === "left_of") ? 0 : 1;
+  capReflow.sort((x, y) => dangQuy(x) - dangQuy(y));
+
+  return { bangChung, beNgang, doiCot, capReflow: capReflow.slice(0, 40) };
+};
 
 /** Lam tron ve ba chu so thap phan — don vi nho nhat cua moi phep chia diem. */
 const lamTron = (v: number) => Math.round(v * 1000) / 1000;
@@ -454,6 +661,7 @@ function absoluteRuntimeUrl(value?: string | null) {
 
 function BehaviorAuthoringEditor() {
   const search = useSearchParams();
+  const router = useRouter();
   // Toast phải PORTAL ra document.body: layout có ancestor mang transform nên
   // position:fixed bị neo theo ancestor đó thay vì viewport — toast rơi ra ngoài
   // màn hình, người soạn không thấy lỗi và tưởng nút hỏng (ca có thật 29/8).
@@ -594,8 +802,8 @@ function BehaviorAuthoringEditor() {
   const [mauSaiSo, setMauSaiSo] = useState(5);
   // Màu chủ đạo của app — MỘT dòng cho cả màn, đọc thẳng ColorScheme. Sai số rộng hơn
   // hẳn màu thành phần vì phép đo này chính xác tuyệt đối, không có nhiễu để chống.
-  // Khung máy Android tầm trung (Pixel): 412×915 dp. Sinh viên làm bài trên máy ảo
-  // Android nên đây là khung DUY NHẤT còn ý nghĩa; khung desktop đã bỏ hẳn.
+  // Khung app thật trên máy ảo Pixel 7: 412×838 dp (màn 412×915 trừ 77 dp thanh hệ thống).
+  // Sinh viên làm bài trên máy ảo Android nên đây là khung DUY NHẤT còn ý nghĩa.
   //
   // KHÔNG có ô mật độ điểm ảnh: mọi phép chấm bố cục đo bằng dp (tâm thành phần, sai số
   // theo % chiều rộng/cao), nên mật độ không đổi một điểm nào — nó chỉ quyết định ảnh
@@ -606,6 +814,17 @@ function BehaviorAuthoringEditor() {
   const viewportHeight = KHUNG_CAO;
   // Chỉ là cỡ NHÌN của khung xem thử, không đi vào bộ chấm.
   const [thuNho, setThuNho] = useState(0.75);
+  // KĨ NĂNG RESPONSIVE. khungDesktop chỉ đổi cỡ khung XEM THỬ; tiêu chí thường vẫn soạn ở
+  // khung điện thoại, còn tiêu chí sinh từ bảng dò luôn mang cờ khung desktop.
+  const [khungDesktop, setKhungDesktop] = useState(false);
+  const [respScenario, setRespScenario] = useState<{ id: string; ma: string; checkpoints: JsonMap[] } | null>(null);
+  const [respKq, setRespKq] = useState<KetQuaDoCoGian | null>(null);
+  const [respDiem, setRespDiem] = useState(8);
+  const khungRongXem = khungDesktop ? KHUNG_DESKTOP_RONG : KHUNG_RONG;
+  const khungCaoXem = khungDesktop ? KHUNG_DESKTOP_CAO : KHUNG_CAO;
+  // Khung desktop rộng 1280 nên Ratio của khung điện thoại không dùng được — thu cố định cho
+  // vừa cột trái, còn app bên trong vẫn dàn ở đúng 1280×800 như máy chấm.
+  const tiLeXem = khungDesktop ? 0.45 : thuNho;
   const [codePreview, setCodePreview] = useState<CodePreview | null>(null);
   const [previewFileName, setPreviewFileName] = useState("");
   const [editingScenarioId, setEditingScenarioId] = useState<string | null>(null);
@@ -627,6 +846,11 @@ function BehaviorAuthoringEditor() {
     reject: (error: Error) => void;
     timer: number;
   }>());
+  // Chỗ hẹn cho một lượt đo khung đang chờ trả lời. Một lượt tại một thời điểm là đủ: phép dò
+  // co giãn chụp tuần tự hai khung chứ không song song.
+  const respChoDo = useRef<((v: AnhChupKhung) => void) | null>(null);
+  /** Chỗ hẹn cho lượt chờ Golden khởi động lại xong (GOLDEN_RECORDER_READY). */
+  const choGoldenSanSang = useRef<(() => void) | null>(null);
   const requestedSuite = search.get("suite");
   const previewUrl = useMemo(() => absoluteRuntimeUrl(runtimeUrl), [runtimeUrl]);
   const runtimeOrigin = useMemo(() => {
@@ -703,6 +927,33 @@ function BehaviorAuthoringEditor() {
     setReadiness(readyData);
     setValidation(validationData);
     setRuntimeStatus(runtimeData);
+    // KHÔI PHỤC PHIÊN SOẠN ĐANG DỞ sau khi F5.
+    //
+    // Mã luồng, tên luồng và "đang sửa scenario nào" trước đây chỉ nằm trong state React, nên
+    // tải lại trang là mất sạch — trong khi phiên record vẫn sống nguyên ở máy chủ. Giảng viên
+    // thấy ô trống, gõ lại mã khác, và sinh ra một scenario thứ hai thay vì sửa cái cũ.
+    //
+    // Chỉ khôi phục khi trình duyệt CHƯA giữ phiên nào (activeRecordingId rỗng), để lần refresh
+    // giữa một luồng đang chạy không đè lên trạng thái vừa đặt.
+    if (!activeRecordingId.current) {
+      const dangSoan = (suiteData.recordings || []).find(
+        (r) => r.status === "ACTIVE" || r.status === "STOPPED");
+      if (dangSoan) {
+        activeRecordingId.current = dangSoan.id;
+        acceptsRecorderEvents.current = dangSoan.status === "ACTIVE";
+        setRecording(dangSoan);
+        const suaId = dangSoan.revision_scenario_id || "";
+        setEditingScenarioId(suaId || null);
+        const scenarioCu = (suiteData.scenarios || []).find((s) => String(s.id || "") === suaId);
+        if (scenarioCu) {
+          setScenarioCode(String(scenarioCu.scenario_code || ""));
+          setScenarioName(String(scenarioCu.name || scenarioCu.scenario_code || ""));
+          setScenarioWeight(Number(scenarioCu.weight || 1));
+        } else if (dangSoan.name) {
+          setScenarioName(dangSoan.name);
+        }
+      }
+    }
     // Luật tĩnh tải riêng và chịu lỗi độc lập: panel ẩn đi chứ không kéo sập cả trang.
     try {
       const rulesView = await api<StaticRulesView>(`/behavior-authoring/suites/${suiteId}/static-rules`);
@@ -861,7 +1112,13 @@ function BehaviorAuthoringEditor() {
     setDatabaseName("");
     setExamId("");
     setName("");
-    window.history.replaceState(null, "", "/teacher/archive");
+    setEditingScenarioId(null);
+    // PHẢI đi qua router, không được dùng history.replaceState.
+    //
+    // replaceState đổi thanh địa chỉ nhưng KHÔNG báo cho router, nên useSearchParams vẫn trả
+    // ?suite=... cũ. Effect nạp bộ chấm thấy suite vừa bị xoá khỏi state mà tham số vẫn còn
+    // liền nạp lại ngay — bấm "Danh sách bộ chấm" lần đầu không có tác dụng, lần hai mới về.
+    router.replace("/teacher/archive", { scroll: false });
   };
 
   const deleteSuite = (selected: Suite) => {
@@ -903,17 +1160,57 @@ function BehaviorAuthoringEditor() {
     });
   };
 
-  const startRecording = () => suite && run("record-start", async () => {
-    setEditingScenarioId(null);
-    resetRecorderTransport();
-    const created = await api<Recording>(`/behavior-authoring/suites/${suite.id}/recordings`, {
-      method: "POST", body: JSON.stringify({ name: scenarioName, viewport: { width: viewportWidth, height: viewportHeight, device_pixel_ratio: 1, brightness: cheDoToi ? "dark" : "light" }, initial_state: { reset_storage: true, preferences: docBoNhoBanDau(prefsBanDau) } }),
+  /**
+   * ĐƯA GOLDEN VỀ MÀN ĐẦU VỚI DỮ LIỆU GỐC — bắt buộc trước mỗi phiên soạn.
+   *
+   * Vì sao: máy chấm luôn replay mỗi hàm TỪ ĐẦU, trên database ẩn nguyên bản. Nếu giảng viên
+   * ghi hình lúc Golden đang ở màn khác, hoặc dữ liệu đã bị hàm ADD trước đó thêm vào, thì
+   * mọi bước ghi được đều tính từ một trạng thái mà máy chấm không bao giờ gặp — replay chắc
+   * chắn trượt, mà lỗi chỉ lộ ra ở khâu capture oracle.
+   *
+   * Nạp lại bằng lệnh bridge chứ không phải iframe.contentWindow.location.reload(): khung
+   * Golden ở cổng khác (8090) nên trình duyệt chặn truy cập chéo nguồn. Lệnh reload chạy BÊN
+   * TRONG iframe, và recorder entry sẽ ghi lại hidden.db đè lên app.db lúc khởi động.
+   */
+  const napLaiGolden = async () => {
+    const frame = goldenFrame.current?.contentWindow;
+    if (!frame) throw new Error("Khung Golden chưa sẵn sàng.");
+    setRecorderReady(false);
+    const cho = new Promise<void>((resolve, reject) => {
+      const hetGio = window.setTimeout(() => {
+        choGoldenSanSang.current = null;
+        reject(new Error("Golden không khởi động lại kịp sau 25 giây. Thử bấm “Build & mở Golden” rồi record lại."));
+      }, 25000);
+      choGoldenSanSang.current = () => { window.clearTimeout(hetGio); resolve(); };
     });
-    activeRecordingId.current = created.id;
-    acceptsRecorderEvents.current = created.status === "ACTIVE";
-    setRecording(created);
-    await refresh(suite.id);
-  });
+    frame.postMessage(
+      { type: "GOLDEN_RECORDER_COMMAND", action: "perform_route_action", route_action: "reload" },
+      runtimeOrigin || "*",
+    );
+    await cho;
+  };
+
+  const startRecording = () => {
+    if (!suite) return;
+    // Chưa build Golden thì không có gì để bám thao tác: recorder nằm TRONG bản web của Golden.
+    // Trước đây nút vẫn bấm được và phiên record vẫn mở ra, chỉ là không ghi nổi một bước nào.
+    if (!previewUrl) {
+      setError("Chưa build Golden. Bấm “Build & mở Golden” ở Bước 3 trước — recorder nằm trong chính bản web của Golden nên không có nó thì không ghi được thao tác nào.");
+      return;
+    }
+    run("record-start", async () => {
+      setEditingScenarioId(null);
+      resetRecorderTransport();
+      await napLaiGolden();
+      const created = await api<Recording>(`/behavior-authoring/suites/${suite.id}/recordings`, {
+        method: "POST", body: JSON.stringify({ name: scenarioName, viewport: { width: viewportWidth, height: viewportHeight, device_pixel_ratio: 1, brightness: cheDoToi ? "dark" : "light" }, initial_state: { reset_storage: true, preferences: docBoNhoBanDau(prefsBanDau) } }),
+      });
+      activeRecordingId.current = created.id;
+      acceptsRecorderEvents.current = created.status === "ACTIVE";
+      setRecording(created);
+      await refresh(suite.id);
+    });
+  };
 
   const deployGoldenRuntime = () => suite && run("runtime-deploy", async () => {
     setRuntimeUrl("");
@@ -1412,6 +1709,112 @@ function BehaviorAuthoringEditor() {
     return Array.from({ length: n }, (_, i) => lamTron((moi + (i < du ? 1 : 0)) / 1000));
   };
 
+  /** Xin khung Golden đo một lượt và chờ kết quả. */
+  const doMotLuotKhung = () => new Promise<AnhChupKhung>((resolve, reject) => {
+    const frame = goldenFrame.current?.contentWindow;
+    if (!frame) { reject(new Error("Khung Golden chưa sẵn sàng")); return; }
+    const hetGio = window.setTimeout(() => {
+      respChoDo.current = null;
+      reject(new Error("Khung Golden không trả lời lệnh đo. Bản build có thể là bản cũ — bấm Build & mở Golden lại."));
+    }, 8000);
+    respChoDo.current = (v) => { window.clearTimeout(hetGio); resolve(v); };
+    frame.postMessage({ type: "GOLDEN_RECORDER_COMMAND", action: "snapshot_rects" }, "*");
+  });
+
+  /** Chờ Flutter dàn lại sau khi đổi cỡ iframe. Hai frame là đủ, cộng biên an toàn. */
+  const choDanLai = (ms: number) => new Promise((r) => window.setTimeout(r, ms));
+
+  /**
+   * DÒ CHỖ CO GIÃN: đo ở khung điện thoại, đo lại ở khung desktop, giữ những cặp ĐỔI quan hệ.
+   *
+   * Vì sao chỉ giữ cặp đổi: đó chính là bằng chứng app có co giãn. Cặp không đổi thì bài bố cục
+   * cứng cũng đạt, tick vào là cho không điểm.
+   */
+  const doCoGian = (item: JsonMap) => {
+    if (!previewUrl) { setError("Chưa build Golden nên chưa đo được."); return; }
+    run("resp-scan", async () => {
+      setRespKq(null);
+      setKhungDesktop(false);
+      await choDanLai(500);
+      const dienThoai = await doMotLuotKhung();
+      setKhungDesktop(true);
+      await choDanLai(1200);
+      const desktop = await doMotLuotKhung();
+      setKhungDesktop(false);
+
+      const kq = phanTichCoGian(dienThoai, desktop);
+      setRespScenario({
+        id: String(item.id || ""),
+        ma: String(item.scenario_code || item.name || ""),
+        checkpoints: Array.isArray(item.checkpoints) ? (item.checkpoints as JsonMap[]) : [],
+      });
+      setRespKq(kq);
+      const manh = kq.bangChung.length + kq.doiCot.length;
+      if (manh === 0) {
+        setNotice("KHÔNG tìm thấy dấu hiệu co giãn thật nào: không thành phần nào hiện thêm hay biến mất, nội dung vẫn nở hết bề ngang, không nhóm nào đổi số cột. Golden này gần như chắc chắn KHÔNG có mã responsive — mọi thứ đổi chỗ bên dưới chỉ là Wrap tự xếp lại. Đừng chấm kĩ năng này cho bộ đề đó.");
+      } else {
+        setNotice(`Tìm được ${manh} dấu hiệu co giãn thật và ${kq.capReflow.length} cặp đổi quan hệ. Tick thứ muốn chấm rồi khai điểm.`);
+      }
+    });
+  };
+
+  /** Biến các cặp đã tick thành checkpoint layout_relation mang cờ khung desktop. */
+  const luuTieuChiResponsive = () => {
+    if (!suite || !respScenario || !respKq) return;
+    const manh = respKq.bangChung.filter((b) => b.checked);
+    const yeu = respKq.capReflow.filter((c) => c.checked);
+    if (manh.length + yeu.length === 0) { setError("Chưa tick mục nào."); return; }
+    if (!(respDiem > 0)) { setError("Điểm kĩ năng responsive phải lớn hơn 0."); return; }
+    run("resp-save", async () => {
+      const cu = respScenario.checkpoints;
+      let so = cu.reduce((m, c) => Math.max(m, Number(String(c.id || "").replace(/\D+/g, "")) || 0), 0);
+      const diemDong = chiaDeu(respDiem, manh.length + yeu.length);
+      // Nền chung của mọi tiêu chí responsive. Cờ `khung` là thứ materializer đọc để đẩy case
+      // sang 1280×800; thiếu nó là tiêu chí âm thầm chạy ở khung điện thoại và luôn đạt.
+      const nen = {
+        checkpoint: true, scope: "ui", stage: "ASSERT", action: "observe_ui",
+        browser: "flutter_tester", khung: "desktop",
+        ui_group: { id: "G_RESPONSIVE", name: "Responsive — khung desktop 1280×800" },
+      };
+      const them: JsonMap[] = [];
+      manh.forEach((b, i) => {
+        so += 1;
+        const ten = b.it.label || b.it.identifier;
+        if (b.loai === "vi_tri_kim") {
+          them.push({
+            ...nen, id: `checkpoint_${so}`, kind: "component_position",
+            target: dichCuaThanhPhan(b.it), tolerance_pct: 5, weight: diemDong[i],
+            name: `Responsive — ${ten} đúng chỗ khi nội dung bị kìm bề ngang`,
+          });
+          return;
+        }
+        them.push({
+          ...nen, id: `checkpoint_${so}`, kind: "component_present",
+          target: dichCuaThanhPhan(b.it), visible: b.loai === "hien_them", weight: diemDong[i],
+          name: `Responsive — ${ten} ${b.loai === "hien_them" ? "phải hiện" : "phải ẩn"} ở khung desktop`,
+        });
+      });
+      yeu.forEach((c, i) => {
+        so += 1;
+        them.push({
+          ...nen, id: `checkpoint_${so}`, kind: "layout_relation",
+          // auto = lấy chuẩn từ chính Golden lúc capture, ở đúng khung desktop.
+          relation: "auto",
+          target: dichCuaThanhPhan(c.a), relative_to: dichCuaThanhPhan(c.b),
+          weight: diemDong[manh.length + i],
+          name: `Responsive — ${c.a.label || c.a.identifier} và ${c.b.label || c.b.identifier} đổi từ "${TEN_QUAN_HE[c.dienThoai] || c.dienThoai}" sang "${TEN_QUAN_HE[c.desktop] || c.desktop}"`,
+        });
+      });
+      await api(`/behavior-authoring/scenarios/${respScenario.id}`, {
+        method: "PUT", body: JSON.stringify({ checkpoints: [...cu, ...them] }),
+      });
+      setRespKq(null);
+      setRespScenario(null);
+      setNotice(`Đã thêm ${them.length} tiêu chí responsive (${respDiem}đ chia đều). Phải capture lại oracle: lượt capture sẽ chạy thêm một lần ở khung desktop.`);
+      await refresh(suite.id);
+    });
+  };
+
   // Bước gõ chữ chưa khai giá trị: replay sẽ gõ chuỗi rỗng và mọi tiêu chí phía sau
   // trượt theo, nên khoá nút sinh testcase cho tới khi điền đủ.
   const buocThieuGiaTri = (recording?.raw_trace || []).filter(
@@ -1846,11 +2249,18 @@ function BehaviorAuthoringEditor() {
 
   const openScenarioEditor = (item: JsonMap) => {
     if (!suite || !item.id || recording) return;
+    if (!previewUrl) {
+      setError("Chưa build Golden. Bấm “Build & mở Golden” ở Bước 3 trước khi sửa thao tác.");
+      return;
+    }
     run(`revise-scenario-${String(item.id)}`, async () => {
       setScenarioCode(String(item.scenario_code || ""));
       setScenarioName(String(item.name || item.scenario_code || ""));
       setScenarioWeight(Number(item.weight || 1));
-      // KHÔNG nạp lại khung màn của scenario cũ nữa: khung nay cố định 412×915. Scenario
+      // Đưa Golden về màn đầu với dữ liệu gốc — cùng lý lẽ với lúc bắt đầu record: máy chấm
+      // replay hàm này TỪ ĐẦU, nên thao tác thêm vào phải nối tiếp đúng trạng thái đó.
+      await napLaiGolden();
+      // KHÔNG nạp lại khung màn của scenario cũ nữa: khung nay cố định 412×838. Scenario
       // nào trót ghi ở cỡ khác thì sinh lại testcase sẽ ghi đè bằng đúng khung chuẩn, và
       // đó chính là điều ta muốn — mỗi bộ đề chỉ có một bố cục để đối chiếu.
       const created = await api<Recording>(`/behavior-authoring/scenarios/${String(item.id)}/revision-recording`, { method: "POST" });
@@ -1903,6 +2313,9 @@ function BehaviorAuthoringEditor() {
       if (!event.data || typeof event.data !== "object") return;
       if (event.data.type === "GOLDEN_RECORDER_READY") {
         setRecorderReady(true);
+        const cho = choGoldenSanSang.current;
+        choGoldenSanSang.current = null;
+        if (cho) cho();
         return;
       }
       if (event.data.type === "GOLDEN_RECORDER_FLUSHED") {
@@ -1913,6 +2326,12 @@ function BehaviorAuthoringEditor() {
         window.clearTimeout(waiter.timer);
         flushWaiters.current.delete(requestId);
         waiter.resolve();
+        return;
+      }
+      if (event.data.type === "GOLDEN_RECORDER_RECTS") {
+        const cho = respChoDo.current;
+        respChoDo.current = null;
+        if (cho) cho(event.data.payload as unknown as AnhChupKhung);
         return;
       }
       if (event.data.type === "GOLDEN_RECORDER_IDENTIFIERS") {
@@ -2214,18 +2633,22 @@ function BehaviorAuthoringEditor() {
                 </div>
               )}
               {previewUrl ? <div className="mt-4 w-full overflow-auto rounded-xl border border-slate-300 bg-slate-100 p-3 dark:border-slate-700 dark:bg-slate-950">
-                <div className="mb-2 flex flex-wrap items-center justify-center gap-2 text-xs text-slate-500">
-                  <span>Khung máy chấm <b className="text-slate-700 dark:text-slate-200">{KHUNG_RONG}×{KHUNG_CAO} dp</b> (Pixel 7), cố định</span>
-                  <label className="flex items-center gap-1">Cỡ nhìn
-                    <select value={thuNho} onChange={(e) => setThuNho(Number(e.target.value))} className="rounded border border-slate-300 bg-transparent px-1.5 py-0.5 dark:border-slate-600">
+                <div className="mb-2 flex flex-wrap items-center justify-center gap-3 text-xs">
+                  <label className="flex items-center gap-1.5 font-bold text-slate-700 dark:text-slate-200">Ratio
+                    <select value={thuNho} onChange={(e) => setThuNho(Number(e.target.value))} disabled={khungDesktop} title={khungDesktop ? "Khung desktop thu cố định cho vừa cột" : undefined} className="rounded border border-slate-400 bg-transparent px-1.5 py-0.5 font-bold text-slate-800 disabled:opacity-40 dark:border-slate-500 dark:text-slate-100">
                       {MUC_THU_NHO.map(([ti, nhan]) => <option key={ti} value={ti}>{nhan}</option>)}
                     </select>
                   </label>
+                  <div className="flex overflow-hidden rounded border border-slate-400 font-bold dark:border-slate-500">
+                    <button onClick={() => setKhungDesktop(false)} className={`px-2 py-0.5 ${!khungDesktop ? "bg-indigo-600 text-white" : "text-slate-600 dark:text-slate-300"}`}>Điện thoại</button>
+                    <button onClick={() => setKhungDesktop(true)} title="Chỉ để xem app co giãn thế nào. Tiêu chí thường vẫn soạn ở khung điện thoại; tiêu chí responsive sinh từ nút Dò responsive ở danh sách luồng." className={`px-2 py-0.5 ${khungDesktop ? "bg-indigo-600 text-white" : "text-slate-600 dark:text-slate-300"}`}>Desktop</button>
+                  </div>
+                  {khungDesktop && <span className="font-bold text-indigo-600 dark:text-indigo-400">1280×800 — khung chấm responsive</span>}
                 </div>
                 {/* Hộp ngoài mang cỡ ĐÃ thu nhỏ để chiếm đúng chỗ trên trang; iframe bên trong
-                    vẫn là 412×915 thật rồi mới scale, nên app dàn bố cục y như lúc chấm. */}
-                <div className="mx-auto overflow-hidden rounded-lg border border-slate-300 bg-white dark:border-slate-700" style={{ width: KHUNG_RONG * thuNho, height: KHUNG_CAO * thuNho }}>
-                  <iframe ref={goldenFrame} title="Golden App" src={previewUrl} style={{ width: KHUNG_RONG, height: KHUNG_CAO, border: 0, transform: `scale(${thuNho})`, transformOrigin: "top left" }} className="block bg-white" />
+                    vẫn là 412×838 thật rồi mới scale, nên app dàn bố cục y như lúc chấm. */}
+                <div className="mx-auto overflow-hidden rounded-lg border border-slate-300 bg-white dark:border-slate-700" style={{ width: khungRongXem * tiLeXem, height: khungCaoXem * tiLeXem }}>
+                  <iframe ref={goldenFrame} title="Golden App" src={previewUrl} style={{ width: khungRongXem, height: khungCaoXem, border: 0, transform: `scale(${tiLeXem})`, transformOrigin: "top left" }} className="block bg-white" />
                 </div>
               </div> :<div className="mt-4 flex h-[300px] flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 text-center dark:border-slate-700"><MonitorPlay size={42} className="text-slate-400" /><p className="mt-3 font-bold">Golden Solution chưa được build để thao tác</p><p className="mt-1 max-w-md text-sm text-slate-500">Upload Golden ZIP rồi bấm “Build & mở Golden”. Hệ thống tự host app và ghi click/nhập liệu bằng semantic locator.</p></div>}
             </div>
@@ -2277,7 +2700,7 @@ function BehaviorAuthoringEditor() {
               <div className="mt-4 grid gap-3 sm:grid-cols-3"><input value={scenarioCode} disabled={Boolean(editingScenarioId)} onChange={(e) => setScenarioCode(e.target.value)} placeholder="Mã luồng (vd: ADD, EDIT, FILTER_ALL)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700" /><input value={scenarioName} onChange={(e) => setScenarioName(e.target.value)} placeholder="Tên luồng (vd: Thêm khoản chi)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><input type="number" min={0.1} step={0.5} value={scenarioWeight} onChange={(e) => setScenarioWeight(chanTrongSoHam(Number(e.target.value)))} aria-label="Trọng số scenario" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /></div>
               <div className="mt-2 grid gap-2 sm:grid-cols-2">
                   <div className="rounded-lg border border-blue-800 bg-blue-800 px-3 py-2 text-xs font-bold text-white sm:col-span-2 dark:border-blue-600 dark:bg-blue-730">
-  Khung màn: {KHUNG_RONG} × {KHUNG_CAO} dp — máy Pixel 7 (1080×2400 pixel)
+  Khung app: {KHUNG_RONG} × {KHUNG_CAO} dp — máy Pixel 7 (màn 412×915 dp, đã trừ 77 dp thanh trạng thái và thanh cử chỉ)
 </div>
                   <label className="flex items-center gap-2 text-xs font-semibold text-slate-500 sm:col-span-2"><input type="checkbox" checked={cheDoToi} onChange={() => setCheDoToi((v) => !v)} /> Chấm hàm này ở chế độ tối <span className="font-normal">— engine đặt platformBrightness = dark trước khi boot; bài có darkTheme sẽ tự đổi, giá trị chuẩn màu/kiểu chữ đo ở chế độ tối. Khung Golden bên trên vẫn hiện sáng.</span></label><label className="text-xs font-semibold text-slate-500 sm:col-span-2">Bộ nhớ app đã có sẵn khi mở (SharedPreferences)<textarea value={prefsBanDau} onChange={(e) => setPrefsBanDau(e.target.value)} rows={2} placeholder="che_do_toi=true" className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-xs text-slate-800 dark:border-slate-700 dark:text-slate-100" /><span className="font-normal">Mỗi dòng một cặp <code>khoá=giá trị</code>. Dùng cho luồng kiểu &ldquo;mở app khi người dùng đã bật chế độ tối từ lần trước&rdquo;. Để trống thì app mở với bộ nhớ rỗng.</span></label></div>
               {!recording ? <><button onClick={startRecording} disabled={!recordingInputsReady || Boolean(busy)} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-rose-600 px-4 py-2.5 font-bold text-white disabled:opacity-40"><Radio size={18} /> Bắt đầu record</button>{!recordingInputsReady && <p className="mt-2 text-xs text-amber-600">Cần đủ Database ẩn và Golden Solution.</p>}</> : <>
@@ -2686,7 +3109,70 @@ function BehaviorAuthoringEditor() {
                     </button>
                   </div>;
                 })()}
-                <div className="mt-3 flex flex-wrap gap-2"><button onClick={() => openCodePreview(String(item.scenario_code || ""))} disabled={Boolean(busy)} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-bold text-slate-700 hover:border-indigo-400 disabled:opacity-40 dark:border-slate-700 dark:text-slate-200"><Code2 size={14} /> Xem testcase</button><button onClick={() => moChiaDiem(item)} disabled={Boolean(busy) || Boolean(recording)} title="Sửa trọng số hàm và điểm từng checkpoint đã lưu" className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 px-2.5 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-50 disabled:opacity-40 dark:border-emerald-800 dark:text-emerald-300 dark:hover:bg-emerald-950"><Database size={14} /> Chia điểm</button><button onClick={() => openScenarioEditor(item)} disabled={Boolean(busy) || Boolean(recording)} title={recording ? "Hãy kết thúc phiên đang soạn trước" : "Nạp lại các bước vào khung record để chỉnh sửa"} className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-300 px-2.5 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50 disabled:opacity-40 dark:border-indigo-800 dark:text-indigo-300 dark:hover:bg-indigo-950"><Pencil size={14} /> Sửa thao tác</button><button onClick={() => deleteScenario(item)} disabled={Boolean(busy) || Boolean(recording)} className="inline-flex items-center gap-1.5 rounded-lg border border-rose-300 px-2.5 py-1.5 text-xs font-bold text-rose-600 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-900 dark:hover:bg-rose-950"><Trash2 size={14} /> Xóa</button></div></div>)}
+                <div className="mt-3 flex flex-wrap gap-2"><button onClick={() => openCodePreview(String(item.scenario_code || ""))} disabled={Boolean(busy)} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-bold text-slate-700 hover:border-indigo-400 disabled:opacity-40 dark:border-slate-700 dark:text-slate-200"><Code2 size={14} /> Xem testcase</button><button onClick={() => moChiaDiem(item)} disabled={Boolean(busy) || Boolean(recording)} title="Sửa trọng số hàm và điểm từng checkpoint đã lưu" className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 px-2.5 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-50 disabled:opacity-40 dark:border-emerald-800 dark:text-emerald-300 dark:hover:bg-emerald-950"><Database size={14} /> Chia điểm</button><button onClick={() => openScenarioEditor(item)} disabled={Boolean(busy) || Boolean(recording)} title={recording ? "Hãy kết thúc phiên đang soạn trước" : "Nạp lại các bước vào khung record để chỉnh sửa"} className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-300 px-2.5 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50 disabled:opacity-40 dark:border-indigo-800 dark:text-indigo-300 dark:hover:bg-indigo-950"><Pencil size={14} /> Sửa thao tác</button><button onClick={() => doCoGian(item)} disabled={Boolean(busy) || Boolean(recording) || !previewUrl} title="Đo bố cục ở khung điện thoại rồi đo lại ở khung desktop 1280×800, chỉ ra cặp thành phần ĐỔI quan hệ — đó là chỗ app thật sự co giãn." className="inline-flex items-center gap-1.5 rounded-lg border border-sky-300 px-2.5 py-1.5 text-xs font-bold text-sky-700 hover:bg-sky-50 disabled:opacity-40 dark:border-sky-800 dark:text-sky-300 dark:hover:bg-sky-950">{busy === "resp-scan" ? <Loader2 className="animate-spin" size={14} /> : <MonitorPlay size={14} />} Dò responsive</button><button onClick={() => deleteScenario(item)} disabled={Boolean(busy) || Boolean(recording)} className="inline-flex items-center gap-1.5 rounded-lg border border-rose-300 px-2.5 py-1.5 text-xs font-bold text-rose-600 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-900 dark:hover:bg-rose-950"><Trash2 size={14} /> Xóa</button></div></div>)}
+              {respKq && respScenario && (() => {
+                const soManh = respKq.bangChung.length + respKq.doiCot.length;
+                const daTick = respKq.bangChung.filter((b) => b.checked).length + respKq.capReflow.filter((c) => c.checked).length;
+                return (
+                <div className="mt-3 rounded-xl border border-sky-300 bg-sky-50/40 p-3 dark:border-sky-800 dark:bg-sky-950/20">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-bold">Responsive — luồng {respScenario.ma}</span>
+                    <label className="flex items-center gap-1 text-sm">Điểm kĩ năng
+                      <input type="number" min={0.5} step={0.5} value={respDiem} onChange={(e) => setRespDiem(Math.max(0, Number(e.target.value)))} className="w-16 rounded border border-slate-300 bg-transparent px-1.5 py-0.5 dark:border-slate-600" />đ
+                    </label>
+                    <button onClick={luuTieuChiResponsive} disabled={Boolean(busy) || daTick === 0} className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-bold text-white disabled:opacity-40">Thêm {daTick} tiêu chí</button>
+                    <button onClick={() => { setRespKq(null); setRespScenario(null); }} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-bold text-slate-600 dark:border-slate-600 dark:text-slate-300">Đóng</button>
+                  </div>
+
+                  {soManh === 0 ? (
+                    <p className="mt-2 rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700 dark:border-rose-800 dark:bg-rose-950/40 dark:text-rose-300">
+                      Golden này KHÔNG có dấu hiệu co giãn thật nào — không thành phần nào hiện thêm hay biến mất, nội dung vẫn nở hết bề ngang, không nhóm nào đổi số cột.
+                      Mọi thứ đổi chỗ ở danh sách dưới chỉ là <b>Wrap tự xếp lại</b>, app không viết một dòng responsive nào cũng có. Chấm chúng là cho điểm một kĩ năng không tồn tại.
+                    </p>
+                  ) : (
+                    <div className="mt-2">
+                      <p className="text-xs font-bold text-emerald-700 dark:text-emerald-400">CO GIÃN THẬT — {soManh} dấu hiệu. Reflow tự nhiên không tạo ra được những thứ này.</p>
+                      {respKq.doiCot.map((d) => (
+                        <p key={d.key} className="mt-1 text-[11px] text-emerald-700 dark:text-emerald-400">· Nhóm &ldquo;{d.nhan}&rdquo; đổi từ {d.dienThoai} cột sang {d.desktop} cột — list thành grid</p>
+                      ))}
+                      <div className="mt-1 grid max-h-44 gap-1 overflow-auto pr-1">
+                        {respKq.bangChung.map((b, i) => (
+                          <label key={`${b.loai}|${b.it.key}`} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 text-sm hover:bg-emerald-100/60 dark:hover:bg-emerald-900/30">
+                            <input type="checkbox" checked={b.checked} onChange={() => setRespKq((prev) => prev ? { ...prev, bangChung: prev.bangChung.map((x, j) => (j === i ? { ...x, checked: !x.checked } : x)) } : prev)} />
+                            <span className="shrink-0 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
+                              {b.loai === "hien_them" ? "hiện thêm" : b.loai === "bien_mat" ? "biến mất" : "kìm bề ngang"}
+                            </span>
+                            <span className="truncate">{b.moTa}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <p className="mt-3 text-xs font-bold text-amber-700 dark:text-amber-400">
+                    REFLOW TỰ NHIÊN — {respKq.capReflow.length} cặp đổi quan hệ. Wrap tự xếp lại, chữ hết xuống dòng, Expanded nở ra đều tạo ra được,
+                    nên tick vào là chấm &ldquo;bài có dùng cùng widget với Golden không&rdquo;, không phải chấm kĩ năng responsive.
+                  </p>
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    Nội dung chiếm {Math.round(respKq.beNgang.dienThoai * 100)}% bề ngang ở khung điện thoại và {Math.round(respKq.beNgang.desktop * 100)}% ở khung desktop.
+                    Điểm khai ở trên chia đều cho MỌI mục đã tick ở cả hai phần, lấy từ ngân sách của luồng {respScenario.ma}.
+                  </p>
+                  <div className="mt-1 grid max-h-44 gap-1 overflow-auto pr-1">
+                    {respKq.capReflow.map((c, i) => (
+                      <label key={`${c.a.key}|${c.b.key}`} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 text-sm hover:bg-amber-100/60 dark:hover:bg-amber-900/30">
+                        <input type="checkbox" checked={c.checked} onChange={() => setRespKq((prev) => prev ? { ...prev, capReflow: prev.capReflow.map((x, j) => (j === i ? { ...x, checked: !x.checked } : x)) } : prev)} />
+                        <span className="truncate font-medium">{c.a.label || c.a.identifier}</span>
+                        <span className="shrink-0 text-slate-400">↔</span>
+                        <span className="truncate font-medium">{c.b.label || c.b.identifier}</span>
+                        <span className="ml-auto shrink-0 rounded bg-slate-200 px-1.5 py-0.5 text-[10px] font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">{TEN_QUAN_HE[c.dienThoai] || c.dienThoai}</span>
+                        <span className="shrink-0 text-slate-400">→</span>
+                        <span className="shrink-0 rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-bold text-amber-800 dark:bg-amber-900 dark:text-amber-200">{TEN_QUAN_HE[c.desktop] || c.desktop}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                );
+              })()}
               {!suite.scenarios?.length && <p className="text-sm text-slate-500">Chưa có scenario. Hãy record ít nhất một luồng và sinh testcase.</p>}
             </div>
           </section>

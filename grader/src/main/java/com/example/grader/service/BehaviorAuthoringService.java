@@ -94,7 +94,6 @@ public class BehaviorAuthoringService {
     private final GoldenRecordingRepository recordings;
     private final OracleSnapshotRepository oracles;
     private final GoldenValidationRunRepository validationRuns;
-    private final SkillRepository skills;
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
 
     private final ExamService exams;
@@ -105,7 +104,6 @@ public class BehaviorAuthoringService {
                                     GoldenRecordingRepository recordings,
                                     OracleSnapshotRepository oracles,
                                     GoldenValidationRunRepository validationRuns,
-                                    SkillRepository skills,
                                     ExamService exams) {
         this.exams = exams;
         this.goldenApps = goldenApps;
@@ -114,7 +112,6 @@ public class BehaviorAuthoringService {
         this.recordings = recordings;
         this.oracles = oracles;
         this.validationRuns = validationRuns;
-        this.skills = skills;
     }
 
     @Transactional
@@ -367,6 +364,14 @@ public class BehaviorAuthoringService {
         Map<String, Object> event = new LinkedHashMap<>(body == null ? Map.of() : body);
         String kind = text(event, "kind", "action").toLowerCase(Locale.ROOT);
         if (!EVENT_KINDS.contains(kind)) throw new IllegalArgumentException("Loại event không hỗ trợ: " + kind);
+        // KHUNG của tiêu chí: để trống là khung điện thoại, "desktop" là khung responsive
+        // 1280×800. Chặn ngay ở đây thay vì để nó trôi xuống materializer, vì gõ sai một chữ
+        // thì tiêu chí âm thầm rơi về khung điện thoại và kĩ năng responsive vẫn báo đạt.
+        String khung = text(event, "khung", "").toLowerCase(Locale.ROOT);
+        if (!khung.isBlank() && !BehaviorSuiteMaterializer.KHUNG_DESKTOP_CO.equals(khung)) {
+            throw new IllegalArgumentException("Khung của tiêu chí chỉ nhận rỗng (điện thoại) hoặc \"desktop\": " + khung);
+        }
+        if (!khung.isBlank()) event.put("khung", khung);
         if ("action".equals(kind)) {
             String action = required(event, "action").toLowerCase(Locale.ROOT);
             if (!ACTIONS.contains(action)) throw new IllegalArgumentException("Action không hỗ trợ: " + action);
@@ -1019,10 +1024,6 @@ public class BehaviorAuthoringService {
             checkpoint.putIfAbsent("weight", 1.0);
             checkpoints.add(checkpoint);
         }
-        if (derived != null && !derived.isEmpty()
-                && "UI_BUTTONS_SELECTION".equals(scenario.getSkillCode())) {
-            scenario.setSkillCode("STORAGE_SQLITE_CRUD");
-        }
         scenario.setCheckpointsJson(json(checkpoints));
         scenarios.save(scenario);
 
@@ -1351,11 +1352,6 @@ public class BehaviorAuthoringService {
         double totalWeight = 0;
         for (BehaviorScenario scenario : enabled) {
             validateScenario(scenario, true);
-            if (!skills.existsById(scenario.getSkillCode())) {
-                throw new IllegalStateException(
-                        "Scenario " + scenario.getScenarioCode() + " dùng skill_code không có trong syllabus: "
-                                + scenario.getSkillCode());
-            }
             boolean hasOracle = oracles.findByScenarioIdOrderByCreatedAtDesc(scenario.getId()).stream()
                     .anyMatch(row -> row.getStatus() == OracleStatus.READY
                             && Objects.equals(row.getGoldenSha256(), app.getArtifactSha256()));

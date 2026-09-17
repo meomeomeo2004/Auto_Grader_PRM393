@@ -292,17 +292,17 @@ public class AiExamAuthorService {
         }
     }
 
-    // ── Bước 4 (MỚI): database mẫu (STUDENT_DATABASE) + database ẩn (HIDDEN_DATABASE) ─
+    // ── Bước 4: database ẩn (HIDDEN_DATABASE) ─
 
     /**
-     * Sinh dữ liệu cho hai database mà "Bảy thành phần của bộ chấm" cần (cùng cấu trúc bảng, khác
-     * dữ liệu — xem {@link AiPrompts#seedSystem}). Chỉ trả BẢN MÔ TẢ (bảng/cột/dữ liệu) để giáo
-     * viên xem lại; {@link com.example.grader.service.ExamService#saveDatabaseSeed} mới thật sự
-     * dựng file .db, và tự chặn mọi câu lệnh SQL không phải "CREATE TABLE".
+     * Sinh dữ liệu cho database ẩn — thứ duy nhất máy chấm nạp (xem {@link AiPrompts#seedSystem}).
+     * Chỉ trả BẢN MÔ TẢ (bảng/cột/dữ liệu) để giáo viên xem lại;
+     * {@link com.example.grader.service.ExamService#saveDatabaseSeed} mới thật sự dựng file .db,
+     * và tự chặn mọi câu lệnh SQL không phải "CREATE TABLE".
      */
     public Map<String, Object> proposeDatabaseSeed(String deBai) {
         if (deBai == null || deBai.isBlank())
-            throw new IllegalArgumentException("Chưa có đề bài để soạn database mẫu.");
+            throw new IllegalArgumentException("Chưa có đề bài để soạn database ẩn.");
         JsonNode res = llm.chatJson(List.of(
                 LlmMessage.system(AiPrompts.seedSystem()),
                 LlmMessage.user(AiPrompts.seedUser(deBai))));
@@ -325,7 +325,6 @@ public class AiExamAuthorService {
             row.put("name", name);
             row.put("create_sql", createSql);
             row.put("columns", columns);
-            row.put("student_rows", rowsOf(t.path("student_rows")));
             row.put("hidden_rows", rowsOf(t.path("hidden_rows")));
             tables.add(row);
         }

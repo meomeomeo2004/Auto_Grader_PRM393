@@ -25,7 +25,8 @@ import {
 interface AuthoredExam { exam_id: string; title: string; updated_at: string }
 interface SeedTable {
   name: string; create_sql: string; columns: string[];
-  student_rows: (string | number | boolean | null)[][];
+  // Chỉ còn database ẩn: engine chỉ nạp hidden_fixture_path, ô "Database phát cho sinh viên"
+  // đã bỏ hẳn khỏi bộ chấm nên sinh thêm một bộ dữ liệu nữa là sinh ra thứ không ai nạp.
   hidden_rows: (string | number | boolean | null)[][];
 }
 
@@ -232,7 +233,7 @@ function ExamAuthoringEditor() {
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Không dựng được database.");
       setSeedSaved(true);
-      setInfo("Đã dựng student.db + hidden.db. Tải về rồi đưa lên đúng ô STUDENT_DATABASE/HIDDEN_DATABASE ở trang \"Bộ chấm Golden\".");
+      setInfo("Đã dựng hidden.db. Tải về rồi đưa lên ô Database ẩn ở trang \"Bộ chấm Golden\".");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Không dựng được database.");
     } finally {
@@ -471,12 +472,12 @@ function ExamAuthoringEditor() {
 
         {/* Bước 3: database mẫu phát cho sinh viên + database ẩn chống hardcode */}
         {examAccepted && (
-          <Step index={3} icon={Database} title="Database mẫu &amp; database ẩn (chống hardcode)" done={seedSaved}>
+          <Step index={3} icon={Database} title="Database ẩn (dữ liệu máy chấm nạp)" done={seedSaved}>
             <p className="mb-3 rounded-xl bg-slate-50 p-3 text-[11px] leading-relaxed text-slate-600">
-              AI đọc đúng bảng đã khai ở mục "Hợp đồng dữ liệu" của đề, soạn 2 bộ dữ liệu <strong>cùng cấu
-              trúc bảng, khác dữ liệu</strong>: một bộ phát công khai cho sinh viên, một bộ ẩn để chấm —
-              tránh sinh viên đoán/hardcode kết quả theo dữ liệu mẫu. Hai file <span className="font-mono">.db</span> dựng
-              THẬT ngay ở đây, tải về rồi đưa lên đúng ô STUDENT_DATABASE/HIDDEN_DATABASE ở trang "Bộ chấm Golden".
+              AI đọc đúng bảng đã khai ở mục &ldquo;Hợp đồng dữ liệu&rdquo; của đề rồi soạn dữ liệu cho <strong>database
+              ẩn</strong> — thứ duy nhất hệ thống nạp vào app trước khi chấm. Sinh viên không được phát dữ liệu này, chỉ
+              biết cấu trúc bảng qua đề, nên không đoán hay hardcode được kết quả. File <span className="font-mono">.db</span> dựng
+              THẬT ngay ở đây, tải về rồi đưa lên ô Database ẩn ở trang &ldquo;Bộ chấm Golden&rdquo;.
             </p>
             <div className="flex flex-wrap items-center gap-2">
               <button onClick={proposeSeed} disabled={busy !== null} className={primaryBtn}>
@@ -486,14 +487,11 @@ function ExamAuthoringEditor() {
               {seedTables.length > 0 && (
                 <button onClick={saveSeed} disabled={busy !== null} className={primaryBtn}>
                   {busy === "seed-save" ? <Loader2 size={15} className="animate-spin" /> : <ShieldCheck size={15} />}
-                  Lưu &amp; tạo 2 file database
+                  Lưu &amp; tạo file database ẩn
                 </button>
               )}
               {seedSaved && (
                 <>
-                  <button onClick={() => downloadDb("student")} disabled={busy !== null} className={ghostBtn}>
-                    {busy === "download-student" ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Tải student.db
-                  </button>
                   <button onClick={() => downloadDb("hidden")} disabled={busy !== null} className={ghostBtn}>
                     {busy === "download-hidden" ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Tải hidden.db
                   </button>
@@ -507,19 +505,11 @@ function ExamAuthoringEditor() {
                   <div key={t.name} className="rounded-xl border border-slate-200 p-3">
                     <p className="font-mono text-xs font-bold text-indigo-600">{t.name}</p>
                     <p className="mt-1 font-mono text-[11px] text-slate-400">{t.columns.join(", ")}</p>
-                    <div className="mt-2 grid gap-3 sm:grid-cols-2">
-                      <div>
-                        <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                          Phát cho sinh viên ({t.student_rows.length} dòng)
-                        </p>
-                        <SeedPreview columns={t.columns} rows={t.student_rows} />
-                      </div>
-                      <div>
-                        <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                          Ẩn — dùng để chấm ({t.hidden_rows.length} dòng)
-                        </p>
-                        <SeedPreview columns={t.columns} rows={t.hidden_rows} />
-                      </div>
+                    <div className="mt-2">
+                      <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                        Database ẩn — dữ liệu máy chấm nạp ({t.hidden_rows.length} dòng)
+                      </p>
+                      <SeedPreview columns={t.columns} rows={t.hidden_rows} />
                     </div>
                   </div>
                 ))}

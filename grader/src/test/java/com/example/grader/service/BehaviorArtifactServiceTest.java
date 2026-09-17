@@ -72,31 +72,37 @@ class BehaviorArtifactServiceTest {
     }
 
     @Test
-    void acceptsDatabasesWithSameSchemaAndDifferentData() throws Exception {
-        Path publicDb = sqlite("public.db", "CREATE TABLE users(uid TEXT PRIMARY KEY, name TEXT NOT NULL)",
-                "INSERT INTO users VALUES ('PUBLIC_01', 'Public user')");
+    void nhanDatabaseAnDuDuLieuKhacBanCu() throws Exception {
         Path hiddenDb = sqlite("hidden.db", "CREATE TABLE users(uid TEXT PRIMARY KEY, name TEXT NOT NULL)",
                 "INSERT INTO users VALUES ('HIDDEN_99', 'Hidden user')");
+        Path hiddenMoi = sqlite("hidden2.db", "CREATE TABLE users(uid TEXT PRIMARY KEY, name TEXT NOT NULL)",
+                "INSERT INTO users VALUES ('HIDDEN_01', 'Nguoi khac')");
 
-        service.upload("suite-1", BehaviorArtifactType.STUDENT_DATABASE, multipart(publicDb), "{}");
         service.upload("suite-1", BehaviorArtifactType.HIDDEN_DATABASE, multipart(hiddenDb), "{}");
+        service.upload("suite-1", BehaviorArtifactType.HIDDEN_DATABASE, multipart(hiddenMoi), "{}");
 
         assertEquals(2, stored.size());
         assertNotEquals(stored.get(0).getSha256(), stored.get(1).getSha256(),
-                "Hai DB phải được phép khác dữ liệu nhưng vẫn cùng schema");
+                "Tải Database ẩn bản mới phải sinh version mới, không bị chặn vì khác dữ liệu");
     }
 
     @Test
-    void rejectsHiddenDatabaseWithDifferentSchema() throws Exception {
-        Path publicDb = sqlite("public.db", "CREATE TABLE users(uid TEXT PRIMARY KEY, name TEXT NOT NULL)");
+    void khongConChanDatabaseAnLechCauTrucVoiStudentDbCu() throws Exception {
+        // ĐỔI HÀNH VI CÓ CHỦ Ý, 16/9/2026: bỏ hẳn ô "Database phát cho sinh viên".
+        //
+        // Trước đây tải Database ẩn lên sẽ bị chặn nếu cấu trúc bảng lệch với student.db. Phép so
+        // ấy lấy student.db làm mốc, mà máy chấm không bao giờ mở file đó — nên với bộ đề cũ còn
+        // sót một student.db lệch schema, nó chặn luôn cả lần tải Database ẩn ĐÚNG lên.
+        //
+        // Phép canh cấu trúc thật nay nằm ở khâu kiểm đồng bộ khung phát, so trên MÃ NGUỒN giữa
+        // khung phát và Golden. Test này giữ để không ai dựng lại phép so cũ.
+        Path studentCu = sqlite("public.db", "CREATE TABLE users(uid TEXT PRIMARY KEY, name TEXT NOT NULL)");
         Path hiddenDb = sqlite("hidden.db", "CREATE TABLE users(uid TEXT PRIMARY KEY, full_name TEXT, age INTEGER)");
-        service.upload("suite-1", BehaviorArtifactType.STUDENT_DATABASE, multipart(publicDb), "{}");
+        service.upload("suite-1", BehaviorArtifactType.STUDENT_DATABASE, multipart(studentCu), "{}");
 
-        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
-                () -> service.upload("suite-1", BehaviorArtifactType.HIDDEN_DATABASE, multipart(hiddenDb), "{}"));
+        service.upload("suite-1", BehaviorArtifactType.HIDDEN_DATABASE, multipart(hiddenDb), "{}");
 
-        assertTrue(error.getMessage().contains("cùng cấu trúc"));
-        assertEquals(1, stored.size(), "DB sai schema không được tạo version mới");
+        assertEquals(2, stored.size(), "Database ẩn lệch cấu trúc với student.db cũ vẫn phải tải lên được");
     }
 
     @Test

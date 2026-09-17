@@ -4,7 +4,7 @@
 // chỉ chứa màn hình của vai đó, nên một biến môi trường là đủ để quyết định.
 //
 // Giá trị đặt trong .env.local (dong-goi.ps1 và start-all.ps1 đều ghi sẵn):
-//   NEXT_PUBLIC_ROLE=gv    → giảng viên: Bộ chấm Golden, Khung năng lực, Thư viện chấm
+//   NEXT_PUBLIC_ROLE=gv    → giảng viên: Tạo đề, Tạo Golden, Bộ chấm Golden, Thư viện chấm
 //   NEXT_PUBLIC_ROLE=nc    → người chấm: Chấm tự động, Lịch sử chấm, Thư viện chấm
 //
 // KHÔNG còn bản "thấy cả hai vai". Bản đó là cấu hình duy nhất mà bộ chấm vừa xuất bản hiện

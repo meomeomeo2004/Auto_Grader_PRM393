@@ -19,7 +19,6 @@ import {
 interface ExamOption { examId: string; examName: string; }
 interface TestCaseItem {
   test_id?: string; name?: string; status?: string; executed?: boolean; weight?: number;
-  skill_code?: string;
   difficulty?: string; skill?: string;
   actual?: string; error_log?: string;
   // `actual_source === "observation"` = `actual` đã là câu tiếng Việt sạch, hiển thị thẳng.
@@ -1217,25 +1216,12 @@ export default function HistoryPage() {
                                     Chưa chạy
                                   </span>
                                 )}
-                                {tc.skill_code && (
-                                  <span
-                                    className="shrink-0 rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600"
-                                    title={tc.skill_code || ""}
-                                  >
-                                    {tc.skill_code}
-                                  </span>
-                                )}
                                 {tc.difficulty && (
                                   <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${DIFF_BADGE[tc.difficulty] || DIFF_BADGE.basic}`}>
                                     {DIFF_VI[tc.difficulty] || tc.difficulty}
                                   </span>
                                 )}
                               </div>
-                              {tc.skill_code && (
-                                <p className="mt-0.5 pl-3.5 text-[10px] text-slate-400">
-                                  {tc.skill_code}
-                                </p>
-                              )}
                               {!passed && (tc.actual || tc.error_log || tc.error_code) && (
                                 <FailureDetail
                                   actual={tc.actual || tc.error_log}

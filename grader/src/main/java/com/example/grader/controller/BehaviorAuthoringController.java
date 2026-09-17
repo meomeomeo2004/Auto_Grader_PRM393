@@ -407,11 +407,12 @@ public class BehaviorAuthoringController {
                                             @RequestPart("file") MultipartFile file,
                                             @RequestPart(value = "metadata", required = false) String metadata) {
         return call(() -> {
-            if (type != BehaviorArtifactType.STUDENT_DATABASE
-                    && type != BehaviorArtifactType.HIDDEN_DATABASE
+            // Database phát cho sinh viên đã bỏ hẳn: máy chấm chỉ nạp Database ẩn, nên nhận thêm
+            // một file không ai đọc chỉ làm người ra đề tưởng mình còn thiếu bước.
+            if (type != BehaviorArtifactType.HIDDEN_DATABASE
                     && type != BehaviorArtifactType.GOLDEN_SOLUTION) {
                 throw new IllegalArgumentException(
-                        "Chỉ được tải lên Database phát sinh viên, Database ẩn hoặc Golden Solution. "
+                        "Chỉ được tải lên Database ẩn hoặc Golden Solution. "
                                 + type + " phải do hệ thống sinh từ phiên record.");
             }
             Map<String, Object> artifact = artifactService.upload(id, type, file, metadata);
@@ -471,14 +472,27 @@ public class BehaviorAuthoringController {
         Map<String, Object> suiteView = service.getSuite(suiteId);
         List<Map<String, Object>> allScenarios = list(suiteView.get("scenarios")).stream()
                 .map(BehaviorAuthoringController::map).toList();
-        Map<String, Object> testcaseFile = new LinkedHashMap<>();
-        testcaseFile.put("schema_version", "1.0");
-        testcaseFile.put("scenarios", allScenarios);
-        testcaseFile.put("steps", allScenarios.stream()
+        List<Map<String, Object>> cacBuoc = allScenarios.stream()
                 .flatMap(item -> list(item.get("steps")).stream())
                 .map(BehaviorAuthoringController::map)
                 .map(this::automationRow)
-                .toList());
+                .toList();
+        // XOÁ SCENARIO CUỐI CÙNG thì không còn bước nào để định nghĩa testcase.
+        //
+        // Bản trước vẫn cố ghi, và validateJson chặn đúng đắn ("phải có mảng steps không rỗng").
+        // Nhưng lúc đó scenario đã bị xoá khỏi CSDL rồi, nên màn hình chỉ hiện lỗi đỏ còn hàng
+        // vẫn nằm đó — phải F5 mới thấy nó biến mất, và người dùng tưởng lệnh xoá hỏng.
+        //
+        // Không còn bước nào thì gỡ luôn artifact cũ: giữ nó active là để một file mô tả những
+        // scenario đã xoá nằm chờ publish.
+        if (cacBuoc.isEmpty()) {
+            artifactService.deactivateAll(suiteId, BehaviorArtifactType.TESTCASE_DEFINITION);
+            return;
+        }
+        Map<String, Object> testcaseFile = new LinkedHashMap<>();
+        testcaseFile.put("schema_version", "1.0");
+        testcaseFile.put("scenarios", allScenarios);
+        testcaseFile.put("steps", cacBuoc);
         artifactService.writeGenerated(
                 suiteId,
                 BehaviorArtifactType.TESTCASE_DEFINITION,
