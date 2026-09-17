@@ -7,7 +7,7 @@ import {
   FileCode2, CheckSquare, Bell, FileArchive,
   GraduationCap, History, PanelLeftClose,
   Clock, CheckCircle2, AlertCircle, BookOpen, Package, Pause,
-  Bot, ChevronDown, Sparkles, FlaskConical, FileText,
+  Bot, ChevronDown, Sparkles, FileText,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { API_BASE } from '@/lib/config';
@@ -61,7 +61,6 @@ const TOAN_BO_NAV: NavEntry[] = [
   // Soạn đề bằng AI là việc của giảng viên. Hai mục này về từ nhánh AI, viết trước khi tách
   // vai nên không khai `vai` — mà mục không khai vai bị hiểu là "cả hai bản đều có".
   { name: 'Tạo đề', path: '/teacher/exam-authoring', icon: Sparkles, vai: 'gv' },
-  { name: 'Tạo Golden', path: '/teacher/golden-authoring', icon: FlaskConical, vai: 'gv' },
   { name: 'Kho tài liệu đề', path: '/teacher/exam-documents', icon: FileText, vai: 'gv' },
   // Vào thẳng trang Kho — mọi thao tác (tạo/sửa/xóa/chấm lại) đều là nút trong trang đó.
   { name: 'Bộ chấm Golden', path: '/teacher/archive', icon: FileCode2, vai: 'gv' },

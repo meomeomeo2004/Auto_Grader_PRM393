@@ -5,29 +5,26 @@
 // mới soạn được đề. Có thể tạo và lưu nhiều đề — mỗi đề là một mã đề gõ tay, lưu độc lập trong
 // handout/<examId>/de_bai.md (xem ExamService#listAuthoredExamIds, không cần Suite/testcase nào).
 //
-// Bước "Tạo Golden" (khung starter, Golden Solution) đã chuyển sang trang riêng /teacher/golden-authoring.
+// Hình minh họa giao diện (AI vẽ khung dây theo mục 3 của đề, xem MockupRenderer ở backend) sinh
+// ngay tại đây — không còn trang "Tạo Golden" riêng (đã xoá 17/9/2026).
 
 import { Suspense, useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import SidebarLayout from "@/components/layout/SidebarLayout";
 import { API_BASE } from "@/lib/config";
-import { downloadBlob } from "@/lib/mockup-image";
+import { downloadBlob, svgToPng } from "@/lib/mockup-image";
 import {
   clearAiDraft, DRAFT_NO_EXAM, fetchAiDraftFromServer, pushAiDraftToServer, readAiDraft, writeAiDraft,
 } from "@/lib/aiAuthorDrafts";
 import AiSettingsPanel from "@/components/testcases/AiSettingsPanel";
 import { Field, Step, inputClass, primaryBtn, ghostBtn } from "@/components/testcases/AiWizardWidgets";
 import {
-  Sparkles, Wand2, FileText, Loader2, Check, Upload, Download, RotateCcw, AlertTriangle, ListChecks, FilePlus2,
-  Database, ShieldCheck,
+  Sparkles, Wand2, FileText, Loader2, Check, Upload, Download, AlertTriangle, ListChecks, FilePlus2,
+  Image as ImageIcon,
 } from "lucide-react";
 
 interface AuthoredExam { exam_id: string; title: string; updated_at: string }
-interface SeedTable {
-  name: string; create_sql: string; columns: string[];
-  student_rows: (string | number | boolean | null)[][];
-  hidden_rows: (string | number | boolean | null)[][];
-}
+interface Mockup { id: string; title: string; svg: string }
 
 function ExamAuthoringEditor() {
   const [error, setError] = useState<string | null>(null);
@@ -51,8 +48,8 @@ function ExamAuthoringEditor() {
   const [revisePrompt, setRevisePrompt] = useState("");
   const [examAccepted, setExamAccepted] = useState(false);
 
-  const [seedTables, setSeedTables] = useState<SeedTable[]>([]);
-  const [seedSaved, setSeedSaved] = useState(false);
+  const [mockups, setMockups] = useState<Mockup[]>([]);
+  const [mockupPrompt, setMockupPrompt] = useState("");
 
   const loadAuthored = useCallback(async () => {
     setLoadingList(true);
@@ -89,7 +86,7 @@ function ExamAuthoringEditor() {
   const resetForm = () => {
     setDeBai(""); setSummary(""); setExamAccepted(false);
     setImportedName(""); setRevisePrompt("");
-    setSeedTables([]); setSeedSaved(false);
+    setMockups([]); setMockupPrompt("");
     setReq({ topic: "", knowledge: "", screens: "", features: "", entity: "",
       storage: "SQLite", difficulty: "Trung bình", duration: "90 phút", note: "" });
   };
@@ -111,7 +108,7 @@ function ExamAuthoringEditor() {
       setDeBai(String(data.de_bai || ""));
       setSummary("");
       setExamAccepted(true);
-      setSeedTables([]); setSeedSaved(false);
+      setMockups(Array.isArray(data.mockups) ? data.mockups : []);
       const draft = (await fetchAiDraftFromServer(API_BASE, id)) || readAiDraft(id);
       if (draft?.state?.req) setReq((cur) => ({ ...cur, ...(draft.state.req as object) }));
       setInfo(`Đã mở đề ${id}.`);
@@ -167,10 +164,15 @@ function ExamAuthoringEditor() {
     if (!examId.trim()) { setError("Hãy đặt mã đề trước (vd PE_PRM393_DEMO)."); return; }
     if (!req.topic.trim()) { setError("Hãy nhập chủ đề / bài toán của đề."); return; }
     const data = await call<{ de_bai: string; summary: string }>("/ai/exam/draft", req, "draft");
-    if (data) {
-      setDeBai(data.de_bai);
-      setSummary(data.summary);
-      setExamAccepted(false);
+    if (!data) return;
+    setDeBai(data.de_bai);
+    setSummary(data.summary);
+    setExamAccepted(false);
+    // Vẽ hình minh họa NGAY khi sinh đề — dùng thẳng văn bản vừa nhận, không đọc state `deBai`
+    // (state chưa kịp cập nhật trong cùng lượt gọi này).
+    const mock = await drawMockups(data.de_bai);
+    if (mock) {
+      setInfo(`Đã sinh đề bài kèm ${mock.mockups?.length || 0} hình minh họa — xem lại rồi bấm "Lưu đề".`);
     }
   };
 
@@ -194,14 +196,17 @@ function ExamAuthoringEditor() {
     try {
       const saveRes = await fetch(`${API_BASE}/exam-setup/${encodeURIComponent(exam)}/handout`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ de_bai: deBai, mockups: [] }),
+        body: JSON.stringify({
+          de_bai: deBai,
+          mockups: mockups.map((m) => ({ id: m.id, svg: m.svg })),
+        }),
       });
       const saved = await saveRes.json().catch(() => ({}));
       if (!saveRes.ok) throw new Error(saved?.error || "Không lưu được đề bài.");
       setExamAccepted(true);
       clearAiDraft(exam);
       await loadAuthored();
-      setInfo(`Đã lưu đề ${exam}. Sang trang "Tạo Golden" để sinh Golden Solution + starter cho đề này.`);
+      setInfo(`Đã lưu đề ${exam}.`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Không lưu được đề bài.");
     } finally {
@@ -209,52 +214,49 @@ function ExamAuthoringEditor() {
     }
   };
 
-  // ── Database mẫu (STUDENT_DATABASE) + database ẩn chống hardcode (HIDDEN_DATABASE) ──
-  const proposeSeed = async () => {
-    if (!deBai.trim()) { setError("Chưa có đề bài."); return; }
-    const data = await call<{ tables: SeedTable[]; notes: string[] }>(
-      "/ai/database/propose", { de_bai: deBai }, "seed");
+  // ── Hình minh họa giao diện: AI đọc mục 3 (Hợp đồng giao diện) của đề, vẽ khung dây từng màn
+  // hình (SVG dựng tất định ở backend qua MockupRenderer — AI chỉ mô tả cấu trúc, không tự vẽ
+  // SVG). Tự vẽ ngay khi sinh đề (xem draftExam); lưu kèm đề bài khi bấm "Lưu đề", không lưu
+  // ngay lúc vẽ. `instruction` = lời giáo viên nhờ AI vẽ lại theo ý muốn (đổi bố cục/thành phần).
+  const drawMockups = async (deBaiText: string, instruction?: string) => {
+    const data = await call<{ mockups: Mockup[] }>(
+      "/ai/exam/mockup", { de_bai: deBaiText, instruction: instruction || undefined }, "mockup");
+    if (data) setMockups(Array.isArray(data.mockups) ? data.mockups : []);
+    return data;
+  };
+
+  const reviseMockups = async () => {
+    if (!deBai.trim()) { setError("Chưa có đề bài để vẽ hình minh họa."); return; }
+    const data = await drawMockups(deBai, mockupPrompt);
     if (data) {
-      setSeedTables(data.tables || []);
-      setSeedSaved(false);
-      setInfo("AI đã soạn dữ liệu mẫu — xem lại rồi bấm \"Lưu & tạo 2 file database\".");
+      const theoYeuCau = mockupPrompt.trim().length > 0;
+      setMockupPrompt("");
+      setInfo(`AI đã vẽ lại ${data.mockups?.length || 0} hình minh họa`
+        + (theoYeuCau ? " theo yêu cầu" : "") + ` — bấm "Lưu đề" để giữ lại.`);
     }
   };
 
-  const saveSeed = async () => {
-    if (!examId.trim() || seedTables.length === 0) return;
-    setBusy("seed-save"); setError(null); setInfo(null);
+  const downloadMockup = async (m: Mockup) => {
     try {
-      const res = await fetch(`${API_BASE}/exam-setup/${encodeURIComponent(examId.trim())}/database-seed`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tables: seedTables }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Không dựng được database.");
-      setSeedSaved(true);
-      setInfo("Đã dựng student.db + hidden.db. Tải về rồi đưa lên đúng ô STUDENT_DATABASE/HIDDEN_DATABASE ở trang \"Bộ chấm Golden\".");
+      const { png } = await svgToPng(m.svg);
+      const res = await fetch(png);
+      downloadBlob(await res.blob(), `${examId.trim() || "de"}_${m.id}.png`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Không dựng được database.");
-    } finally {
-      setBusy(null);
+      setError(e instanceof Error ? e.message : "Không tải được hình.");
     }
   };
 
-  const downloadDb = async (kind: "student" | "hidden") => {
-    const exam = examId.trim();
-    setBusy(`download-${kind}`); setError(null);
-    try {
-      const res = await fetch(`${API_BASE}/exam-setup/${encodeURIComponent(exam)}/download/${kind}-db`);
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data?.error || "Không tải được file database.");
-      }
-      downloadBlob(await res.blob(), `${exam}_${kind}.db`);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Không tải được file database.");
-    } finally {
-      setBusy(null);
+  /** Đổi toàn bộ hình minh họa hiện có sang PNG (canvas trong trình duyệt) để nhúng vào .docx/.pdf —
+   *  đúng khuôn {@code {id, png_base64, width, height}} mà ExamService#buildHandoutDocx/Pdf đọc. */
+  const mockupImages = async () => {
+    const out: { id: string; png_base64: string; width: number; height: number }[] = [];
+    for (const m of mockups) {
+      try {
+        const { png, width, height } = await svgToPng(m.svg);
+        out.push({ id: m.id, png_base64: png, width, height });
+      } catch { /* 1 hình lỗi không chặn tải cả file */ }
     }
+    return out;
   };
 
   const downloadDocx = async () => {
@@ -262,15 +264,16 @@ function ExamAuthoringEditor() {
     const exam = examId.trim();
     setBusy("docx"); setError(null);
     try {
+      const images = await mockupImages();
       const docxRes = await fetch(`${API_BASE}/exam-setup/${encodeURIComponent(exam)}/de-bai/docx`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ images: [] }),
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ images }),
       });
       if (!docxRes.ok) {
         const data = await docxRes.json().catch(() => ({}));
         throw new Error(data?.error || "Không tải được bản .docx — hãy lưu đề trước.");
       }
       downloadBlob(await docxRes.blob(), `${exam}_de_bai.docx`);
-      setInfo(`Đã tải bản .docx của đề ${exam}.`);
+      setInfo(`Đã tải bản .docx của đề ${exam} (kèm ${images.length} hình minh họa).`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Không tải được bản .docx.");
     } finally {
@@ -283,15 +286,16 @@ function ExamAuthoringEditor() {
     const exam = examId.trim();
     setBusy("pdf"); setError(null);
     try {
+      const images = await mockupImages();
       const pdfRes = await fetch(`${API_BASE}/exam-setup/${encodeURIComponent(exam)}/de-bai/pdf`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ images: [] }),
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ images }),
       });
       if (!pdfRes.ok) {
         const data = await pdfRes.json().catch(() => ({}));
         throw new Error(data?.error || "Không tải được bản .pdf — hãy lưu đề trước.");
       }
       downloadBlob(await pdfRes.blob(), `${exam}_de_bai.pdf`);
-      setInfo(`Đã tải bản .pdf của đề ${exam}.`);
+      setInfo(`Đã tải bản .pdf của đề ${exam} (kèm ${images.length} hình minh họa).`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Không tải được bản .pdf.");
     } finally {
@@ -454,77 +458,76 @@ function ExamAuthoringEditor() {
               <button onClick={reviseExam} disabled={busy !== null} className={ghostBtn}>
                 {busy === "revise" ? <Loader2 size={15} className="animate-spin" /> : <Wand2 size={15} />} Nhờ AI sửa
               </button>
+            </div>
+
+            {/* Hình minh họa: AI tự vẽ ngay khi "Sinh đề bài" (xem draftExam) — không còn nút vẽ
+                tay riêng. Xem lại/tải/nhờ AI vẽ lại theo ý muốn ở ĐÂY, ƯNG Ý rồi mới xuống dưới bấm
+                "Lưu đề"/tải file — file tải về nhúng kèm đúng những hình đang thấy ở đây. */}
+            <div className="mt-4 border-t border-dashed border-slate-200 pt-4">
+              <div className="mb-2 flex items-center gap-2">
+                <ImageIcon size={15} className="text-indigo-500" />
+                <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                  Hình minh họa giao diện {mockups.length > 0 && `(${mockups.length})`}
+                </p>
+              </div>
+
+              {busy === "mockup" && (
+                <p className="mb-3 flex items-center gap-2 text-xs text-slate-500">
+                  <Loader2 size={14} className="animate-spin" /> AI đang vẽ hình minh họa…
+                </p>
+              )}
+
+              {mockups.length > 0 && (
+                <div className="mb-3 grid gap-3 sm:grid-cols-2">
+                  {mockups.map((m) => (
+                    <div key={m.id} className="rounded-xl border border-slate-200 p-3">
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <p className="truncate text-xs font-bold text-slate-600">{m.title || m.id}</p>
+                        <button onClick={() => downloadMockup(m)} disabled={busy !== null}
+                          className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-[11px] font-semibold text-slate-500 hover:border-indigo-300 hover:text-indigo-600 disabled:opacity-50">
+                          <Download size={12} /> Tải hình
+                        </button>
+                      </div>
+                      {/* SVG do MockupRenderer sinh ở backend, không phải chữ người dùng dán vào.
+                          width/height gốc của nó là SỐ THẬT (để xuất .docx/.pdf/PNG đúng kích
+                          thước — xem MockupRenderer#render), nên ở đây ép co giãn vừa khung bằng
+                          CSS (luôn đè được thuộc tính width/height trên chính thẻ svg). */}
+                      <div className="overflow-hidden rounded-lg border border-slate-100 bg-white [&>svg]:h-auto [&>svg]:w-full"
+                        dangerouslySetInnerHTML={{ __html: m.svg }} />
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  value={mockupPrompt}
+                  onChange={(e) => setMockupPrompt(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); reviseMockups(); } }}
+                  placeholder="Nhờ AI vẽ lại hình: đổi bố cục dạng thẻ, bỏ thanh tiêu đề…"
+                  className={`${inputClass} min-w-[240px] flex-1`}
+                />
+                <button onClick={reviseMockups} disabled={busy !== null} className={ghostBtn}>
+                  {busy === "mockup" ? <Loader2 size={15} className="animate-spin" /> : <Wand2 size={15} />}
+                  {mockups.length ? "Vẽ lại theo yêu cầu" : "Vẽ hình minh họa"}
+                </button>
+              </div>
+            </div>
+
+            {/* Ưng ý đề + hình rồi mới lưu/tải — file .docx/.pdf tải về nhúng kèm đúng các hình ở trên. */}
+            <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-slate-200 pt-4">
               <button onClick={saveHandout} disabled={busy !== null || !examId.trim()} className={primaryBtn}>
                 {busy === "handout" ? <Loader2 size={15} className="animate-spin" /> : <Check size={15} />} Lưu đề
               </button>
               <button onClick={downloadDocx} disabled={busy !== null || !examAccepted} className={ghostBtn}
                 title={examAccepted ? undefined : "Lưu đề trước đã"}>
-                {busy === "docx" ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Tải .docx
+                {busy === "docx" ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Tải .docx (kèm hình)
               </button>
               <button onClick={downloadPdf} disabled={busy !== null || !examAccepted} className={ghostBtn}
                 title={examAccepted ? undefined : "Lưu đề trước đã"}>
-                {busy === "pdf" ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Tải .pdf
+                {busy === "pdf" ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Tải .pdf (kèm hình)
               </button>
             </div>
-          </Step>
-        )}
-
-        {/* Bước 3: database mẫu phát cho sinh viên + database ẩn chống hardcode */}
-        {examAccepted && (
-          <Step index={3} icon={Database} title="Database mẫu &amp; database ẩn (chống hardcode)" done={seedSaved}>
-            <p className="mb-3 rounded-xl bg-slate-50 p-3 text-[11px] leading-relaxed text-slate-600">
-              AI đọc đúng bảng đã khai ở mục "Hợp đồng dữ liệu" của đề, soạn 2 bộ dữ liệu <strong>cùng cấu
-              trúc bảng, khác dữ liệu</strong>: một bộ phát công khai cho sinh viên, một bộ ẩn để chấm —
-              tránh sinh viên đoán/hardcode kết quả theo dữ liệu mẫu. Hai file <span className="font-mono">.db</span> dựng
-              THẬT ngay ở đây, tải về rồi đưa lên đúng ô STUDENT_DATABASE/HIDDEN_DATABASE ở trang "Bộ chấm Golden".
-            </p>
-            <div className="flex flex-wrap items-center gap-2">
-              <button onClick={proposeSeed} disabled={busy !== null} className={primaryBtn}>
-                {busy === "seed" ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
-                {seedTables.length ? "Sinh lại dữ liệu" : "Sinh dữ liệu mẫu"}
-              </button>
-              {seedTables.length > 0 && (
-                <button onClick={saveSeed} disabled={busy !== null} className={primaryBtn}>
-                  {busy === "seed-save" ? <Loader2 size={15} className="animate-spin" /> : <ShieldCheck size={15} />}
-                  Lưu &amp; tạo 2 file database
-                </button>
-              )}
-              {seedSaved && (
-                <>
-                  <button onClick={() => downloadDb("student")} disabled={busy !== null} className={ghostBtn}>
-                    {busy === "download-student" ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Tải student.db
-                  </button>
-                  <button onClick={() => downloadDb("hidden")} disabled={busy !== null} className={ghostBtn}>
-                    {busy === "download-hidden" ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Tải hidden.db
-                  </button>
-                </>
-              )}
-            </div>
-
-            {seedTables.length > 0 && (
-              <div className="mt-4 space-y-3">
-                {seedTables.map((t) => (
-                  <div key={t.name} className="rounded-xl border border-slate-200 p-3">
-                    <p className="font-mono text-xs font-bold text-indigo-600">{t.name}</p>
-                    <p className="mt-1 font-mono text-[11px] text-slate-400">{t.columns.join(", ")}</p>
-                    <div className="mt-2 grid gap-3 sm:grid-cols-2">
-                      <div>
-                        <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                          Phát cho sinh viên ({t.student_rows.length} dòng)
-                        </p>
-                        <SeedPreview columns={t.columns} rows={t.student_rows} />
-                      </div>
-                      <div>
-                        <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                          Ẩn — dùng để chấm ({t.hidden_rows.length} dòng)
-                        </p>
-                        <SeedPreview columns={t.columns} rows={t.hidden_rows} />
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
           </Step>
         )}
       </div>
@@ -543,31 +546,5 @@ export default function ExamAuthoringPage() {
     }>
       <ExamAuthoringEditor />
     </Suspense>
-  );
-}
-
-/** Xem trước vài dòng dữ liệu đầu — không phải trình soạn thảo, chỉ để giáo viên đối chiếu nhanh. */
-function SeedPreview({ columns, rows }: { columns: string[]; rows: (string | number | boolean | null)[][] }) {
-  const preview = rows.slice(0, 4);
-  return (
-    <div className="overflow-x-auto rounded-lg border border-slate-100">
-      <table className="w-full text-[11px]">
-        <thead>
-          <tr className="bg-slate-50">
-            {columns.map((c) => <th key={c} className="whitespace-nowrap px-2 py-1 text-left font-mono font-semibold text-slate-500">{c}</th>)}
-          </tr>
-        </thead>
-        <tbody>
-          {preview.map((row, i) => (
-            <tr key={i} className="border-t border-slate-100">
-              {columns.map((c, j) => <td key={c} className="whitespace-nowrap px-2 py-1 text-slate-700">{String(row[j] ?? "")}</td>)}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {rows.length > preview.length && (
-        <p className="border-t border-slate-100 px-2 py-1 text-[10px] text-slate-400">… và {rows.length - preview.length} dòng khác</p>
-      )}
-    </div>
   );
 }

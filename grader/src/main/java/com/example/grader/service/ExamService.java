@@ -19,10 +19,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.PreparedStatement;
-import java.sql.Statement;
 import java.text.Normalizer;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -1083,87 +1079,6 @@ public class ExamService {
         Path out = dir.resolve(name + ".png").normalize();
         if (!out.startsWith(dir)) throw new IllegalArgumentException("Tên màn hình không hợp lệ: " + screenName);
         Files.write(out, png);
-    }
-
-    /** Đọc thô một file đã lưu trong handout/ (student.db, hidden.db…); null nếu chưa có. */
-    public byte[] readHandoutFile(String examId, String name) throws Exception {
-        safeId(examId, "đề");
-        Path f = handoutDirOf(examId).resolve(name);
-        return Files.isRegularFile(f) ? Files.readAllBytes(f) : null;
-    }
-
-    /**
-     * Dựng THẬT hai file SQLite (handout/student.db, handout/hidden.db) từ bản mô tả bảng+dữ liệu
-     * do {@code AiExamAuthorService#proposeDatabaseSeed} soạn — để tải trực tiếp ở trang "Tạo đề",
-     * rồi giáo viên tự tải lên đúng ô STUDENT_DATABASE/HIDDEN_DATABASE ở trang "Tạo Golden"/"Bộ
-     * chấm Golden".
-     *
-     * <p>Hai file LUÔN chạy CÙNG {@code create_sql} cho mỗi bảng — chỉ khác dữ liệu — nên cấu trúc
-     * hai bên khớp nhau đúng như {@code BehaviorArtifactService#compareSqliteSchema} đòi hỏi; AI
-     * chỉ quyết định DỮ LIỆU khác nhau thế nào để chống hardcode.
-     */
-    public void saveDatabaseSeed(String examId, List<Map<String, Object>> tables) throws Exception {
-        safeId(examId, "đề");
-        if (tables == null || tables.isEmpty())
-            throw new IllegalArgumentException("Chưa có bảng dữ liệu nào để dựng database.");
-        Path handout = handoutDirOf(examId);
-        Files.createDirectories(handout);
-        Path studentDb = handout.resolve("student.db");
-        Path hiddenDb = handout.resolve("hidden.db");
-        Files.deleteIfExists(studentDb);
-        Files.deleteIfExists(hiddenDb);
-        try {
-            buildSqlite(studentDb, tables, "student_rows");
-            buildSqlite(hiddenDb, tables, "hidden_rows");
-        } catch (Exception e) {
-            // Nửa vời (student có, hidden lỗi) còn tệ hơn không có cái nào — giáo viên tưởng đã
-            // xong mà thật ra thiếu HIDDEN_DATABASE, sẽ bị chặn ở bước upload sau mà không hiểu vì sao.
-            Files.deleteIfExists(studentDb);
-            Files.deleteIfExists(hiddenDb);
-            throw e;
-        }
-        log.info("🗄️ Đã dựng student.db + hidden.db cho đề {} ({} bảng)", examId, tables.size());
-    }
-
-    /**
-     * @param rowsKey "student_rows" hoặc "hidden_rows" — cùng danh sách bảng {@code tables}, chỉ
-     *                đổi khoá để lấy đúng bộ dữ liệu tương ứng cho từng file.
-     */
-    @SuppressWarnings("unchecked")
-    private void buildSqlite(Path file, List<Map<String, Object>> tables, String rowsKey) throws Exception {
-        try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + file.toAbsolutePath())) {
-            for (Map<String, Object> table : tables) {
-                String name = String.valueOf(table.get("name"));
-                String createSql = String.valueOf(table.get("create_sql"));
-                // AI chỉ được phép tạo bảng — chặn sớm nếu lỡ trả về DROP/ATTACH/PRAGMA… nào đó
-                // thay vì thực thi mù trên một file .db thật.
-                if (!createSql.strip().toUpperCase(Locale.ROOT).startsWith("CREATE TABLE"))
-                    throw new IllegalStateException("Câu lệnh tạo bảng không hợp lệ cho bảng " + name);
-                if (!name.matches("[A-Za-z_][A-Za-z0-9_]*"))
-                    throw new IllegalStateException("Tên bảng không an toàn: " + name);
-                try (Statement st = conn.createStatement()) { st.execute(createSql); }
-
-                List<String> columns = (List<String>) table.get("columns");
-                List<List<Object>> rows = (List<List<Object>>) table.get(rowsKey);
-                if (columns == null || columns.isEmpty() || rows == null || rows.isEmpty()) continue;
-                for (String col : columns) {
-                    if (!col.matches("[A-Za-z_][A-Za-z0-9_]*"))
-                        throw new IllegalStateException("Tên cột không an toàn: " + col + " (bảng " + name + ")");
-                }
-                String placeholders = String.join(",", java.util.Collections.nCopies(columns.size(), "?"));
-                String colList = String.join(",", columns);
-                String insertSql = "INSERT INTO " + name + " (" + colList + ") VALUES (" + placeholders + ")";
-                try (PreparedStatement ps = conn.prepareStatement(insertSql)) {
-                    for (List<Object> row : rows) {
-                        for (int i = 0; i < columns.size(); i++) {
-                            ps.setObject(i + 1, i < row.size() ? row.get(i) : null);
-                        }
-                        ps.addBatch();
-                    }
-                    ps.executeBatch();
-                }
-            }
-        }
     }
 
     private double toDouble(Object value, double fallback) {

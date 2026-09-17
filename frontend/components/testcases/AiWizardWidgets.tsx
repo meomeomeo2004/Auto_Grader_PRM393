@@ -1,6 +1,7 @@
 "use client";
 
-// Mảnh UI dùng chung giữa trang "Tạo đề" và "Tạo Golden" (tách ra từ AiAuthorPanel.tsx cũ).
+// Mảnh UI dùng ở trang "Tạo đề" (tách ra từ AiAuthorPanel.tsx cũ, ban đầu dùng chung với
+// "Tạo Golden" — trang đó đã xoá 17/9/2026).
 
 import { useEffect, useRef, useState } from "react";
 import { Check, ChevronDown, AlertTriangle, FileCode2 } from "lucide-react";

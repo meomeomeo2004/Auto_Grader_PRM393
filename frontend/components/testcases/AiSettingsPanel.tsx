@@ -1,9 +1,8 @@
 "use client";
 
-// Cấu hình model AI + API key — dùng chung cho trang "Tạo đề" và "Tạo Golden" (tách ra từ
-// AiAuthorPanel.tsx khi tách 2 trang đó thành 2 mục riêng trên sidebar, xem ONBOARDING/plan liên
-// quan). Tự chứa hoàn toàn: không cần props, không cần cha biết đang dùng model gì — mọi endpoint
-// AI phía sau tự đọc cấu hình đã lưu.
+// Cấu hình model AI + API key — dùng ở trang "Tạo đề" (tách ra từ AiAuthorPanel.tsx cũ, ban đầu
+// dùng chung với "Tạo Golden" — trang đó đã xoá 17/9/2026). Tự chứa hoàn toàn: không cần props,
+// không cần cha biết đang dùng model gì — mọi endpoint AI phía sau tự đọc cấu hình đã lưu.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { API_BASE } from "@/lib/config";
