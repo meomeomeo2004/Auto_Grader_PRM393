@@ -293,13 +293,29 @@ Future<void> _runBehaviorScenario(
 }
 
 void _applyViewport(WidgetTester tester, Map<String, dynamic> viewport) {
-  // Mặc định = máy Android tầm trung (Pixel): 412×915 dp — đúng cỡ Android Studio hiện
-  // cho máy ảo. Sinh viên làm bài trên máy ảo Android nên khung này mới sát thực tế.
+  // Mac dinh = KHUNG APP THAT tren may ao Pixel 7 API 34: 412x838 dp.
   //
-  // Mật độ để 1: vị trí thành phần và sai số bố cục đều đo bằng dp nên mật độ KHÔNG đổi
-  // một điểm nào; nó chỉ quyết định ảnh bằng chứng nét tới đâu và nặng bao nhiêu.
+  // KHONG phai 412x915. Man Pixel 7 la 1080x2400 pixel o mat do 2,625 tuc 411,43x914,29 dp,
+  // nhung he dieu hanh khong giao ca man cho app. Hoi thang may ao ngay 15/9/2026 bang
+  // `adb shell dumpsys window displays`:
+  //
+  //   mAppBounds=Rect(0, 136 - 1080, 2337)   overrideConfig: w411dp h838dp
+  //
+  // Thanh trang thai an 136 px (cao vi lo camera), thanh cu chi an 63 px; chia cho 2,625 la
+  // 51,8 + 24 = 77 dp. App that chi con 838,48 dp, lam tron 838.
+  //
+  // Vi sao phai sua: ban truoc dan o 915 nen may cham do mot man hinh khong may nao co.
+  // Moi thu neo day — FAB, BottomNavigationBar — bi dat thap hon cho that 77 dp, va danh
+  // sach dung them mot dong ma dien thoai that khong bao gio hien.
+  //
+  // CANH BAO: expect.center_* luu la dp TUYET DOI. Doi khung ma khong capture lai oracle
+  // thi gia tri chuan cu (do o 915) bi dem so voi do moi o 838 — lech 77 dp, vuot han muc
+  // 5% (41,9 dp) — moi tieu chi vi tri neo day se truot sach.
+  //
+  // Mat do de 1: vi tri thanh phan va sai so bo cuc deu do bang dp nen mat do KHONG doi
+  // mot diem nao; no chi quyet dinh anh bang chung net toi dau va nang bao nhieu.
   final width = _double(viewport['width'], 412);
-  final height = _double(viewport['height'], 915);
+  final height = _double(viewport['height'], 838);
   final ratio = _double(viewport['device_pixel_ratio'], 1);
   if (width <= 0 || height <= 0 || ratio <= 0) {
     throw ArgumentError('Viewport không hợp lệ: $viewport');

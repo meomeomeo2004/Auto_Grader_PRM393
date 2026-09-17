@@ -192,10 +192,95 @@ class BehaviorSuiteMaterializerTest {
                 "trọng số checkpoint phải được quy đổi trong ngân sách 8 điểm của scenario");
         assertEquals("UI", comp.get("testcase_group").asText());
         assertEquals("ui", comp.get("layer").asText());
-        assertEquals("UI_LAYOUT", comp.get("skill_code").asText());
+        assertNull(comp.get("skill_code"),
+                "bo khung nang luc: tieu chi khong con mang ma nang luc nao");
         assertEquals("G_UI_DANH_SACH", comp.get("group_id").asText());
         assertEquals("Giao diện — Màn danh sách", comp.get("group_name").asText());
         assertEquals("Màn danh sách — có nút thêm", comp.get("name").asText());
+    }
+
+    @Test
+    void tieuChiResponsiveChayOKhungDesktopVaMangMaThucThiRieng() throws Exception {
+        // Tiêu chí responsive phải chạy ở 1280×800 và mang MÃ THỰC THI RIÊNG, còn tiêu chí
+        // thường vẫn ở khung điện thoại 412×838. Dùng chung mã là engine gom cả hai vào một
+        // lượt replay rồi đo bố cục desktop trên khung điện thoại — hỏng im lặng, vì tiêu chí
+        // vẫn chạy và vẫn cho ra một con số.
+        //
+        // Cũng khẳng định KHÔNG nhân bản: mỗi tiêu chí đúng một case, nên trọng số không bị
+        // chia đôi theo số khung như đường viewports cũ.
+        BehaviorAuthoringService authoring = mock(BehaviorAuthoringService.class);
+        BehaviorArtifactService artifacts = mock(BehaviorArtifactService.class);
+        ExamRepository exams = mock(ExamRepository.class);
+        BehaviorSuiteMaterializer materializer = newMaterializer(authoring, artifacts, exams);
+        ReflectionTestUtils.setField(materializer, "templateDir", Path.of("..", "grader-base").toString());
+        ReflectionTestUtils.setField(materializer, "examsDir", tempDir.toString());
+
+        Map<String, Object> scenario = Map.ofEntries(
+                Map.entry("scenario_code", "LIST"),
+                Map.entry("name", "Màn danh sách"),
+                Map.entry("skill_code", "UI_LAYOUT"),
+                Map.entry("weight", 10.0),
+                Map.entry("initial_state", Map.of("reset_storage", true)),
+                Map.entry("steps", List.of(Map.of(
+                        "id", "step_1", "action", "tap", "target", Map.of("label", "Tất cả")))),
+                Map.entry("oracle", Map.of("seed", "seed-01", "input", Map.of())),
+                Map.entry("checkpoints", List.of(
+                        Map.of("id", "UI_COMP", "kind", "component_present",
+                                "target", Map.of("label", "Tất cả"), "visible", true,
+                                "name", "Có chip Tất cả", "weight", 5.0),
+                        Map.of("id", "RESP_1", "kind", "layout_relation", "khung", "desktop",
+                                "relation", "auto", "weight", 5.0,
+                                "target", Map.of("label", "Tất cả"),
+                                "relative_to", Map.of("label", "Ăn uống"),
+                                "name", "Responsive — chip đổi hàng"))));
+        Map<String, Object> plan = Map.of(
+                "schema_version", "1.0",
+                "suite", Map.of(
+                        "id", "suite-1", "suite_code", "RAR_USER", "exam_id", "RAR_USER_EXAM",
+                        "name", "RAR User", "description", "Golden behavior", "revision", 1),
+                "public_contract", Map.of("allow_coordinate_fallback", false),
+                "database_contract", Map.of("enabled", true, "database_name", "users.db"),
+                "runtime_config", Map.of("default_timeout_ms", 5000),
+                "scenarios", List.of(scenario));
+        when(authoring.executionPlan("suite-1")).thenReturn(plan);
+        for (BehaviorArtifactType type : List.of(
+                BehaviorArtifactType.STUDENT_DATABASE,
+                BehaviorArtifactType.HIDDEN_DATABASE,
+                BehaviorArtifactType.OUTPUT_DATABASE)) {
+            Path source = tempDir.resolve(type.name().toLowerCase() + ".db");
+            Files.writeString(source, "fixture-" + type);
+            BehaviorArtifact artifact = new BehaviorArtifact();
+            artifact.setArtifactType(type);
+            artifact.setStoragePath(source.toString());
+            when(artifacts.active("suite-1", type)).thenReturn(artifact);
+        }
+        when(exams.findByExamId("RAR_USER_EXAM")).thenReturn(Optional.empty());
+        when(exams.save(any(Exam.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        materializer.materialize("suite-1");
+
+        Path output = tempDir.resolve("RAR_USER_EXAM").resolve("testcase");
+        JsonNode sinhRa = new ObjectMapper().readTree(output.resolve("behavior_plan.json").toFile());
+        JsonNode cases = sinhRa.get("cases");
+        assertEquals(2, cases.size(), "mỗi tiêu chí đúng MỘT case — responsive không được nhân bản");
+        JsonNode thuong = null;
+        JsonNode resp = null;
+        for (JsonNode c : cases) {
+            if ("RESP_1".equals(c.get("checkpoint").get("id").asText())) resp = c;
+            else thuong = c;
+        }
+        assertNotNull(thuong, "phải có case của tiêu chí thường");
+        assertNotNull(resp, "phải có case của tiêu chí responsive");
+        assertEquals(412, thuong.get("viewport").get("width").asInt());
+        assertEquals(838, thuong.get("viewport").get("height").asInt(),
+                "tiêu chí thường phải ở khung app thật của Pixel 7");
+        assertEquals("LIST__VP_1", thuong.get("execution_code").asText());
+        assertEquals(1280, resp.get("viewport").get("width").asInt());
+        assertEquals(800, resp.get("viewport").get("height").asInt(),
+                "tiêu chí responsive phải ở khung desktop");
+        assertEquals("LIST__VP_DESKTOP", resp.get("execution_code").asText());
+        assertEquals(5.0, resp.get("weight").asDouble(), 0.0001,
+                "responsive giữ nguyên phần điểm đã khai, không bị chia theo số khung");
     }
 
     @Test

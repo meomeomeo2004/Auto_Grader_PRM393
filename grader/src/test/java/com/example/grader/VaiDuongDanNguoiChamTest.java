@@ -53,7 +53,6 @@ class VaiDuongDanNguoiChamTest {
         assertFalse(coNhom(co, "/api/ai"),
                 "soạn đề bằng AI là việc của giảng viên: gộp nhánh AI thì nhớ gắn "
                         + "@Profile(Vai.GIANG_VIEN) cho AiAuthorController");
-        assertFalse(coNhom(co, "/api/syllabus"), "không được có Khung năng lực");
         assertFalse(co.contains("/api/exam-setup/{examId}/starter-check"),
                 "kiểm đồng bộ khung phát là việc của giảng viên");
         assertFalse(co.contains("/api/exam-setup/{examId}/xuat-goi"),

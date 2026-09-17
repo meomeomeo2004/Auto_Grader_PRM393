@@ -1,4 +1,4 @@
-package com.example.grader.service.ai;
+package com.example.grader.service;
 
 import lombok.extern.slf4j.Slf4j;
 import com.example.grader.config.Vai;
@@ -18,7 +18,15 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 /**
- * Bóc CHỮ từ file đề giáo viên tải lên (.txt/.md, .docx, .pdf) để đưa cho AI phân tích.
+ * Bóc CHỮ từ file đề giáo viên tải lên (.txt/.md, .docx, .pdf).
+ *
+ * <p>Vì sao nằm ở {@code service} chứ KHÔNG phải {@code service.ai}: lớp này không gọi AI một
+ * dòng nào, nó chỉ giải nén và dò regex. Nó từng nằm trong {@code service.ai} vì được viết cho
+ * tính năng AI ra đề, và ngày 16/9/2026 chỗ đó thành cái bẫy: {@code dong-goi.ps1} dựng bản
+ * người chấm bằng cách XOÁ nguyên khối {@code service.ai}, nên khi màn Kho đề cho
+ * {@code ExamSetupController} dùng lại lớp này thì bản người chấm không dịch nổi —
+ * {@code package com.example.grader.service.ai does not exist} ngay lệnh chạy đầu tiên.
+ * Đặt đúng chỗ rồi thì ai dùng lại cũng được, kể cả những màn chung của cả hai vai.
  *
  * <p>Repo build offline ({@code mvnw -o}) nên KHÔNG thêm được POI hay PDFBox — mọi thứ ở đây
  * viết bằng {@code java.util.zip} và regex:

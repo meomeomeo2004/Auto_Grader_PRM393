@@ -63,61 +63,33 @@ public class GoldenOracleCaptureService {
 
             Map<String, Object> plan = mapper.readValue(
                     test.resolve("behavior_plan.json").toFile(), new TypeReference<>() {});
-            Map<String, Object> executionCase = list(plan.get("cases")).stream()
+            List<Map<String, Object>> casesCuaLuong = list(plan.get("cases")).stream()
                     .map(GoldenOracleCaptureService::map)
                     .filter(item -> scenarioId.equals(text(item, "scenario_id")))
+                    .toList();
+            if (casesCuaLuong.isEmpty()) {
+                throw new IllegalStateException("Không tìm thấy execution case cho scenario " + scenarioId);
+            }
+            // Mã thực thi của khung ĐIỆN THOẠI — lượt chính, sinh output database, ảnh chuẩn và
+            // toàn bộ oracle. Phải LỌC BỎ mã khung desktop: luồng có tiêu chí responsive thì
+            // sinh thêm một case mang mã riêng, mà findFirst có thể vớ đúng nó rồi capture nhầm
+            // khung, khiến mọi giá trị chuẩn của khung điện thoại đo ở 1280×800.
+            String executionCode = casesCuaLuong.stream()
+                    .map(item -> text(item, "execution_code"))
+                    .filter(ma -> !ma.isBlank() && !ma.endsWith(BehaviorSuiteMaterializer.HAU_TO_DESKTOP))
                     .findFirst()
-                    .orElseThrow(() -> new IllegalStateException(
-                            "Không tìm thấy execution case cho scenario " + scenarioId));
-            String executionCode = text(executionCase, "execution_code");
-            if (executionCode.isBlank()) throw new IllegalStateException("Execution code của scenario bị trống");
+                    .orElseThrow(() -> new IllegalStateException("Execution code của scenario bị trống"));
+            // Mã khung desktop, rỗng nếu luồng này không có tiêu chí responsive nào.
+            String maDesktop = casesCuaLuong.stream()
+                    .map(item -> text(item, "execution_code"))
+                    .filter(ma -> ma.endsWith(BehaviorSuiteMaterializer.HAU_TO_DESKTOP))
+                    .findFirst()
+                    .orElse("");
 
             Path captured = test.resolve("fixtures").resolve("captured-output.db");
             Path metadata = test.resolve("fixtures").resolve("captured-output.json");
-            List<String> command = new ArrayList<>(List.of(
-                    "docker", "run", "--name", containerName, "--rm",
-                    "--memory", "2048m", "--cpus", "2.0",
-                    "-e", "GRADER_SCENARIO_CODE=" + executionCode,
-                    "-e", "GRADER_CAPTURE_OUTPUT_PATH=/app/test/fixtures/captured-output.db",
-                    "-e", "GRADER_CAPTURE_METADATA_PATH=/app/test/fixtures/captured-output.json",
-                    "-v", toDockerPath(lib) + ":/app/lib",
-                    "-v", toDockerPath(test) + ":/app/test"));
-            Path assets = project.resolve("assets");
-            if (Files.isDirectory(assets)) {
-                command.add("-v");
-                command.add(toDockerPath(assets) + ":/app/assets");
-            }
-            command.add(baseImage);
-            command.add("flutter");
-            command.add("test");
-            command.add("--no-pub");
-            command.add("--machine");
-            command.add("--concurrency=1");
-            command.add("test/exam_test.dart");
-
-            Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
             StringBuilder output = new StringBuilder();
-            Thread reader = new Thread(() -> readOutput(process, output), "golden-capture-output");
-            reader.setDaemon(true);
-            reader.start();
-            boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
-            if (!finished) {
-                process.destroyForcibly();
-                removeContainer(containerName);
-                throw new IllegalStateException("Golden replay timeout sau " + timeoutSeconds + " giây");
-            }
-            reader.join(5_000);
-            if (process.exitValue() != 0) {
-                // Bóc đúng CHECKPOINT NÀO trượt ra đầu thông báo. Không có nó, giáo viên chỉ
-                // thấy "replay thất bại" kèm log thô — không biết phải sửa tiêu chí nào
-                // (đã gặp thật: tick nhầm thành phần của extension trình duyệt, capture chết
-                // mà thông báo không nói lý do).
-                String hong = failedCheckpointSummary(output.toString());
-                throw new IllegalStateException(hong.isBlank()
-                        ? "Golden replay thất bại: " + limitLog(output.toString())
-                        : "Golden replay thất bại — checkpoint không đạt trên chính Golden App:\n" + hong
-                                + "\nKiểm lại các tiêu chí vừa thêm (thành phần có thật trên màn hình đó không?).");
-            }
+            chayMotLuot(executionCode, lib, project, test, containerName, output);
             if (!Files.isRegularFile(captured) || Files.size(captured) == 0) {
                 throw new IllegalStateException("Golden replay kết thúc nhưng không sinh captured-output.db");
             }
@@ -172,6 +144,31 @@ public class GoldenOracleCaptureService {
                 kiemKeAnh = list(layout.get("images"));
             }
 
+            // LƯỢT THỨ HAI Ở KHUNG DESKTOP — chỉ chạy khi luồng có tiêu chí responsive.
+            //
+            // Vì sao phải một lượt container riêng: engine mỗi lần replay đúng MỘT
+            // execution_code, mà case khung desktop mang mã riêng để không bị gom chung với
+            // khung điện thoại.
+            //
+            // Lượt này CHỈ lấy oracle bố cục. Output database và ảnh chuẩn vẫn là của khung
+            // điện thoại — dữ liệu sau thao tác không phụ thuộc bề ngang màn hình, mà cả hai
+            // thứ đó đã được chép ra trước khi lượt desktop ghi đè captured-output.db và
+            // captured-screen.png.
+            //
+            // applyCapturedLayout chỉ đụng checkpoint nào có mặt trong kết quả đo (xem
+            // `if (doDuoc.isEmpty()) continue`), nên gọi lần hai là GỘP chuẩn cho tiêu chí
+            // desktop chứ không xoá chuẩn vừa nướng cho khung điện thoại.
+            int daNuongDesktop = 0;
+            if (!maDesktop.isBlank()) {
+                StringBuilder logDesktop = new StringBuilder();
+                chayMotLuot(maDesktop, lib, project, test, containerName + "-dt", logDesktop);
+                Path layoutDesktop = captured.resolveSibling("captured-layout.json");
+                if (Files.isRegularFile(layoutDesktop) && Files.size(layoutDesktop) > 0) {
+                    Map<String, Object> layout = mapper.readValue(layoutDesktop.toFile(), new TypeReference<>() {});
+                    daNuongDesktop = authoring.applyCapturedLayout(scenarioId, map(layout.get("components")));
+                }
+            }
+
             List<Map<String, Object>> checkpoints = artifacts.databaseDiffCheckpoints(suiteId);
             Map<String, Object> completedScenario = authoring.applyDerivedDatabaseCheckpoints(
                     scenarioId, checkpoints, String.valueOf(outputArtifact.get("sha256")), golden.getSha256());
@@ -198,6 +195,7 @@ public class GoldenOracleCaptureService {
             result.put("output_database", outputArtifact);
             result.put("database_checkpoint_count", checkpoints.size());
             result.put("layout_checkpoint_count", daNuongBoCuc);
+            result.put("responsive_checkpoint_count", daNuongDesktop);
             result.put("fallback_target_count", daNuongDuPhong);
             result.put("identifier_step_count", daNuongDinhDanh);
             result.put("icons", kiemKeIcon);
@@ -211,7 +209,65 @@ public class GoldenOracleCaptureService {
             throw new IllegalStateException("Không capture được oracle từ Golden Solution: " + e.getMessage(), e);
         } finally {
             removeContainer(containerName);
+            // Lượt khung desktop chạy container tên khác; dọn cả nó, không thì một lần timeout
+            // là để lại container treo mà lần capture sau không biết đường xoá.
+            removeContainer(containerName + "-dt");
             if (workspace != null) deleteQuietly(workspace);
+        }
+    }
+
+    /**
+     * Chạy MỘT lượt replay Golden trong Docker cho đúng một mã thực thi, ghi log vào {@code output}.
+     *
+     * <p>Tách riêng vì kĩ năng responsive cần lượt thứ hai ở khung desktop: engine mỗi lần chỉ
+     * replay đúng một execution_code, nên hai khung là hai lượt container. Cách bắt lỗi phải
+     * giống hệt nhau ở cả hai lượt — nhân đôi đoạn này là cách nhanh nhất để hai lượt báo lỗi
+     * hai kiểu rồi không ai hiểu lượt nào hỏng.
+     */
+    private void chayMotLuot(String executionCode, Path lib, Path project, Path test,
+                             String containerName, StringBuilder output) throws Exception {
+        List<String> command = new ArrayList<>(List.of(
+                "docker", "run", "--name", containerName, "--rm",
+                "--memory", "2048m", "--cpus", "2.0",
+                "-e", "GRADER_SCENARIO_CODE=" + executionCode,
+                "-e", "GRADER_CAPTURE_OUTPUT_PATH=/app/test/fixtures/captured-output.db",
+                "-e", "GRADER_CAPTURE_METADATA_PATH=/app/test/fixtures/captured-output.json",
+                "-v", toDockerPath(lib) + ":/app/lib",
+                "-v", toDockerPath(test) + ":/app/test"));
+        Path assets = project.resolve("assets");
+        if (Files.isDirectory(assets)) {
+            command.add("-v");
+            command.add(toDockerPath(assets) + ":/app/assets");
+        }
+        command.add(baseImage);
+        command.add("flutter");
+        command.add("test");
+        command.add("--no-pub");
+        command.add("--machine");
+        command.add("--concurrency=1");
+        command.add("test/exam_test.dart");
+
+        Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
+        Thread reader = new Thread(() -> readOutput(process, output), "golden-capture-output");
+        reader.setDaemon(true);
+        reader.start();
+        boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
+        if (!finished) {
+            process.destroyForcibly();
+            removeContainer(containerName);
+            throw new IllegalStateException("Golden replay timeout sau " + timeoutSeconds + " giây");
+        }
+        reader.join(5_000);
+        if (process.exitValue() != 0) {
+            // Bóc đúng CHECKPOINT NÀO trượt ra đầu thông báo. Không có nó, giáo viên chỉ
+            // thấy "replay thất bại" kèm log thô — không biết phải sửa tiêu chí nào
+            // (đã gặp thật: tick nhầm thành phần của extension trình duyệt, capture chết
+            // mà thông báo không nói lý do).
+            String hong = failedCheckpointSummary(output.toString());
+            throw new IllegalStateException(hong.isBlank()
+                    ? "Golden replay thất bại: " + limitLog(output.toString())
+                    : "Golden replay thất bại — checkpoint không đạt trên chính Golden App:\n" + hong
+                            + "\nKiểm lại các tiêu chí vừa thêm (thành phần có thật trên màn hình đó không?).");
         }
     }
 

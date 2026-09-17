@@ -5,8 +5,7 @@ import com.example.grader.repository.ExamRepository;
 import com.example.grader.service.BanGiaoService;
 import com.example.grader.service.ExamService;
 import com.example.grader.service.StarterSyncService;
-import com.example.grader.service.SyllabusService;
-import com.example.grader.service.ai.ExamDocumentReader;
+import com.example.grader.service.ExamDocumentReader;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -29,8 +28,6 @@ public class ExamSetupController {
     private ExamService examService;
     @Autowired
     private ExamRepository examRepo;
-    @Autowired
-    private SyllabusService syllabusService;
     @Autowired
     private StarterSyncService starterSyncService;
     @Autowired
@@ -174,23 +171,6 @@ public class ExamSetupController {
             return ResponseEntity.ok(examService.listAuthoredExamIds());
         } catch (Exception e) {
             return ResponseEntity.internalServerError().body(Map.of("error", "Không đọc được danh sách đề."));
-        }
-    }
-
-    /**
-     * ĐÁNH GIÁ ĐỘ PHỦ của đề theo SYLLABUS hiện tại (resolve trực tiếp → sửa syllabus là
-     * phản chiếu ngay). Trả: testcase ↔ kiến thức/độ khó, độ phủ theo category & độ khó,
-     * skill chưa phủ (gaps), issues.
-     */
-    @GetMapping("/coverage/{examId}")
-    public ResponseEntity<?> coverage(@PathVariable String examId) {
-        try {
-            String matrix = examService.readSkillsMatrixJson(examId);
-            return ResponseEntity.ok(syllabusService.evaluateCoverage(matrix));
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.status(404).body(Map.of("error", e.getMessage()));
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
         }
     }
 

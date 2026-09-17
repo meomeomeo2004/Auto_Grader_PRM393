@@ -30,7 +30,14 @@ import java.util.zip.ZipFile;
 public class GoldenRuntimeService {
     private static final long MAX_EXPANDED_BYTES = 1_000L * 1024 * 1024;
     private static final int MAX_ZIP_ENTRIES = 20_000;
-    // v24: thêm lệnh snapshot_identifiers — liệt kê định danh của MỌI widget, kể cả widget
+    // v27: snapshot_rects trả CẢ thành phần lặp kèm số lần lặp, để đếm số cột — list đổi thành
+    // grid là dấu hiệu reflow miễn phí không tạo ra được
+    // · v26: thêm lệnh snapshot_rects — đo khung mọi thành phần để so hai khung (điện thoại ↔
+    // desktop) tìm chỗ app thật sự co giãn, phục vụ kĩ năng responsive
+    // · v25: ép khung xem thử dàn bố cục bằng metric Android — xem writeRecorderEntry; bản trước
+    // dàn theo metric desktop nên cùng một màn danh sách, khung web chứa 11 dòng còn máy ảo
+    // Pixel 7 chỉ chứa 9 · v24: thêm lệnh
+    // snapshot_identifiers — liệt kê định danh của MỌI widget, kể cả widget
     // không chữ (bảng tick bỏ qua chúng vì không có nhãn), để màn soạn đề gợi ý đích cho
     // tiêu chí bố cục Ch.7 · v23: locator ĐỌC ĐƯỢC định danh của lớp bọc ngoài (v22 chỉ đọc trên chính node, nên
     // nút chỉ có icon không ghi hình được và nút có chữ thì ghi bằng chữ chứ không bằng định
@@ -39,7 +46,7 @@ public class GoldenRuntimeService {
     // gửi kèm định danh để HIỆN (v20 đổi target sang định danh, làm tiêu chí thôi kiểm nội
     // dung) · v20: locator duy nhất + chốt giá trị nhập theo ranh giới thao tác · v4: quét
     // thành phần CHỈ trong flutter-view.
-    private static final String RECORDER_BRIDGE_VERSION = "input-identity-v24";
+    private static final String RECORDER_BRIDGE_VERSION = "responsive-rects-v27";
 
     @Value("${grader.base-image:grading-base:latest}")
     private String baseImage;
@@ -326,6 +333,8 @@ public class GoldenRuntimeService {
         Files.createDirectories(lib);
         Files.writeString(lib.resolve("_recorder_entry.dart"), """
                 // Tệp do hệ thống sinh cho phiên ghi thao tác — không có trong bài nộp sinh viên.
+                import 'dart:ui_web' as ui_web;
+
                 import 'package:flutter/foundation.dart' show debugPrint;
                 import 'package:flutter/semantics.dart';
                 import 'package:flutter/services.dart' show ByteData, rootBundle;
@@ -336,9 +345,26 @@ public class GoldenRuntimeService {
                 import 'main.dart' as golden_app;
 
                 Future<void> main() async {
+                  // KHUNG XEM THỬ PHẢI DÀN BỐ CỤC BẰNG METRIC ANDROID.
+                  //
+                  // Bản web này chạy trong Chrome trên Windows nên defaultTargetPlatform trả về
+                  // TargetPlatform.windows, và ThemeData đọc thẳng giá trị đó: windows kéo theo
+                  // VisualDensity.compact (-8 dp mỗi chiều) lẫn MaterialTapTargetSize.shrinkWrap.
+                  // Hậu quả đo được: ListTile hai dòng cao 64 dp thay vì 72, hàng chip mất ràng
+                  // buộc tối thiểu 48 dp — cùng một màn danh sách, khung web chứa 11 dòng còn máy
+                  // ảo Pixel 7 chỉ chứa 9. Máy chấm chạy `flutter test`, mà Flutter ép biến môi
+                  // trường FLUTTER_TEST về android, nên 72 dp mới là con số thật.
+                  //
+                  // Đặt NGAY DÒNG ĐẦU, trước cả ensureInitialized: Flutter đọc
+                  // ui_web.browser.operatingSystem đúng một lần rồi nhớ mãi (_browserPlatform là
+                  // biến final cấp thư viện), nên đặt muộn một nhịp là vô nghĩa.
+                  //
+                  // Vì sao không dùng debugDefaultTargetPlatformOverride: setter của nó ném
+                  // FlutterError khi !kDebugMode, mà runtime này build --release.
+                  ui_web.browser.debugOperatingSystemOverride = ui_web.OperatingSystem.android;
                   WidgetsFlutterBinding.ensureInitialized();
                   // Dấu phiên bản để phân định bản build đang CHẠY với bản bị cache.
-                  debugPrint('recorder-entry input-identity-v24');
+                  debugPrint('recorder-entry {{VERSION}}');
                   // Giữ handle sống suốt phiên để cây ngữ nghĩa luôn được dựng.
                   SemanticsBinding.instance.ensureSemantics();
                   // SQLite THẬT trên web + nạp hidden.db TRƯỚC khi app khởi động — đúng cách
@@ -362,7 +388,7 @@ public class GoldenRuntimeService {
                   }
                   golden_app.main();
                 }
-                """, StandardCharsets.UTF_8);
+                """.replace("{{VERSION}}", RECORDER_BRIDGE_VERSION), StandardCharsets.UTF_8);
     }
 
     private void injectRecorderBridge(Path index) throws Exception {
@@ -864,6 +890,48 @@ public class GoldenRuntimeService {
                     window.parent.postMessage(
                       {type: 'GOLDEN_RECORDER_IDENTIFIERS', payload: {identifiers: ids}}, '*');
                   }
+                  // DO KHUNG cua moi thanh phan — dung cho ki nang responsive: chup o khung dien
+                  // thoai, chup lai o khung desktop, cap nao DOI quan he thi do la cho app that
+                  // su co gian.
+                  //
+                  // Tra ve pixel CLIENT chu KHONG quy ve dp. Pane/trinh duyet co the dang thu nho
+                  // ca trang (da gap that: flt-semantics-host mang scale(1.18932) nen moi phep do
+                  // lech 2,4 lan), ma quan he bo cuc thi BAT BIEN voi ti le mien la hai khung
+                  // cung mot luot do. Kem theo khung goc de ben kia tinh sai so theo % man hinh.
+                  //
+                  // GIU CA thanh phan LAP (nut Xoa o moi dong), kem so lan lap o truong `dup`.
+                  // Ben soan de bo chung ra khoi phep so quan he — mot khoa ung voi nhieu khung
+                  // thi vi tri khong xac dinh — nhung VAN CAN chung de dem so cot: list doi
+                  // thanh grid la mot trong vai dau hieu ma reflow mien phi khong tao ra duoc.
+                  function rectSnapshot() {
+                    const host = document.querySelector('flutter-view')
+                      || document.querySelector('flt-glass-pane')
+                      || document.body;
+                    const goc = host.getBoundingClientRect();
+                    const tho = [];
+                    const dem = new Map();
+                    allSemanticElements().forEach(node => {
+                      const id = semanticIdOf(node);
+                      const nhan = ((node.getAttribute('aria-label') || '') + '').replace(/\\s+/g, ' ').trim();
+                      const khoa = id || nhan;
+                      if (!khoa) return;
+                      const r = node.getBoundingClientRect();
+                      if (r.width <= 0 || r.height <= 0) return;
+                      dem.set(khoa, (dem.get(khoa) || 0) + 1);
+                      tho.push({
+                        key: khoa,
+                        identifier: id || '',
+                        label: nhan.slice(0, 60),
+                        role: node.getAttribute('role') || '',
+                        x: r.x - goc.x, y: r.y - goc.y, w: r.width, h: r.height,
+                      });
+                    });
+                    const items = tho.map(it => Object.assign({}, it, {dup: dem.get(it.key)}));
+                    window.parent.postMessage({type: 'GOLDEN_RECORDER_RECTS', payload: {
+                      screen: {w: goc.width, h: goc.height},
+                      items,
+                    }}, '*');
+                  }
                   // LIET KE thanh phan man hinh hien tai cho bang tick ben trang soan de.
                   // Truoc day lenh nay goi ham semanticState CHUA TON TAI — ReferenceError,
                   // chet im lang, giao vien bam nut ma khong thay gi.
@@ -937,6 +1005,9 @@ public class GoldenRuntimeService {
                     }
                     if (event.data.action === 'snapshot_identifiers') {
                       identifierSnapshot();
+                    }
+                    if (event.data.action === 'snapshot_rects') {
+                      rectSnapshot();
                     }
                     if (event.data.action === 'capture_screenshot') {
                       screenshot();

@@ -388,6 +388,25 @@ public class BehaviorSuiteMaterializer {
                     "component_sliver_collapse", "component_expanded");
     private static final java.util.Set<String> SINGLE_VIEWPORT_KINDS =
             java.util.Set.of("route_state");
+
+    /**
+     * KHUNG DESKTOP — dùng cho kĩ năng responsive, và CHỈ cho nó.
+     *
+     * <p>1280×800 là cỡ laptop phổ biến nhất và đủ xa 412 để lộ bố cục cứng: app không khai
+     * breakpoint nào thì ở đây vẫn xếp dọc y như trên điện thoại, còn app biết co giãn thì
+     * đổi quan hệ (dưới nhau → cùng hàng). Chính chỗ ĐỔI đó là thứ được chấm.
+     *
+     * <p>Vì sao khoá cứng một cỡ: cùng lý lẽ với khung điện thoại — mỗi đề một cỡ thì không
+     * so được đề này với đề kia, mà hậu quả chỉ lộ ra sau khi đã chấm.
+     */
+    static final Map<String, Object> KHUNG_DESKTOP = Map.of(
+            "name", "desktop", "width", 1280, "height", 800, "device_pixel_ratio", 1);
+
+    /** Hậu tố mã thực thi của lượt replay ở khung desktop. */
+    static final String HAU_TO_DESKTOP = "__VP_DESKTOP";
+
+    /** Checkpoint khai cờ này thì chạy ở khung desktop thay vì khung điện thoại. */
+    static final String KHUNG_DESKTOP_CO = "desktop";
     private static final java.util.Set<String> CH7_KINDS = java.util.Set.of(
             "component_scroll_direction", "component_scroll_to_end", "component_stack_order",
             "component_indexed_switch", "component_bottom_sheet", "component_table",
@@ -402,10 +421,14 @@ public class BehaviorSuiteMaterializer {
             List<Object> scenarioViewports = list(scenario.get("viewports"));
             if (scenarioViewports.isEmpty()) {
                 scenarioViewports = List.of(Map.of(
-                        // Máy Android tầm trung (Pixel): 412×915 dp. Khung desktop đã bỏ —
-                        // sinh viên chỉ làm bài trên máy ảo Android. Mật độ để 1 vì chấm bố
-                        // cục đo bằng dp, mật độ chỉ ảnh hưởng độ nét ảnh bằng chứng.
-                        "name", "phone", "width", 412, "height", 915, "device_pixel_ratio", 1));
+                        // KHUNG APP THẬT trên máy ảo Pixel 7 API 34: 412×838 dp — KHÔNG phải
+                        // 412×915. Màn là 411,43×914,29 dp nhưng hệ điều hành giữ lại 77 dp
+                        // cho thanh trạng thái (51,8) và thanh cử chỉ (24); đo bằng
+                        // `adb shell dumpsys window displays` → mAppBounds=Rect(0,136-1080,2337).
+                        // Phải khớp mặc định trong exam_test.dart._applyViewport.
+                        // Mật độ để 1 vì chấm bố cục đo bằng dp, mật độ chỉ ảnh hưởng độ nét
+                        // ảnh bằng chứng.
+                        "name", "phone", "width", 412, "height", 838, "device_pixel_ratio", 1));
             }
             double scenarioWeight = number(scenario.get("weight"), 1.0);
             // Tiêu chí GIAO DIỆN mang trọng số TUYỆT ĐỐI (điểm của nhóm chia đều lúc tick),
@@ -432,9 +455,19 @@ public class BehaviorSuiteMaterializer {
                 // Thành phần giao diện không đổi theo bề ngang màn hình (đó là việc của tầng
                 // bố cục) → chỉ chạy trên viewport đầu, khỏi nhân bản testcase lẫn trọng số.
                 boolean singleViewport = SINGLE_VIEWPORT_KINDS.contains(text(checkpoint, "kind"));
-                List<Object> checkpointViewports = databaseCheckpoint || componentCheckpoint || singleViewport
-                        ? List.of(first(scenarioViewports))
-                        : scenarioViewports;
+                // TIÊU CHÍ RESPONSIVE: chạy ở khung desktop thay vì khung điện thoại.
+                //
+                // Nó KHÔNG đi qua đường nhân bản viewport bên dưới. Đường đó nhân mỗi
+                // checkpoint ra mọi khung rồi chia trọng số cho số khung — nghĩa là một tiêu
+                // chí đạt ở khung này mà trượt ở khung kia chỉ mất một nửa điểm. Responsive
+                // là kĩ năng RIÊNG có điểm riêng: tiêu chí của nó chỉ tồn tại ở đúng một
+                // khung, giữ nguyên phần điểm đã khai, và không đụng tới tiêu chí nào khác.
+                boolean khungDesktop = KHUNG_DESKTOP_CO.equals(text(checkpoint, "khung"));
+                List<Object> checkpointViewports = khungDesktop
+                        ? List.of(KHUNG_DESKTOP)
+                        : databaseCheckpoint || componentCheckpoint || singleViewport
+                                ? List.of(first(scenarioViewports))
+                                : scenarioViewports;
                 double checkpointWeight = scenarioWeight
                         * Math.max(0.0001, number(checkpoint.get("weight"), 1.0))
                         / checkpointTotal;
@@ -444,7 +477,11 @@ public class BehaviorSuiteMaterializer {
                     Map<String, Object> viewport = map(rawViewport);
                     String viewportName = text(viewport, "name");
                     if (viewportName.isBlank()) viewportName = "viewport_" + viewportIndex;
-                    String executionCode = text(scenario, "scenario_code") + "__VP_" + viewportIndex;
+                    // Mã thực thi quyết định case nào chạy CHUNG một lượt replay. Khung desktop
+                    // phải có mã riêng, không thì nó bị gom vào lượt chạy ở khung điện thoại và
+                    // đo bố cục sai khung.
+                    String executionCode = text(scenario, "scenario_code")
+                            + (khungDesktop ? HAU_TO_DESKTOP : "__VP_" + viewportIndex);
                     String testSuffix = checkpointViewports.size() > 1 ? "_" + viewportName : "";
                     String testId = safeTestId(suiteCode + "_" + text(scenario, "scenario_code")
                             + "_" + checkpointId + testSuffix);
@@ -458,7 +495,6 @@ public class BehaviorSuiteMaterializer {
                     item.put("name", checkpointName(scenario, checkpoint, index)
                             + (checkpointViewports.size() > 1 ? " [" + viewportName + "]" : ""));
                     item.put("description", scenario.get("description"));
-                    item.put("skill_code", scenario.getOrDefault("skill_code", "UI_BUTTONS_SELECTION"));
                     item.put("weight", Math.round(itemWeight * 1_000_000d) / 1_000_000d);
                     item.put("initial_state", scenario.get("initial_state"));
                     item.put("steps", scenario.get("steps"));
@@ -504,12 +540,11 @@ public class BehaviorSuiteMaterializer {
             metadata.put("scenario_code", item.get("scenario_code"));
             metadata.put("execution_code", item.get("execution_code"));
             metadata.put("checkpoint_id", checkpoint.get("id"));
-            // Ch.7 dùng mã kỹ năng riêng (có thật trong syllabus.json, "ADVUI_EXPANDED_
-            // LAYOUTBUILDER") thay vì "UI_LAYOUT" — mã đó không nằm trong syllabus nên chỉ
-            // hợp lệ vì 4 tiêu chí giao diện gốc đi qua nhánh publish không ép validate; Ch.7
-            // không nên kế thừa nợ kỹ thuật đó khi đã có mã thật để dùng.
-            metadata.put("skill_code", ch7 ? "ADVUI_EXPANDED_LAYOUTBUILDER"
-                    : component ? "UI_LAYOUT" : item.get("skill_code"));
+            // KHÔNG ghi "skill_code" nữa (bỏ khung năng lực, 17/9/2026). Trước đây mọi tiêu
+            // chí giao diện bị gán cứng "UI_LAYOUT" — một mã đời cũ không còn trong syllabus,
+            // và nó lọt được chỉ vì nhánh publish bên giảng viên không ép validate. Khi bộ chấm
+            // bắt đầu đi sang người chấm bằng gói .zip thì cửa nạp kiểm chặt và chặn cả gói.
+            // Điểm không đọc mã năng lực — trọng số và group_id mới là thứ tính điểm.
             metadata.put("testcase_group", component ? "UI" : "BEHAVIOR");
             metadata.put("layer", component ? "ui" : "behavior");
             // Nhóm là cấp mà điểm lẻ nổi lên (đạt 3/4 thành phần = 15/20) và là cấp đối
@@ -609,7 +644,7 @@ public class BehaviorSuiteMaterializer {
                 .sorted(Comparator.comparing(item -> text(item, "scenario_code")))
                 .map(item -> {
                     Map<String, Object> stable = new TreeMap<>();
-                    for (String key : List.of("scenario_code", "name", "skill_code", "description", "display_order",
+                    for (String key : List.of("scenario_code", "name", "description", "display_order",
                             "weight", "enabled", "initial_state", "steps", "checkpoints", "viewports")) {
                         if (item.containsKey(key)) stable.put(key, item.get(key));
                     }

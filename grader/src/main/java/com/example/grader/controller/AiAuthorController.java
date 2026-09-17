@@ -5,7 +5,7 @@ import com.example.grader.config.Vai;
 import org.springframework.context.annotation.Profile;
 import com.example.grader.service.ai.AiExamAuthorService;
 import com.example.grader.service.ai.AiSettingsService;
-import com.example.grader.service.ai.ExamDocumentReader;
+import com.example.grader.service.ExamDocumentReader;
 import com.example.grader.service.ai.LlmService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;

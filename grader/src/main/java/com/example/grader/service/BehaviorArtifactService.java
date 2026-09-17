@@ -110,6 +110,21 @@ public class BehaviorArtifactService {
     }
 
     /**
+     * Gỡ cờ active của mọi bản thuộc một loại artifact.
+     *
+     * <p>Dùng khi thứ sinh ra artifact đó không còn tồn tại nữa — ví dụ xoá scenario cuối cùng
+     * thì không còn bước nào để định nghĩa testcase. Giữ bản cũ đang active nghĩa là để một file
+     * mô tả scenario ĐÃ XOÁ nằm chờ publish.
+     */
+    @Transactional
+    public void deactivateAll(String suiteId, BehaviorArtifactType type) {
+        List<BehaviorArtifact> active = artifacts.findBySuiteIdAndArtifactTypeAndActiveTrue(suiteId, type);
+        if (active.isEmpty()) return;
+        active.forEach(row -> row.setActive(false));
+        artifacts.saveAll(active);
+    }
+
+    /**
      * Version một artifact do runner sinh mà không nạp toàn bộ file vào heap. Output DB
      * có thể lớn nên không được chuyển qua byte[] như các JSON nhỏ.
      */
@@ -233,13 +248,16 @@ public class BehaviorArtifactService {
         Map<String, Object> status = new LinkedHashMap<>();
         List<String> missing = new ArrayList<>();
         for (BehaviorArtifactType type : BehaviorArtifactType.values()) {
+            // STUDENT_DATABASE da BO HAN khoi quy trinh: engine chi doc hidden_fixture_path,
+            // khong bao gio mo student.db, con viec canh cau truc bang da chuyen sang khau kiem
+            // dong bo khung phat. Khong bao cao trang thai nua de man soan de khong con o nao
+            // khien nguoi ra de tuong minh thieu buoc. Hang cu trong CSDL van con, chi la khong
+            // ai nhin toi — xoa hang thi bo de cu khong doc len duoc.
+            if (type == BehaviorArtifactType.STUDENT_DATABASE) continue;
             Optional<BehaviorArtifact> row = artifacts
                     .findFirstBySuiteIdAndArtifactTypeAndActiveTrueOrderByVersionDesc(suiteId, type);
             status.put(type.name(), row.map(this::view).orElse(null));
-            // STUDENT_DATABASE khong con bat buoc: engine chi doc hidden_fixture_path, khong
-            // bao gio mo student.db, va viec canh schema da chuyen sang khau kiem dong bo
-            // khung phat. Van bao trang thai de bo de cu tai len tu truoc con nhin thay.
-            if (row.isEmpty() && type != BehaviorArtifactType.STUDENT_DATABASE) missing.add(type.name());
+            if (row.isEmpty()) missing.add(type.name());
         }
         return Map.of(
                 "suite_id", suiteId,
@@ -560,19 +578,11 @@ public class BehaviorArtifactService {
             case AUTOMATION_RECORD, TESTCASE_DEFINITION, GRADING_ENVIRONMENT -> validateJson(type, candidate);
             case GOLDEN_SOLUTION -> { validateZip(candidate); crossCheckGoldenDatabaseName(suiteId, candidate); }
         }
-        if (type == BehaviorArtifactType.STUDENT_DATABASE) {
-            artifacts.findFirstBySuiteIdAndArtifactTypeAndActiveTrueOrderByVersionDesc(
-                            suiteId, BehaviorArtifactType.HIDDEN_DATABASE)
-                    .ifPresent(hidden -> compareSqliteSchema(candidate, Path.of(hidden.getStoragePath())));
-        } else if (type == BehaviorArtifactType.HIDDEN_DATABASE) {
-            artifacts.findFirstBySuiteIdAndArtifactTypeAndActiveTrueOrderByVersionDesc(
-                            suiteId, BehaviorArtifactType.STUDENT_DATABASE)
-                    .ifPresent(student -> compareSqliteSchema(Path.of(student.getStoragePath()), candidate));
-        } else if (type == BehaviorArtifactType.OUTPUT_DATABASE) {
-            artifacts.findFirstBySuiteIdAndArtifactTypeAndActiveTrueOrderByVersionDesc(
-                            suiteId, BehaviorArtifactType.STUDENT_DATABASE)
-                    .ifPresent(student -> compareSqliteSchema(Path.of(student.getStoragePath()), candidate));
-        }
+        // Ba phep so cau truc bang voi STUDENT_DATABASE da go bo cung luc voi chinh o artifact
+        // do. Ca ba deu lay student.db lam moc, ma nay khong con ai tai len nen chung chi la ba
+        // nhanh chet — giu lai thi bo de cu con mot student.db lech schema se chan luon ca lan
+        // tai Database an moi len. Phep canh cau truc that nay nam o kiem dong bo khung phat,
+        // noi no so tren MA NGUON cua khung phat voi Golden.
     }
 
     private void validateJson(BehaviorArtifactType type, Path file) throws Exception {
