@@ -5,6 +5,7 @@ import com.example.grader.service.BehaviorArtifactService;
 import com.example.grader.service.BehaviorAuthoringService;
 import com.example.grader.service.BehaviorSuiteMaterializer;
 import com.example.grader.service.ExamService;
+import com.example.grader.service.PackageAvailabilityException;
 import com.example.grader.service.GoldenValidationService;
 import com.example.grader.service.GoldenRuntimeService;
 import com.example.grader.service.GoldenOracleCaptureService;
@@ -330,6 +331,7 @@ public class BehaviorAuthoringController {
     @PostMapping("/suites/{id}/publish")
     public ResponseEntity<?> publish(@PathVariable String id) {
         return call(() -> {
+            requireGoldenRuntimeReady(id);
             artifactService.requireComplete(id);
             validationService.requirePassed(id);
             Map<String, Object> published = service.publish(id);
@@ -340,7 +342,18 @@ public class BehaviorAuthoringController {
 
     @PostMapping("/suites/{id}/validate-golden")
     public ResponseEntity<?> validateGolden(@PathVariable String id) {
-        return call(() -> validationService.validate(id));
+        return call(() -> {
+            requireGoldenRuntimeReady(id);
+            return validationService.validate(id);
+        });
+    }
+
+    private void requireGoldenRuntimeReady(String suiteId) {
+        Map<String, Object> runtime = runtimeService.status(suiteId);
+        // READY trong DB chưa đủ: thư mục build có thể đã mất hoặc thuộc Golden cũ.
+        if (!"READY".equals(runtime.get("status")) || !Boolean.TRUE.equals(runtime.get("available"))) {
+            throw new IllegalStateException("Golden chưa sẵn sàng. Hãy Build & mở Golden trước khi chạy thử hoặc publish.");
+        }
     }
 
     @GetMapping("/suites/{id}/validate-golden")
@@ -504,6 +517,8 @@ public class BehaviorAuthoringController {
     private ResponseEntity<?> call(ApiCall action) {
         try {
             return ResponseEntity.ok(action.run());
+        } catch (PackageAvailabilityException e) {
+            return ResponseEntity.badRequest().body(e.response());
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         } catch (IllegalStateException e) {

@@ -81,10 +81,10 @@ public class AiAuthorController {
     // ── Bước 1: đề bài ───────────────────────────────────────────
 
     /** Body: { topic, knowledge, screens, features, entity, storage, difficulty, duration, note,
-     *          database_name?, allowed_packages? }. */
+     *          database_name? }. */
     @PostMapping("/exam/draft")
     public ResponseEntity<?> draftExam(@RequestBody Map<String, Object> body) {
-        return handle(() -> author.draftExam(body, str(body, "database_name"), packages(body)));
+        return handle(() -> author.draftExam(body, str(body, "database_name")));
     }
 
     /** Body: { de_bai, instruction } — giáo viên gõ yêu cầu sửa bằng lời. */
@@ -140,12 +140,6 @@ public class AiAuthorController {
             res.put("mockups", out);
             return res;
         });
-    }
-
-    @SuppressWarnings("unchecked")
-    private List<String> packages(Map<String, Object> body) {
-        Object raw = body == null ? null : body.get("allowed_packages");
-        return raw instanceof List ? (List<String>) raw : null;
     }
 
     // ── Chung ────────────────────────────────────────────────────

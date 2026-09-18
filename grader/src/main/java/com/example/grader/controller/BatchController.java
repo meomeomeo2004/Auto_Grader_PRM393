@@ -136,28 +136,6 @@ public class BatchController {
         }
     }
 
-    /** Đọc mã nguồn bài nộp của 1 SV (cho trang chấm tay xem "bài làm"). */
-    @GetMapping("/submission/{examId}/{studentId}/files")
-    public ResponseEntity<?> submissionFiles(@PathVariable String examId, @PathVariable String studentId) {
-        try {
-            return ResponseEntity.ok(batchService.readSubmissionFiles(examId, studentId));
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
-        }
-    }
-
-    /** Đọc testcase đã dùng để chấm 1 SV (đối chiếu khi bài bị 0/0): exam_test.dart, skills_matrix.json, grader.dart. */
-    @GetMapping("/testcase/{examId}/{studentId}/files")
-    public ResponseEntity<?> testcaseFiles(@PathVariable String examId, @PathVariable String studentId) {
-        try {
-            return ResponseEntity.ok(batchService.readTestcaseFiles(examId, studentId));
-        } catch (IllegalStateException e) {     // bài chưa chấm xong → chưa có bản testcase đã dùng
-            return ResponseEntity.status(409).body(Map.of("error", e.getMessage()));
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
-        }
-    }
-
     /** Chấm lại 1 bài từ zip đã lưu (không cần upload lại). Trả batchId mới để theo dõi tiến độ. */
     @PostMapping("/regrade/{examId}/{studentId}")
     public ResponseEntity<?> regrade(@PathVariable String examId, @PathVariable String studentId) {

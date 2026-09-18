@@ -265,6 +265,8 @@ public class ExamSetupController {
     public ResponseEntity<?> saveHandout(@PathVariable String examId,
                                          @RequestBody Map<String, Object> body) {
         try {
+            if (body != null && body.containsKey("allowed_packages"))
+                examService.saveExamAllowedPackages(examId, packageList(body));
             Object rawMockups = body == null ? null : body.get("mockups");
             java.util.List<Map<String, String>> mockups = rawMockups instanceof java.util.List
                     ? (java.util.List<Map<String, String>>) rawMockups : java.util.List.of();
@@ -277,6 +279,34 @@ public class ExamSetupController {
         } catch (Exception e) {
             return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
         }
+    }
+
+    @GetMapping("/{examId}/allowed-packages")
+    public ResponseEntity<?> allowedPackages(@PathVariable String examId) {
+        try {
+            return ResponseEntity.ok(Map.of("allowed_packages", examService.getExamAllowedPackages(examId)));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    @PutMapping("/{examId}/allowed-packages")
+    public ResponseEntity<?> saveAllowedPackages(@PathVariable String examId, @RequestBody Map<String, Object> body) {
+        try {
+            return ResponseEntity.ok(Map.of("allowed_packages", examService.saveExamAllowedPackages(examId, packageList(body))));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    private java.util.List<?> packageList(Map<String, Object> body) {
+        if (body == null || !(body.get("allowed_packages") instanceof java.util.List<?> list))
+            throw new IllegalArgumentException("Phải khai allowed_packages dạng danh sách.");
+        return list;
     }
 
     /**

@@ -18,6 +18,38 @@ class SubmissionPackagePolicyTest {
     Path temp;
 
     @Test
+    void explicitGoldenPolicyDoesNotGrantUndeclaredDevelopmentPackages() throws Exception {
+        Files.writeString(temp.resolve("contract.json"), "{\"allowed_packages\":[\"flutter\",\"path\"]}");
+        Path lib = Files.createDirectories(temp.resolve("lib"));
+        Files.writeString(lib.resolve("main.dart"), "import 'package:flutter_test/flutter_test.dart';\nvoid main() {}\n");
+        SubmissionPackagePolicy gate = new SubmissionPackagePolicy();
+        var error = assertThrows(GradingDiagnosticException.class,
+                () -> gate.validateAndNormalize(lib, gate.load(temp.toString())));
+        assertEquals("EXTERNAL_PACKAGE", error.code());
+        assertFalse(error.manualReview());
+    }
+
+    @Test
+    void conditionalImportCannotHideUnapprovedPackageBehindRelativeUri() throws Exception {
+        Path lib = Files.createDirectories(temp.resolve("lib"));
+        Files.writeString(lib.resolve("main.dart"), "import 'stub.dart' if (dart.library.io) 'package:intl/intl.dart';\nvoid main() {}\n");
+        var policy = new SubmissionPackagePolicy.Policy(Set.of("flutter"), Set.of("exam_project"), true);
+        var error = assertThrows(GradingDiagnosticException.class,
+                () -> new SubmissionPackagePolicy().validateAndNormalize(lib, policy));
+        assertTrue(error.teacherMessage().contains("intl"));
+    }
+
+    @Test
+    void conditionalExportCannotHideUnapprovedPackageBehindAllowedUri() throws Exception {
+        Path lib = Files.createDirectories(temp.resolve("lib"));
+        Files.writeString(lib.resolve("main.dart"), "export 'package:flutter/widgets.dart' if (dart.library.io) 'package:intl/intl.dart';\n");
+        var policy = new SubmissionPackagePolicy.Policy(Set.of("flutter"), Set.of("exam_project"), true);
+        var error = assertThrows(GradingDiagnosticException.class,
+                () -> new SubmissionPackagePolicy().validateAndNormalize(lib, policy));
+        assertTrue(error.teacherMessage().contains("intl"));
+    }
+
+    @Test
     void externalPackageIsScoredAsStudentFaultNotASystemIncident() throws Exception {
         Path lib = Files.createDirectories(temp.resolve("lib"));
         Files.writeString(lib.resolve("main.dart"),

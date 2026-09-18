@@ -1,6 +1,7 @@
 package com.example.grader.service.ai;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.example.grader.service.ExamService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import com.example.grader.config.Vai;
@@ -33,19 +34,19 @@ import java.util.Map;
 public class AiExamAuthorService {
 
     @Autowired private LlmService llm;
-
-    /** Đúng bộ package đã đóng băng trong grader-base/pubspec.base.yaml — build không "pub get". */
-    private static final List<String> BASE_ALLOWED_PACKAGES = List.of(
-            "flutter", "intl", "flutter_riverpod", "riverpod_annotation", "path",
-            "sqflite", "sqflite_common_ffi", "sqflite_common_ffi_web",
-            "image_picker", "path_provider", "sembast_web");
+    @Autowired private ExamService exams;
 
     // ── Bước 1: đề bài ───────────────────────────────────────────
 
     public Map<String, Object> draftExam(Map<String, Object> req, String databaseName,
                                           List<String> allowedPackages) {
+        // Giữ lời gọi cũ, nhưng lựa chọn khung phát không còn là ngữ cảnh ra đề của AI.
+        return draftExam(req, databaseName);
+    }
+
+    public Map<String, Object> draftExam(Map<String, Object> req, String databaseName) {
         JsonNode res = llm.chatJson(List.of(
-                LlmMessage.system(AiPrompts.draftSystem(databaseName, effectivePackages(allowedPackages))),
+                LlmMessage.system(AiPrompts.draftSystem(databaseName, imagePackages())),
                 LlmMessage.user(AiPrompts.draftUser(req == null ? Map.of() : req))));
         return examResult(res);
     }
@@ -56,9 +57,13 @@ public class AiExamAuthorService {
         if (instruction == null || instruction.isBlank())
             throw new IllegalArgumentException("Hãy nhập yêu cầu chỉnh sửa cho AI.");
         JsonNode res = llm.chatJson(List.of(
-                LlmMessage.system(AiPrompts.reviseSystem()),
+                LlmMessage.system(AiPrompts.reviseSystem() + AiPrompts.packageReference(imagePackages())),
                 LlmMessage.user(AiPrompts.reviseUser(deBai, instruction))));
         return examResult(res);
+    }
+
+    public Map<String, Object> reviseExam(String deBai, String instruction, List<String> allowedPackages) {
+        return reviseExam(deBai, instruction);
     }
 
     private Map<String, Object> examResult(JsonNode res) {
@@ -71,18 +76,8 @@ public class AiExamAuthorService {
         return out;
     }
 
-    /**
-     * Danh sách package giáo viên đã khai (ô "Package được phép dùng" ở trang Behavior Authoring)
-     * là GỢI Ý/thu hẹp, KHÔNG BAO GIỜ được nới rộng ra ngoài bộ đã đóng băng sẵn ở ảnh build —
-     * import package không có ở đó làm Docker build lỗi âm thầm, không có cảnh báo sớm nào khác.
-     */
-    private List<String> effectivePackages(List<String> allowedPackages) {
-        if (allowedPackages == null || allowedPackages.isEmpty()) return BASE_ALLOWED_PACKAGES;
-        List<String> filtered = new ArrayList<>();
-        for (String p : allowedPackages) {
-            if (p != null && BASE_ALLOWED_PACKAGES.contains(p.trim())) filtered.add(p.trim());
-        }
-        return filtered.isEmpty() ? BASE_ALLOWED_PACKAGES : filtered;
+    private List<String> imagePackages() {
+        return exams.goiCoTrongAnhCham().stream().sorted().toList();
     }
 
     // ── Bước 2 (MỚI): hình minh họa giao diện ─────────────────────

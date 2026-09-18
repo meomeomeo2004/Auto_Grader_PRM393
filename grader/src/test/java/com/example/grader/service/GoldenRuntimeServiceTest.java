@@ -2,6 +2,7 @@ package com.example.grader.service;
 
 import com.example.grader.entity.BehaviorArtifact;
 import com.example.grader.entity.BehaviorArtifactType;
+import com.example.grader.entity.BehaviorSuite;
 import com.example.grader.repository.BehaviorSuiteRepository;
 import com.example.grader.repository.GoldenAppRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -24,13 +25,18 @@ class GoldenRuntimeServiceTest {
 
     private BehaviorArtifactService artifacts;
     private GoldenRuntimeService service;
+    private BehaviorSuiteRepository suites;
 
     @BeforeEach
     void setUp() {
         artifacts = mock(BehaviorArtifactService.class);
+        suites = mock(BehaviorSuiteRepository.class);
+        BehaviorSuite suite = new BehaviorSuite();
+        suite.setDatabaseContractJson("{\"database_name\":\"expenses.db\"}");
+        when(suites.findById("suite-1")).thenReturn(java.util.Optional.of(suite));
         service = new GoldenRuntimeService(
                 artifacts,
-                mock(BehaviorSuiteRepository.class),
+                suites,
                 mock(GoldenAppRepository.class));
         ReflectionTestUtils.setField(service, "runtimeDir", temp.toString());
     }
@@ -128,6 +134,27 @@ class GoldenRuntimeServiceTest {
         assertThat(Files.readString(target.resolve("pubspec.yaml"), StandardCharsets.UTF_8))
                 .contains("assets:")
                 .contains("- lib/assets/");
+        assertThat(Files.readString(target.resolve("lib/_recorder_entry.dart"), StandardCharsets.UTF_8))
+                .contains("'expenses.db'")
+                .doesNotContain("'app.db'");
+    }
+
+    @Test
+    void napDatabaseTheoHopDongPathCu() throws Exception {
+        var suite = suites.findById("suite-1").orElseThrow();
+        suite.setDatabaseContractJson("{\"path\":\"/legacy/expenses.db\"}");
+        Path source = temp.resolve("golden-legacy");
+        Path target = temp.resolve("runtime-legacy");
+        Files.createDirectories(source.resolve("lib"));
+        Files.writeString(source.resolve("lib/main.dart"), "void main() {}\n");
+        ReflectionTestUtils.setField(service, "templateDir", temp.resolve("templates-legacy").toString());
+        Files.createDirectories(temp.resolve("templates-legacy"));
+        Files.writeString(temp.resolve("templates-legacy/pubspec.base.yaml"), "name: exam_project\n");
+
+        ReflectionTestUtils.invokeMethod(service, "prepareProject", "suite-1", source, target);
+
+        assertThat(Files.readString(target.resolve("lib/_recorder_entry.dart")))
+                .contains("'expenses.db'");
     }
 
     @Test

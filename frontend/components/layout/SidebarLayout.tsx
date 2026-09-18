@@ -64,7 +64,6 @@ const TOAN_BO_NAV: NavEntry[] = [
   { name: 'Kho tài liệu đề', path: '/teacher/exam-documents', icon: FileText, vai: 'gv' },
   // Vào thẳng trang Kho — mọi thao tác (tạo/sửa/xóa/chấm lại) đều là nút trong trang đó.
   { name: 'Bộ chấm Golden', path: '/teacher/archive', icon: FileCode2, vai: 'gv' },
-  // "Nhận xét AI" không còn là trang riêng: sinh/xem feedback nằm ngay trang Lịch sử chấm.
 ];
 
 const PRIMARY_NAV: NavEntry[] = TOAN_BO_NAV.filter(

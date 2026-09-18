@@ -33,21 +33,19 @@ public record ExamHistoryRow(
         String manualJson,
         /** Điểm của lần chấm trước (chỉ có sau khi bấm Chấm lại) — để cảnh báo lệch điểm. */
         Float previousScore,
-        /** Đã có nhận xét AI (feedback bot) được cache cho bài này chưa — nút feedback sáng/tắt. */
-        Boolean hasFeedback,
         /** Kết luận cho người chấm — xem {@link GradingOutcome}. Suy từ status, không lưu DB. */
         GradingOutcome outcome
 ) {
-    /** Ctor cho JPQL (21 cột); {@code outcome} là dẫn xuất — xem {@link ResultRow}. */
+    /** Ctor cho JPQL (20 cột); {@code outcome} là dẫn xuất — xem {@link ResultRow}. */
     public ExamHistoryRow(Long id, String studentId, String studentName, Float score, Float manualScore,
                           GradingStatus status, String batchId, Instant submittedAt, Instant updatedAt,
                           String details, String errorLog, String diagnosticCode, String diagnosticOrigin,
                           String diagnosticStage, boolean requiresManualReview, Boolean hasJson,
                           Instant gradingStartedAt, Instant gradingFinishedAt,
-                          String manualJson, Float previousScore, Boolean hasFeedback) {
+                          String manualJson, Float previousScore) {
         this(id, studentId, studentName, score, manualScore, status, batchId, submittedAt, updatedAt,
                 details, errorLog, diagnosticCode, diagnosticOrigin, diagnosticStage,
                 requiresManualReview, hasJson, gradingStartedAt, gradingFinishedAt,
-                manualJson, previousScore, hasFeedback, GradingOutcome.of(status));
+                manualJson, previousScore, GradingOutcome.of(status));
     }
 }

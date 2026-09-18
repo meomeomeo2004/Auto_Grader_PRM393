@@ -1090,6 +1090,14 @@ public class ExamService {
                 throw new IllegalArgumentException("Tên file không hợp lệ: " + name);
         }
 
+        List<Map<String, String>> generated = starterProjectFiles(examId);
+        files = new ArrayList<>(files.stream().filter(f -> {
+            if (f == null || f.get("name") == null) return true;
+            String name = Path.of(f.get("name")).normalize().toString().replace('\\', '/');
+            return !name.equals("pubspec.yaml") && !name.equals("pubspec.lock");
+        }).toList());
+        files.addAll(generated);
+
         if (Files.exists(starter)) deleteRecursively(starter);   // khung cũ không được lẫn vào khung mới
         Files.createDirectories(starter);
         if (!writeHandoutFiles(starter, files))
@@ -1210,6 +1218,12 @@ public class ExamService {
         try (Stream<Path> s = Files.walk(root)) {
             for (Path p : s.filter(Files::isRegularFile).toList())
                 files.put(root.relativize(p).toString().replace('\\', '/'), Files.readString(p, StandardCharsets.UTF_8));
+        }
+        if (sub.equals("starter") && !files.isEmpty()) {
+            // Pubspec phát đi luôn theo lựa chọn hiện tại, kể cả khung cũ từng viết tay.
+            files.remove("pubspec.lock");
+            for (Map<String, String> project : starterProjectFiles(examId))
+                files.put(project.get("name"), project.get("content"));
         }
         return files.isEmpty() ? null : zipBytes(files);
     }
@@ -1700,6 +1714,87 @@ public class ExamService {
 
     private Path basePubspec() { return locateTemplateDir().resolve("pubspec.base.yaml"); }
 
+    /** Lựa chọn thuộc đề, không thuộc bộ Golden và không thu hẹp thư viện của engine. */
+    public List<String> getExamAllowedPackages(String examId) throws Exception {
+        safeId(examId, "đề");
+        String saved = examRepository.findByExamId(examId).map(Exam::getAllowedPackages).orElse(null);
+        if (saved == null || saved.isBlank()) return List.copyOf(baseDependencies().keySet());
+        JsonNode packages = mapper.readTree(saved);
+        if (packages == null || !packages.isArray())
+            throw new IllegalStateException("Danh sách package đã lưu của đề không hợp lệ.");
+        List<String> selected = new ArrayList<>();
+        for (JsonNode p : packages) {
+            if (!p.isTextual()) throw new IllegalStateException("Tên package đã lưu không hợp lệ.");
+            selected.add(p.asText());
+        }
+        return normalizeExamPackages(selected);
+    }
+
+    public List<String> saveExamAllowedPackages(String examId, List<?> packages) throws Exception {
+        safeId(examId, "đề");
+        List<String> normalized = normalizeExamPackages(packages);
+        Map<String, Object> base = baseDependencies();
+        List<String> missing = normalized.stream().filter(p -> !base.containsKey(p)).toList();
+        if (!missing.isEmpty()) throw new IllegalArgumentException("Nguồn khung phát chưa khai package: "
+                + String.join(", ", missing) + ". Mở Thư viện chấm để thêm gói trước khi chọn.");
+        Set<String> inImage = goiCoTrongAnhCham();
+        List<String> absent = normalized.stream().filter(p -> !p.equals("flutter") && !inImage.contains(p)).toList();
+        if (!inImage.isEmpty() && !absent.isEmpty())
+            throw new IllegalArgumentException("Ảnh chấm chưa có package: " + String.join(", ", absent)
+                    + ". Mở Thư viện chấm để bổ sung.");
+        boolean changed = !new LinkedHashSet<>(getExamAllowedPackages(examId)).equals(new LinkedHashSet<>(normalized));
+        Exam exam = ensureExamStub(examId, null);
+        exam.setAllowedPackages(mapper.writeValueAsString(normalized));
+        if (changed) {
+            // Đổi khung phát thì con dấu kiểm cũ không còn chứng minh Golden khớp khung mới.
+            exam.setStarterCheckRequired(true);
+            exam.setStarterCheckedGoldenSha(null);
+            exam.setStarterCheckedAt(null);
+        }
+        examRepository.save(exam);
+        return normalized;
+    }
+
+    private List<String> normalizeExamPackages(List<?> packages) {
+        if (packages == null) throw new IllegalArgumentException("Phải khai allowed_packages dạng danh sách.");
+        Set<String> out = new LinkedHashSet<>();
+        out.add("flutter");
+        for (Object raw : packages) {
+            if (!(raw instanceof String p) || !p.trim().matches("[a-z][a-z0-9_]*"))
+                throw new IllegalArgumentException("Tên package không hợp lệ: " + raw);
+            out.add(p.trim());
+        }
+        return List.copyOf(out);
+    }
+
+    private Map<String, Object> baseDependencies() throws Exception {
+        return PubspecDependencies.parse(Files.readString(basePubspec(), StandardCharsets.UTF_8));
+    }
+
+    /** Giữ nguyên giá trị khai báo phiên bản và nguồn; chỉ lọc tên trong dependencies. */
+    public Map<String, Object> starterDependencies(String examId) throws Exception {
+        Map<String, Object> deps = baseDependencies();
+        List<String> selected = getExamAllowedPackages(examId);
+        List<String> missing = selected.stream().filter(p -> !deps.containsKey(p)).toList();
+        if (!missing.isEmpty()) throw new IllegalStateException("Nguồn khung phát thiếu package đã chọn: " + String.join(", ", missing));
+        Map<String, Object> filtered = new LinkedHashMap<>();
+        deps.forEach((name, declaration) -> { if (selected.contains(name)) filtered.put(name, declaration); });
+        return filtered;
+    }
+
+    public List<Map<String, String>> starterProjectFiles(String examId) throws Exception {
+        Map<String, Object> filtered = starterDependencies(examId);
+        org.yaml.snakeyaml.Yaml yaml = new org.yaml.snakeyaml.Yaml();
+        Map<String, Object> document = yaml.load(Files.readString(basePubspec(), StandardCharsets.UTF_8));
+        document.put("dependencies", filtered);
+        List<Map<String, String>> out = new ArrayList<>();
+        out.add(Map.of("name", "pubspec.yaml", "content",
+                "# Khai sẵn theo môi trường chấm. Không thêm package; import thêm là 0 điểm.\n" + yaml.dump(document)));
+        String lock = readLockFromBaseImage();
+        if (lock != null && !lock.isBlank()) out.add(Map.of("name", "pubspec.lock", "content", lock));
+        return out;
+    }
+
     /**
      * Hai file dự án cho KHUNG STARTER phát cho sinh viên: {@code pubspec.yaml} và (nếu lấy được)
      * {@code pubspec.lock}.
@@ -1933,9 +2028,14 @@ public class ExamService {
      */
     public Map<String, Object> goiChoManSoanDe() {
         Set<String> tatCa = goiCoTrongAnhCham();
-        List<Map<String, Object>> khaiThang = listManagedPackages();
+        List<Map<String, Object>> managed = listManagedPackages();
+        Set<String> runtimeNames;
+        try { runtimeNames = baseDependencies().keySet(); }
+        catch (Exception e) { throw new IllegalStateException("Không đọc được dependencies nguồn khung phát.", e); }
+        List<Map<String, Object>> khaiThang = managed.stream()
+                .filter(item -> runtimeNames.contains(String.valueOf(item.get("name")))).toList();
         Set<String> tenKhaiThang = new LinkedHashSet<>();
-        khaiThang.forEach(item -> tenKhaiThang.add(String.valueOf(item.get("name"))));
+        managed.forEach(item -> tenKhaiThang.add(String.valueOf(item.get("name"))));
         tenKhaiThang.add("flutter");
         tenKhaiThang.add("flutter_test");
         List<String> keoTheo = tatCa.stream()
@@ -2100,6 +2200,9 @@ public class ExamService {
             if (runDockerCapture(List.of("docker", "commit",
                     "--change", "CMD ./run_grader.sh", cid, baseImage), out) != 0)
                 throw new RuntimeException("docker commit thất bại.");
+            // Tag không đổi sau commit; giữ cache cũ sẽ báo thiếu oan gói vừa thêm.
+            goiTrongAnh = Set.of();
+            goiTrongAnhCuaAnh = "";
         } finally {
             try { runDocker(List.of("docker", "rm", "-f", cid), "rm-env-update"); }
             catch (Exception ignored) {}
