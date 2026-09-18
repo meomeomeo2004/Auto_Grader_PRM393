@@ -240,7 +240,7 @@ public class BehaviorSuiteMaterializer {
                     "contract.json",
                     "Contract công khai và package được phép của bộ chấm.",
                     "BUNDLE",
-                    json(publicContract(plan))));
+                    json(publicContract(suiteId, plan))));
 
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("suite_id", suiteId);
@@ -346,7 +346,7 @@ public class BehaviorSuiteMaterializer {
         writeJson(target.resolve("behavior_plan.json"),
                 executablePlan(plan, suite, cases, includeInternalIdentity));
         writeJson(target.resolve("skills_matrix.json"), matrix);
-        writeJson(target.resolve("contract.json"), publicContract(plan));
+        writeJson(target.resolve("contract.json"), publicContract(suiteId, plan));
         Map<String, Object> manifest = new LinkedHashMap<>();
         manifest.put("engine", "GOLDEN_BEHAVIOR_RECORD_REPLAY");
         manifest.put("engine_version", "1.0.0");
@@ -440,9 +440,13 @@ public class BehaviorSuiteMaterializer {
             // thuẫn với bảng Chia điểm và thẻ ngân sách 100 (tổng con phải bằng cha).
             double checkpointTotal = checkpoints.stream()
                     .map(BehaviorSuiteMaterializer::map)
-                    .mapToDouble(item -> Math.max(0.0001, number(item.get("weight"), 1.0)))
+                    // Checkpoint 0 điểm vẫn chạy để kiểm tiên quyết, không được tự tăng điểm.
+                    .mapToDouble(item -> Math.max(0.0, number(item.get("weight"), 1.0)))
                     .sum();
-            if (checkpointTotal <= 0) checkpointTotal = 1.0;
+            if (!Double.isFinite(checkpointTotal) || checkpointTotal <= 0) {
+                throw new IllegalArgumentException("Hàm test " + text(scenario, "scenario_code")
+                        + " phải có ít nhất một checkpoint lớn hơn 0 điểm");
+            }
             int index = 0;
             for (Object rawCheckpoint : checkpoints) {
                 Map<String, Object> checkpoint = map(rawCheckpoint);
@@ -468,9 +472,11 @@ public class BehaviorSuiteMaterializer {
                         : databaseCheckpoint || componentCheckpoint || singleViewport
                                 ? List.of(first(scenarioViewports))
                                 : scenarioViewports;
-                double checkpointWeight = scenarioWeight
-                        * Math.max(0.0001, number(checkpoint.get("weight"), 1.0))
-                        / checkpointTotal;
+                double rawWeight = Math.max(0.0, number(checkpoint.get("weight"), 1.0));
+                // Khi đã chia đúng tổng thì giữ điểm khai, tránh sai số do nhân/chia lại.
+                double checkpointWeight = Math.abs(checkpointTotal - scenarioWeight)
+                        <= Math.ulp(scenarioWeight) * Math.max(8, checkpoints.size() * 2)
+                        ? rawWeight : scenarioWeight * (rawWeight / checkpointTotal);
                 int viewportIndex = 0;
                 for (Object rawViewport : checkpointViewports) {
                     viewportIndex++;
@@ -495,7 +501,8 @@ public class BehaviorSuiteMaterializer {
                     item.put("name", checkpointName(scenario, checkpoint, index)
                             + (checkpointViewports.size() > 1 ? " [" + viewportName + "]" : ""));
                     item.put("description", scenario.get("description"));
-                    item.put("weight", Math.round(itemWeight * 1_000_000d) / 1_000_000d);
+                    // Không làm tròn điểm tự nhập: điểm rất nhỏ vẫn phải giữ nguyên khi publish.
+                    item.put("weight", itemWeight);
                     item.put("initial_state", scenario.get("initial_state"));
                     item.put("steps", scenario.get("steps"));
                     item.put("viewport", viewport);
@@ -570,15 +577,15 @@ public class BehaviorSuiteMaterializer {
         return matrix;
     }
 
-    private Map<String, Object> publicContract(Map<String, Object> plan) {
-        Map<String, Object> runtime = map(plan.get("runtime_config"));
+    private Map<String, Object> publicContract(String suiteId, Map<String, Object> plan) {
         Map<String, Object> contract = new LinkedHashMap<>();
         contract.put("engine", "GOLDEN_BEHAVIOR_RECORD_REPLAY");
         contract.put("schema_version", plan.get("schema_version"));
         contract.put("public_contract", plan.get("public_contract"));
         contract.put("database_contract", plan.get("database_contract"));
-        contract.put("allowed_packages", runtime.getOrDefault("allowed_packages", List.of(
-                "flutter", "flutter_test", "path", "sqflite", "sqflite_common_ffi")));
+        // Policy của bài nộp chỉ sinh từ chính Golden; cấu hình runtime cũ không còn là nguồn.
+        BehaviorArtifact golden = artifacts.active(suiteId, BehaviorArtifactType.GOLDEN_SOLUTION);
+        contract.put("allowed_packages", new ArrayList<>(PubspecDependencies.readZip(Path.of(golden.getStoragePath())).keySet()));
         return contract;
     }
 

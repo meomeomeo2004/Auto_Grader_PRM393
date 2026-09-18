@@ -41,6 +41,15 @@ export default function LibrariesPage() {
 
   const [newName, setNewName] = useState("");
   const [newVer, setNewVer] = useState("");
+  const [suggestedNames, setSuggestedNames] = useState<string[]>([]);
+  useEffect(() => {
+    // Phím tắt từ Golden chỉ điền form; sửa ảnh dùng chung vẫn cần người dùng bấm áp dụng.
+    const names = (new URLSearchParams(window.location.search).get("packages") || "")
+      .split(",").map((name) => name.trim().toLowerCase()).filter(nameOk);
+    const uniqueNames = [...new Set(names)];
+    setSuggestedNames(uniqueNames);
+    if (uniqueNames.length) setNewName(uniqueNames[0]);
+  }, []);
 
   // ── Bên người chấm: thư viện là để XEM ───────────────────────────────────────
   // Danh sách package là quyết định của người ra đề, người chấm không có cơ sở để sửa. Nhưng
@@ -114,14 +123,16 @@ export default function LibrariesPage() {
   const addPkg = () => {
     const name = newName.trim().toLowerCase();
     if (!name) return;
+    if (/[,;\s]/.test(name)) { setErr("Mỗi lần chỉ thêm một package. Nhập một tên, ví dụ: intl."); return; }
     if (!nameOk(name)) { setErr(`Tên package không hợp lệ: "${name}" (chỉ a-z, 0-9, _).`); return; }
     if (name === "flutter" || name === "flutter_test") { setErr("Đây là thư viện lõi, đã có sẵn."); return; }
-    if (editable.some((p) => p.name === name) || protectedPkgs.some((p) => p.name === name)) {
-      setErr(`"${name}" đã có trong danh sách.`); return;
-    }
+    if (editable.some((p) => p.name === name) || protectedPkgs.some((p) => p.name === name)) { setErr("Package này đã có trong danh sách."); return; }
     setErr(null);
     setEditable((list) => [...list, { name, version: newVer.trim(), protected: false }]);
-    setNewName(""); setNewVer("");
+    // Phím tắt Golden có thể báo nhiều gói; từng lần bấm chỉ thêm đúng gói đang nhập.
+    const remaining = suggestedNames.filter((suggested) => suggested !== name);
+    setSuggestedNames(remaining);
+    setNewName(remaining[0] || ""); setNewVer("");
   };
 
   const removePkg = (name: string) => setEditable((list) => list.filter((p) => p.name !== name));
@@ -276,12 +287,16 @@ export default function LibrariesPage() {
               thiếu ở trên, tức là chỉ thêm đúng thứ bộ chấm đang đòi. */}
           {!chiXem && (
           <div className="flex flex-wrap items-end gap-2 border-t border-slate-100 bg-slate-50/40 px-5 py-3.5">
+            {suggestedNames.length > 0 && <div className="flex w-full flex-wrap items-center gap-2 text-xs text-slate-500">
+              <span>Gói Golden còn cần thêm — chọn từng gói:</span>
+              {suggestedNames.map((name) => <button key={name} type="button" disabled={busy} onClick={() => { setNewName(name); setNewVer(""); setErr(null); }} className="rounded border border-slate-200 bg-white px-2 py-1 font-mono hover:text-indigo-600 disabled:opacity-50">{name}</button>)}
+            </div>}
             <label className="flex-1 min-w-[160px]">
               <span className="mb-1 block text-[11px] font-semibold text-slate-500">Tên package</span>
               <input value={newName} disabled={busy}
                 onChange={(e) => setNewName(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter") addPkg(); }}
-                placeholder="vd: intl, collection, http"
+                placeholder="vd: intl"
                 className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 disabled:bg-slate-100" />
             </label>
             <label className="w-36">

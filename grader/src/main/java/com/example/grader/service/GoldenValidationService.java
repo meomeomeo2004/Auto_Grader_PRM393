@@ -149,6 +149,8 @@ public class GoldenValidationService {
         GoldenValidationRun latest = runs.findFirstBySuiteIdOrderByCreatedAtDesc(suiteId)
                 .orElseThrow(() -> new IllegalStateException("Cần chạy kiểm chứng Golden trước khi publish"));
         if (latest.getStatus() != GoldenValidationStatus.PASSED
+                || latest.getTotalCheckpoints() == null || latest.getTotalCheckpoints() <= 0
+                || !Objects.equals(latest.getPassedCheckpoints(), latest.getTotalCheckpoints())
                 || !Objects.equals(latest.getPlanSha256(), currentPlanSha(suiteId))) {
             throw new IllegalStateException(
                     "Golden preflight chưa pass hoặc execution plan đã thay đổi; hãy chạy kiểm chứng lại");
@@ -158,7 +160,26 @@ public class GoldenValidationService {
     private String currentPlanSha(String suiteId) {
         try {
             Map<String, Object> fingerprint = new LinkedHashMap<>();
-            fingerprint.put("plan", authoring.previewExecutionPlan(suiteId));
+            Map<String, Object> plan = new LinkedHashMap<>(authoring.previewExecutionPlan(suiteId));
+            if (plan.get("golden_app") instanceof Map<?, ?> app) {
+                Map<String, Object> golden = new LinkedHashMap<>();
+                app.forEach((key, value) -> golden.put(String.valueOf(key), value));
+                // Build web chỉ đổi trạng thái/log/URL; không đổi mã Golden hoặc cách chấm trong Docker.
+                for (String key : List.of("runtime_url", "status", "metadata", "created_at", "updated_at")) {
+                    golden.remove(key);
+                }
+                plan.put("golden_app", golden);
+            }
+            if (plan.get("suite") instanceof Map<?, ?> suite) {
+                Map<String, Object> content = new LinkedHashMap<>();
+                suite.forEach((key, value) -> content.put(String.valueOf(key), value));
+                // Publish chỉ ghi vòng đời; không được tự làm bằng chứng vừa kiểm trở thành lỗi thời.
+                for (String key : List.of("status", "revision", "published_at", "created_at", "updated_at")) {
+                    content.remove(key);
+                }
+                plan.put("suite", content);
+            }
+            fingerprint.put("plan", plan);
             fingerprint.put("artifacts", artifacts.activeManifest(suiteId));
             return sha256(mapper.writeValueAsBytes(fingerprint));
         } catch (Exception e) {

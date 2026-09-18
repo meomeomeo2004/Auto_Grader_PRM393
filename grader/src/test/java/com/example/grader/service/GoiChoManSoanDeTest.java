@@ -32,15 +32,9 @@ class GoiChoManSoanDeTest {
         List<Map<String, Object>> khaiThang = (List<Map<String, Object>>) ra.get("direct");
         List<String> keoTheo = (List<String>) ra.get("transitive");
         assertFalse(khaiThang.isEmpty(), "phải đọc được khối dependencies của ảnh");
-        // flutter_test nằm ở dev_dependencies. Chỉ đọc khối dependencies thì trang thư viện bảo
-        // "flutter_test là gói lõi" mà không bày ra dòng nào, còn bảng chọn bên soạn đề thì thiếu
-        // đúng gói mà mọi bài đều cần.
-        assertTrue(tenKhaiThang(khaiThang).contains("flutter_test"),
-                "flutter_test phải có mặt dù nằm ở dev_dependencies");
-        khaiThang.stream()
-                .filter(item -> "flutter_test".equals(item.get("name")) || "flutter_lints".equals(item.get("name")))
-                .forEach(item -> assertEquals(Boolean.TRUE, item.get("protected"),
-                        item.get("name") + " phải khoá, không cho xóa nhầm"));
+        // Đồ nghề soạn bài không thuộc lựa chọn package runtime của đề.
+        assertFalse(tenKhaiThang(khaiThang).contains("flutter_test"));
+        assertFalse(tenKhaiThang(khaiThang).contains("flutter_lints"));
         assertFalse(keoTheo.isEmpty(), "ảnh luôn có gói kéo theo");
 
         // Hai nhóm KHÔNG được chồng nhau, nếu không bảng tick hiện một gói hai lần và tick ở

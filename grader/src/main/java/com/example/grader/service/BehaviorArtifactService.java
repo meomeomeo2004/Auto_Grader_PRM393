@@ -39,12 +39,15 @@ public class BehaviorArtifactService {
 
     private final BehaviorArtifactRepository artifacts;
     private final BehaviorSuiteRepository suites;
+    private final ExamService exams;
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
 
     public BehaviorArtifactService(BehaviorArtifactRepository artifacts,
-                                   BehaviorSuiteRepository suites) {
+                                   BehaviorSuiteRepository suites,
+                                   ExamService exams) {
         this.artifacts = artifacts;
         this.suites = suites;
+        this.exams = exams;
     }
 
     @Transactional
@@ -341,37 +344,33 @@ public class BehaviorArtifactService {
      *
      * Cách quét: gom mọi chuỗi '*.db' trong lib/**.dart của ZIP, bỏ chuỗi có '/'
      * (đường dẫn assets như 'assets/hidden.db' là nguồn NẠP, không phải file MỞ).
-     * Không tìm thấy tên nào thì bỏ qua — không đoán bừa.
+     * Phải tìm được đúng một tên: giao diện không còn cho khai hoặc sửa bằng tay.
      */
     public void crossCheckGoldenDatabaseName(String suiteId, Path goldenZip) throws Exception {
-        String declared = declaredDatabaseName(suiteId);
         Set<String> found = scanDartDatabaseNames(goldenZip);
-        // CHUA KHAI TEN: doc thang tu ma Golden thay vi bat nguoi ra de go tay. Chi tu dien khi
-        // ma Golden mo DUNG MOT file .db — nhieu ten thi khong doan bua, de nguoi ra de chon.
-        if (declared.isBlank()) {
-            if (found.size() == 1) ghiTenDatabase(suiteId, found.iterator().next());
-            return;
+        if (found.isEmpty()) {
+            throw new IllegalArgumentException("Golden không tìm thấy tên file .db trong mã lib/*.dart. "
+                    + "Hãy khai rõ một tên database (ví dụ 'app.db'), chỉnh Golden rồi tải ZIP lại.");
         }
-        if (!found.isEmpty() && !found.contains(declared)) {
-            throw new IllegalArgumentException(
-                    "Mã Golden mở database " + found + " nhưng hợp đồng bộ chấm khai '" + declared
-                    + "'. Hai bên phải cùng một tên (đề bài quy định tên nào thì cả hai theo tên đó),"
-                    + " nếu không replay sẽ boot database trống và chấm sai âm thầm.");
+        if (found.size() != 1) {
+            throw new IllegalArgumentException("Golden tìm thấy nhiều tên file .db: " + found + ". "
+                    + "Cần đúng một tên database; hãy chỉnh Golden rồi tải ZIP lại.");
         }
+        // ZIP là nguồn sự thật; bản Golden mới có thể đổi tên, không giữ tên cũ để ghi nhầm DB.
+        ghiTenDatabase(suiteId, found.iterator().next());
     }
 
-    /** Bản kiểm ngược cho lúc ĐỔI HỢP ĐỒNG khi Golden đã nằm sẵn trong kho. */
+    /** Khóa tên đã dò cả ở API; thay tên chỉ bằng cách tải ZIP Golden mới. */
     public void crossCheckDeclaredDatabaseName(String suiteId, String declared) {
-        if (declared == null || declared.isBlank()) return;
         artifacts.findFirstBySuiteIdAndArtifactTypeAndActiveTrueOrderByVersionDesc(
                         suiteId, BehaviorArtifactType.GOLDEN_SOLUTION)
                 .ifPresent(golden -> {
                     try {
                         Set<String> found = scanDartDatabaseNames(Path.of(golden.getStoragePath()));
-                        if (!found.isEmpty() && !found.contains(declared)) {
+                        if (found.size() != 1 || declared == null || !found.contains(declared)) {
                             throw new IllegalArgumentException(
-                                    "Golden đang mở database " + found + ", không thể khai hợp đồng là '"
-                                    + declared + "'.");
+                                    "Tên database được tự động nhận diện từ Golden " + found
+                                    + ", không thể sửa hoặc xóa bằng tay. Hãy chỉnh Golden rồi tải ZIP lại.");
                         }
                     } catch (IllegalArgumentException e) {
                         throw e;
@@ -381,7 +380,7 @@ public class BehaviorArtifactService {
                 });
     }
 
-    /** Ghi ten database vao hop dong cua bo cham, giu nguyen cac khoa khac. */
+    /** Giữ các tùy chọn chấm đã lưu, chỉ thay tên database bằng tên dò từ Golden. */
     private void ghiTenDatabase(String suiteId, String ten) {
         suites.findById(suiteId).ifPresent(suite -> {
             try {
@@ -393,30 +392,16 @@ public class BehaviorArtifactService {
                 contract.put("enabled", true);
                 contract.put("driver", "sqlite");
                 contract.put("database_name", ten);
+                // Engine ưu tiên path: bỏ alias cũ để tên vừa dò thật sự được dùng khi replay.
+                contract.remove("path");
+                contract.remove("name");
                 suite.setDatabaseContractJson(mapper.writeValueAsString(contract));
                 suites.save(suite);
             } catch (Exception e) {
-                // Khong ghi duoc thi de nguyen: nguoi ra de van go tay duoc o Buoc 1.
                 throw new IllegalStateException(
-                        "Khong ghi duoc ten database doc tu Golden: " + e.getMessage(), e);
+                        "Không ghi được tên database đọc từ Golden: " + e.getMessage(), e);
             }
         });
-    }
-
-    private String declaredDatabaseName(String suiteId) {
-        return suites.findById(suiteId)
-                .map(s -> {
-                    try {
-                        JsonNode contract = mapper.readTree(
-                                s.getDatabaseContractJson() == null ? "{}" : s.getDatabaseContractJson());
-                        String name = contract.path("database_name").asText("");
-                        if (name.isBlank()) name = contract.path("name").asText("");
-                        return name.trim();
-                    } catch (Exception e) {
-                        return "";
-                    }
-                })
-                .orElse("");
     }
 
     private static final java.util.regex.Pattern VALUE_KEY_PATTERN = java.util.regex.Pattern.compile(
@@ -555,6 +540,9 @@ public class BehaviorArtifactService {
     private Set<String> scanDartDatabaseNames(Path zip) throws Exception {
         Set<String> found = new java.util.LinkedHashSet<>();
         java.util.regex.Pattern mau = java.util.regex.Pattern.compile("['\"]([-A-Za-z0-9_./]+[.]db)['\"]");
+        // Giữ nguyên chuỗi nhưng bỏ comment: nhắc tên DB cũ trong chú thích không phải mở thêm DB.
+        java.util.regex.Pattern token = java.util.regex.Pattern.compile(
+                "\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'|//[^\\r\\n]*|/\\*[\\s\\S]*?\\*/");
         try (ZipFile file = new ZipFile(zip.toFile())) {
             var entries = file.entries();
             while (entries.hasMoreElements()) {
@@ -562,8 +550,10 @@ public class BehaviorArtifactService {
                 String entryName = entry.getName().replace('\\', '/');
                 if (entry.isDirectory() || !entryName.endsWith(".dart") || !entryName.contains("lib/")) continue;
                 String source = new String(file.getInputStream(entry).readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-                java.util.regex.Matcher m = mau.matcher(source);
-                while (m.find()) {
+                java.util.regex.Matcher tokens = token.matcher(source);
+                while (tokens.find()) {
+                    java.util.regex.Matcher m = mau.matcher(tokens.group());
+                    if (!m.matches()) continue;
                     String name = m.group(1);
                     if (!name.contains("/") && !name.contains("\\")) found.add(name);
                 }
@@ -843,6 +833,14 @@ public class BehaviorArtifactService {
             }
             if (!hasDartEntry) {
                 throw new IllegalArgumentException("Golden Solution ZIP phải chứa dự án có lib/main.dart");
+            }
+            Map<String, Object> dependencies = PubspecDependencies.readZip(file);
+            Set<String> inventory = exams.goiCoTrongAnhCham();
+            // Docker tắt là chưa biết thư viện, theo cùng quy ước với bước lưu cấu hình.
+            if (!inventory.isEmpty()) {
+                List<String> missing = dependencies.keySet().stream()
+                        .filter(name -> !name.equals("flutter") && !inventory.contains(name)).sorted().toList();
+                if (!missing.isEmpty()) throw new PackageAvailabilityException(missing);
             }
         } catch (IllegalArgumentException e) {
             throw e;

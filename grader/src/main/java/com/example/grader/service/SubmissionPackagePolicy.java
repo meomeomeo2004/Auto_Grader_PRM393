@@ -27,8 +27,10 @@ import static com.example.grader.service.GradingDiagnosticException.Origin.STUDE
  */
 final class SubmissionPackagePolicy {
 
-    private static final Pattern PACKAGE_DIRECTIVE = Pattern.compile(
-            "(?m)^(?:\\x{FEFF})?\\s*(?:import|export)\\s+['\"]package:([A-Za-z_][A-Za-z0-9_]*)/([^'\"]+)['\"]");
+    private static final Pattern DIRECTIVE = Pattern.compile(
+            "(?m)^(?:\\x{FEFF})?\\s*(?:import|export)\\s+[^;]*;");
+    private static final Pattern PACKAGE_URI = Pattern.compile(
+            "['\"]package:([A-Za-z_][A-Za-z0-9_]*)/([^'\"]+)['\"]");
 
     /** Fallback cho đề cũ chưa lưu policy; đúng với dependency có sẵn trong grading-base. */
     private static final Set<String> BASE_PACKAGES = Set.of(
@@ -55,7 +57,6 @@ final class SubmissionPackagePolicy {
             if (configuredAllowed != null && configuredAllowed.isArray()) {
                 allowed.clear();
                 allowed.add("flutter");
-                allowed.add("flutter_test");
                 configuredAllowed.forEach(node -> addPackageName(allowed, node.asText("")));
                 explicit = true;
             }
@@ -82,30 +83,35 @@ final class SubmissionPackagePolicy {
             // Do not treat examples left in comments as real dependencies. Keep string
             // literals intact because the package URI itself is a string literal.
             String searchableSource = stripDartComments(source);
-            Matcher matcher = PACKAGE_DIRECTIVE.matcher(searchableSource);
+            Matcher declaration = DIRECTIVE.matcher(searchableSource);
+            Matcher matcher = PACKAGE_URI.matcher(searchableSource);
             StringBuffer normalized = new StringBuffer();
             int copiedUntil = 0;
-            while (matcher.find()) {
-                String packageName = matcher.group(1);
-                String packagePath = matcher.group(2);
-                boolean allowed = policy.allowedPackages().contains(packageName);
-                boolean local = "exam_project".equals(packageName)
-                        || policy.localPackageNames().contains(packageName)
-                        || Files.exists(lib.resolve(packagePath).normalize());
+            // Dart chọn URI ở nhánh điều kiện lúc chạy; mọi nhánh import/export đều phải thuộc policy.
+            while (declaration.find()) {
+                matcher.region(declaration.start(), declaration.end());
+                while (matcher.find()) {
+                    String packageName = matcher.group(1);
+                    String packagePath = matcher.group(2);
+                    boolean allowed = policy.allowedPackages().contains(packageName);
+                    boolean local = "exam_project".equals(packageName)
+                            || policy.localPackageNames().contains(packageName)
+                            || Files.exists(lib.resolve(packagePath).normalize());
 
-                if (!allowed && !local) {
-                    externalUses.computeIfAbsent(packageName, ignored -> new ArrayList<>())
-                            .add(lib.relativize(file).toString().replace('\\', '/') + ":" + packagePath);
+                    if (!allowed && !local) {
+                        externalUses.computeIfAbsent(packageName, ignored -> new ArrayList<>())
+                                .add(lib.relativize(file).toString().replace('\\', '/') + ":" + packagePath);
+                    }
+                    normalized.append(source, copiedUntil, matcher.start());
+                    if (local && !"exam_project".equals(packageName)) {
+                        String replacement = source.substring(matcher.start(), matcher.end()).replaceFirst(
+                                "package:" + Pattern.quote(packageName) + "/", "package:exam_project/");
+                        normalized.append(replacement);
+                    } else {
+                        normalized.append(source, matcher.start(), matcher.end());
+                    }
+                    copiedUntil = matcher.end();
                 }
-                normalized.append(source, copiedUntil, matcher.start());
-                if (local && !"exam_project".equals(packageName)) {
-                    String replacement = source.substring(matcher.start(), matcher.end()).replaceFirst(
-                            "package:" + Pattern.quote(packageName) + "/", "package:exam_project/");
-                    normalized.append(replacement);
-                } else {
-                    normalized.append(source, matcher.start(), matcher.end());
-                }
-                copiedUntil = matcher.end();
             }
             normalized.append(source, copiedUntil, source.length());
             String fixed = normalized.toString();

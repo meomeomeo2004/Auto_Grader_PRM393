@@ -27,11 +27,14 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
-import java.util.function.UnaryOperator;
 import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -42,13 +45,9 @@ import java.util.zip.ZipOutputStream;
  * <pre>
  * Result_of_&lt;đề&gt;/
  * └── HE180037/
- *     ├── HE180037.json      kết quả đầy đủ (đúng bản "Xuất JSON")
  *     ├── HE180037.xlsx      bảng điểm theo NHÓM tiêu chí + chi tiết + ảnh màn hình đối chứng
  *     └── logs/grading.log   bằng chứng chấm: chẩn đoán, SHA đối chứng, danh sách testcase hỏng
  * </pre>
- *
- * <p>feedback.txt (nhận xét bot NLP) đã bỏ khỏi hồ sơ 2026-08-22 — hệ thống chỉ còn tập trung
- * vào chấm điểm và bằng chứng phúc khảo; nhận xét vẫn xuất riêng được ở nút "Sinh feedback".
  *
  * <p>Ảnh trong .xlsx: mỗi luồng thao tác một cặp <b>ảnh mẫu (Golden)</b> — <b>ảnh bài làm</b>,
  * chụp tại cùng điểm dừng, cùng container Docker, cùng font. Sinh viên phúc khảo nhìn thẳng
@@ -60,19 +59,19 @@ final class StudentReportArchiveBuilder {
     private static final DateTimeFormatter TIME =
             DateTimeFormatter.ofPattern("HH:mm:ss dd/M/yyyy").withZone(ZoneId.systemDefault());
 
-    /** Chuẩn hoá JSON trước khi ghi (controller đưa {@code pretty} của nó vào để dùng chung). */
-    private final UnaryOperator<String> jsonNormalizer;
     /** fixtures/screens của bộ đề — ảnh chuẩn theo execution_code; null/không tồn tại = bỏ qua. */
     private final Path goldenScreensDir;
     /** Thư mục ảnh bằng chứng của TỪNG bài (submissions/&lt;đề&gt;/&lt;batch&gt;/_evidence/&lt;SV&gt;). */
     private final Function<ExamResult, Path> evidenceDirFor;
+    /** Chỉ đọc snapshot của lô đã chấm để không gán tiên quyết từ phiên bản đề mới. */
+    private final Function<ExamResult, Path> testcaseDirFor;
 
-    StudentReportArchiveBuilder(UnaryOperator<String> jsonNormalizer,
-                                Path goldenScreensDir,
-                                Function<ExamResult, Path> evidenceDirFor) {
-        this.jsonNormalizer = jsonNormalizer;
+    StudentReportArchiveBuilder(Path goldenScreensDir,
+                                Function<ExamResult, Path> evidenceDirFor,
+                                Function<ExamResult, Path> testcaseDirFor) {
         this.goldenScreensDir = goldenScreensDir;
         this.evidenceDirFor = evidenceDirFor == null ? row -> null : evidenceDirFor;
+        this.testcaseDirFor = testcaseDirFor == null ? row -> null : testcaseDirFor;
     }
 
     byte[] build(String examId, List<ExamResult> rows) throws Exception {
@@ -91,12 +90,10 @@ final class StudentReportArchiveBuilder {
                 }
                 String sid = safe(row.getStudentId() == null ? "student" : row.getStudentId());
                 String home = root + sid + "/";
-                String studentJson = jsonNormalizer.apply(json);
                 dir(zip, home);
-                file(zip, home + sid + ".json", studentJson);
                 binary(zip, home + sid + ".xlsx", studentXlsx(row, result));
                 dir(zip, home + "logs/");
-                file(zip, home + "logs/grading.log", gradingLog(examId, row, result, sha256(studentJson)));
+                file(zip, home + "logs/grading.log", gradingLog(examId, row, result));
             }
         }
         return bytes.toByteArray();
@@ -107,6 +104,7 @@ final class StudentReportArchiveBuilder {
         try (XSSFWorkbook wb = new XSSFWorkbook();
              ByteArrayOutputStream out = new ByteArrayOutputStream()) {
             XSSFSheet sheet = wb.createSheet("Ket qua");
+            sheet.setDefaultRowHeightInPoints(14.5f);
             int[] widths = {5, 26, 40, 12, 12, 60};
             for (int i = 0; i < widths.length; i++) sheet.setColumnWidth(i, widths[i] * 256);
 
@@ -114,7 +112,7 @@ final class StudentReportArchiveBuilder {
             int r = 0;
 
             // ── Khối tóm tắt ─────────────────────────────────────
-            r = title(sheet, st, r, "HỒ SƠ KẾT QUẢ — " + nvl(row.getStudentId()));
+            r = title(sheet, r, "HỒ SƠ KẾT QUẢ — " + nvl(row.getStudentId()), 2, st.profileTitle);
             int[] manual = manualPassCounts(row.getManualJson());
             JsonNode grading = result.path("grading_result");
             boolean edited = row.getManualScore() != null;
@@ -131,8 +129,6 @@ final class StudentReportArchiveBuilder {
                     : grading.path("passed_tests").asInt(0) + "/" + grading.path("total_tests").asInt(0));
             r = info(sheet, st, r, "Thời gian chấm",
                     row.getUpdatedAt() == null ? "" : TIME.format(row.getUpdatedAt()));
-            r = info(sheet, st, r, "SHA-256 bài nộp",
-                    row.getSubmissionHash() == null ? "(không ghi được)" : row.getSubmissionHash());
             r++;
 
             // ── Điểm theo NHÓM — đúng hình phân bổ điểm của hệ thống ──
@@ -141,9 +137,8 @@ final class StudentReportArchiveBuilder {
             Map<String, double[]> groups = new LinkedHashMap<>();   // {đạt, tổng, điểm, tối đa}
             Map<String, String> groupLabel = new LinkedHashMap<>();
             for (JsonNode tc : result.path("test_cases")) {
-                String key = tc.path("group_id").asText("");
+                String key = groupKey(tc);
                 String label = tc.path("group_name").asText("");
-                if (key.isBlank()) key = label.isBlank() ? "KHAC" : label;
                 if (label.isBlank()) label = "Tiêu chí khác";
                 groupLabel.putIfAbsent(key, label);
                 double[] g = groups.computeIfAbsent(key, k -> new double[4]);
@@ -153,49 +148,83 @@ final class StudentReportArchiveBuilder {
                 g[3] += max;
                 if (passed) { g[0]++; g[2] += max; }
             }
-            r = header(sheet, st, r, "ĐIỂM THEO NHÓM TIÊU CHÍ",
-                    new String[]{"", "Nhóm", "", "Đạt", "Điểm", ""});
+            r = summaryHeader(sheet, st, r);
             double earned = 0, total = 0;
+            int groupNumber = 0;
             for (Map.Entry<String, double[]> e : groups.entrySet()) {
                 double[] g = e.getValue();
                 earned += g[2]; total += g[3];
                 XSSFRow line = sheet.createRow(r++);
-                cell(line, 1, groupLabel.get(e.getKey()), st.plain);
-                sheet.addMergedRegion(new CellRangeAddress(r - 1, r - 1, 1, 2));
-                cell(line, 3, (int) g[0] + "/" + (int) g[1], st.center);
-                cell(line, 4, num(g[2]) + "/" + num(g[3]), st.center);
+                cell(line, 0, "", st.summaryIndex);
+                line.getCell(0).setCellValue(++groupNumber);
+                cell(line, 1, groupLabel.get(e.getKey()), st.referencePlain);
+                cell(line, 2, (int) g[0] + "/" + (int) g[1], st.center);
+                cell(line, 3, num(g[2]) + "/" + num(g[3]), st.center);
             }
             XSSFRow sum = sheet.createRow(r++);
-            cell(sum, 1, "TỔNG", st.boldPlain);
-            sheet.addMergedRegion(new CellRangeAddress(r - 1, r - 1, 1, 2));
-            cell(sum, 4, num(earned) + "/" + num(total), st.boldCenter);
+            cell(sum, 0, "", st.summaryIndex);
+            cell(sum, 1, "TỔNG", st.summaryTotal);
+            cell(sum, 2, num(earned) + "/" + num(total), st.boldCenter);
+            sheet.addMergedRegion(new CellRangeAddress(r - 1, r - 1, 2, 3));
             r++;
 
             // ── Chi tiết từng tiêu chí ───────────────────────────
+            int detailStart = r;
             r = header(sheet, st, r, "CHI TIẾT TIÊU CHÍ",
-                    new String[]{"STT", "Nhóm", "Tiêu chí", "Trạng thái", "Điểm", "Quan sát được"});
-            int idx = 0;
-            for (JsonNode tc : result.path("test_cases")) {
-                idx++;
-                String status = tc.path("status").asText("");
-                XSSFCellStyle tone = switch (status) {
-                    case "passed" -> st.pass;
-                    case "failed" -> st.fail;
-                    default -> st.notRun;
-                };
-                String label = switch (status) {
-                    case "passed" -> "Đạt";
-                    case "failed" -> "Trượt";
-                    default -> "Chưa chấm";
-                };
-                String max = num(tc.path("max_score").asDouble(0));
-                XSSFRow line = sheet.createRow(r++);
-                cell(line, 0, String.valueOf(idx), tone);
-                cell(line, 1, tc.path("group_name").asText(""), tone);
-                cell(line, 2, tc.path("name").asText(tc.path("test_id").asText("")), tone);
-                cell(line, 3, label, tone);
-                cell(line, 4, ("passed".equals(status) ? max : "0") + "/" + max, tone);
-                cell(line, 5, "passed".equals(status) ? "—" : tc.path("actual").asText(""), tone);
+                    new String[]{"", "Check point", "Prerequisite", "Status", "Score", "Observation"});
+            List<DetailCheckpoint> checkpoints = detailCheckpoints(row, result);
+            Map<DetailCheckpoint, Integer> detailRows = new HashMap<>();
+            groupNumber = 0;
+            for (String group : groups.keySet()) {
+                groupNumber++;
+                XSSFRow band = sheet.createRow(r++);
+                cell(band, 0, String.valueOf(groupNumber), st.section);
+                cell(band, 1, groupLabel.get(group), st.section);
+                sheet.addMergedRegion(new CellRangeAddress(r - 1, r - 1, 1, 5));
+                List<DetailCheckpoint> ordered = new ArrayList<>();
+                Set<DetailCheckpoint> visited = new HashSet<>();
+                for (DetailCheckpoint checkpoint : checkpoints) {
+                    if (groupKey(checkpoint.result).equals(group)) orderCheckpoint(checkpoint, group, visited, ordered);
+                }
+                int idx = 0;
+                for (DetailCheckpoint checkpoint : ordered) {
+                    JsonNode tc = checkpoint.result;
+                    checkpoint.reference = groupNumber + "." + (++idx);
+                    String status = tc.path("status").asText("");
+                    XSSFCellStyle tone = switch (status) {
+                        case "passed" -> st.pass;
+                        case "failed" -> st.fail;
+                        default -> st.notRun;
+                    };
+                    String max = num(tc.path("max_score").asDouble(0));
+                    XSSFRow line = sheet.createRow(r++);
+                    detailRows.put(checkpoint, line.getRowNum());
+                    cell(line, 0, checkpoint.reference, tone);
+                    cell(line, 1, "  ".repeat(checkpointDepth(checkpoint))
+                            + tc.path("name").asText(tc.path("test_id").asText("")), tone);
+                    cell(line, 2, "", tone);
+                    cell(line, 3, statusLabel(status), tone);
+                    cell(line, 4, ("passed".equals(status) ? max : "0") + "/" + max, tone);
+                    cell(line, 5, "passed".equals(status) ? "—" : tc.path("actual").asText(""), tone);
+                }
+            }
+            // Điền sau khi biết mọi vị trí, kể cả tiên quyết nằm ở nhóm phía dưới.
+            for (DetailCheckpoint checkpoint : checkpoints) {
+                if (checkpoint.requires.isBlank()) continue;
+                XSSFCell target = sheet.getRow(detailRows.get(checkpoint)).getCell(2);
+                if (checkpoint.parent == null) {
+                    target.setCellValue(checkpoint.requires + " (unresolved)");
+                } else {
+                    DetailCheckpoint parent = checkpoint.parent;
+                    target.setCellValue(parent.reference + " · "
+                            + statusLabel(parent.result.path("status").asText(""))
+                            + (groupKey(parent.result).equals(groupKey(checkpoint.result)) ? ""
+                            : " · " + groupLabel.get(groupKey(parent.result)))
+                            + (hasCycle(checkpoint) ? " (cycle)" : ""));
+                    var link = wb.getCreationHelper().createHyperlink(org.apache.poi.common.usermodel.HyperlinkType.DOCUMENT);
+                    link.setAddress("'Ket qua'!B" + (detailRows.get(parent) + 1));
+                    target.setHyperlink(link);
+                }
             }
             r++;
 
@@ -225,6 +254,7 @@ final class StudentReportArchiveBuilder {
                 }
             }
 
+            fitWrappedRows(sheet, detailStart);
             wb.write(out);
             return out.toByteArray();
         }
@@ -266,9 +296,13 @@ final class StudentReportArchiveBuilder {
 
     // ── Khối dựng sheet ─────────────────────────────────────────────
     private int title(XSSFSheet sheet, Styles st, int r, String text) {
+        return title(sheet, r, text, 5, st.title);
+    }
+
+    private int title(XSSFSheet sheet, int r, String text, int lastColumn, XSSFCellStyle style) {
         XSSFRow row = sheet.createRow(r);
-        cell(row, 0, text, st.title);
-        sheet.addMergedRegion(new CellRangeAddress(r, r, 0, 5));
+        cell(row, 0, text, style);
+        sheet.addMergedRegion(new CellRangeAddress(r, r, 0, lastColumn));
         return r + 1;
     }
 
@@ -276,9 +310,19 @@ final class StudentReportArchiveBuilder {
         XSSFRow row = sheet.createRow(r);
         cell(row, 0, label, st.infoLabel);
         sheet.addMergedRegion(new CellRangeAddress(r, r, 0, 1));
-        cell(row, 2, value, st.plain);
-        sheet.addMergedRegion(new CellRangeAddress(r, r, 2, 5));
+        cell(row, 2, value, st.referencePlain);
         return r + 1;
+    }
+
+    private int summaryHeader(XSSFSheet sheet, Styles st, int r) {
+        r = title(sheet, r, "ĐIỂM THEO NHÓM TIÊU CHÍ", 2, st.summarySection);
+        cell(sheet.getRow(r - 1), 3, "", st.summaryTail);
+        XSSFRow head = sheet.createRow(r++);
+        String[] columns = {"STT", "Nhóm", "Check point", "Điểm"};
+        for (int col = 0; col < columns.length; col++) {
+            cell(head, col, columns[col], col == 0 ? st.summaryIndexHead : st.summaryHead);
+        }
+        return r;
     }
 
     private int header(XSSFSheet sheet, Styles st, int r, String section, String[] columns) {
@@ -298,16 +342,55 @@ final class StudentReportArchiveBuilder {
         if (style != null) c.setCellStyle(style);
     }
 
+    /** Excel không tự giãn hàng của file sinh bằng POI, nhất là ô đã gộp. */
+    private static void fitWrappedRows(XSSFSheet sheet, int firstRow) {
+        for (var row : sheet) {
+            if (row.getRowNum() < firstRow) continue;
+            int lines = 1;
+            for (var cell : row) {
+                double width = sheet.getColumnWidth(cell.getColumnIndex()) / 256.0;
+                for (CellRangeAddress merged : sheet.getMergedRegions()) {
+                    if (merged.getFirstRow() == row.getRowNum()
+                            && merged.getFirstColumn() == cell.getColumnIndex()) {
+                        width = 0;
+                        for (int col = merged.getFirstColumn(); col <= merged.getLastColumn(); col++) {
+                            width += sheet.getColumnWidth(col) / 256.0;
+                        }
+                        break;
+                    }
+                }
+                // Chừa khoảng cho viền và chữ rộng; ưu tiên đọc hết hơn tiết kiệm một hàng.
+                int capacity = Math.max(1, (int) (width * 0.85) - 1);
+                int needed = 0;
+                for (String paragraph : cell.toString().split("\\R", -1)) {
+                    int used = 0;
+                    needed++;
+                    for (String word : paragraph.split("\\s+")) {
+                        if (used > 0 && used + word.length() + 1 > capacity) {
+                            needed++;
+                            used = 0;
+                        }
+                        needed += Math.max(0, (word.length() - 1) / capacity);
+                        used += word.length() + (used > 0 ? 1 : 0);
+                    }
+                }
+                lines = Math.max(lines, needed);
+            }
+            row.setHeightInPoints(14.5f * lines);
+        }
+    }
+
     /** Bộ style dùng chung một workbook — POI giới hạn số style, không tạo mới theo ô. */
     private static final class Styles {
         final XSSFCellStyle title, section, head, infoLabel, plain, center,
-                boldPlain, boldCenter, pass, fail, notRun;
+                boldPlain, boldCenter, pass, fail, notRun, profileTitle,
+                referencePlain, summarySection, summaryTail, summaryHead, summaryIndex, summaryIndexHead, summaryTotal;
 
         Styles(XSSFWorkbook wb) {
             title = base(wb, true, 13, null, HorizontalAlignment.LEFT);
             section = base(wb, true, 11, rgb(0xEE, 0xF2, 0xFF), HorizontalAlignment.LEFT);
             head = base(wb, true, 11, rgb(0xF1, 0xF5, 0xF9), HorizontalAlignment.CENTER);
-            infoLabel = base(wb, true, 11, rgb(0xF8, 0xFA, 0xFC), HorizontalAlignment.LEFT);
+            infoLabel = base(wb, true, 11, rgb(0xF8, 0xFA, 0xFC), HorizontalAlignment.CENTER);
             plain = base(wb, false, 11, null, HorizontalAlignment.LEFT);
             center = base(wb, false, 11, null, HorizontalAlignment.CENTER);
             boldPlain = base(wb, true, 11, null, HorizontalAlignment.LEFT);
@@ -315,6 +398,35 @@ final class StudentReportArchiveBuilder {
             pass = base(wb, false, 11, rgb(0xDC, 0xFC, 0xE7), HorizontalAlignment.LEFT);
             fail = base(wb, false, 11, rgb(0xFE, 0xE2, 0xE2), HorizontalAlignment.LEFT);
             notRun = base(wb, false, 11, rgb(0xF1, 0xF5, 0xF9), HorizontalAlignment.LEFT);
+            // Phần đầu và bảng tổng hợp giữ bố cục QLCT, độc lập với khối checkpoint.
+            profileTitle = base(wb, true, 13, null, HorizontalAlignment.CENTER);
+            referencePlain = base(wb, false, 11, null, HorizontalAlignment.GENERAL);
+            summarySection = base(wb, true, 11, rgb(0xEE, 0xF2, 0xFF), HorizontalAlignment.CENTER);
+            summaryTail = base(wb, false, 11, rgb(0xEE, 0xF2, 0xFF), HorizontalAlignment.GENERAL);
+            for (XSSFCellStyle caption : List.of(profileTitle, summarySection)) {
+                caption.setBorderTop(BorderStyle.NONE);
+                caption.setBorderRight(BorderStyle.NONE);
+                caption.setBorderBottom(BorderStyle.NONE);
+            }
+            summaryTail.setBorderLeft(BorderStyle.NONE);
+            summaryTail.setBorderTop(BorderStyle.NONE);
+            summaryTail.setBorderRight(BorderStyle.NONE);
+            summaryTail.setBorderBottom(BorderStyle.NONE);
+            summaryHead = base(wb, true, 11, null, HorizontalAlignment.CENTER);
+            summaryTotal = base(wb, true, 11, null, HorizontalAlignment.GENERAL);
+            summaryIndex = summaryIndex(wb, false);
+            summaryIndexHead = summaryIndex(wb, true);
+        }
+
+        private static XSSFCellStyle summaryIndex(XSSFWorkbook wb, boolean bold) {
+            XSSFCellStyle style = base(wb, bold, 11, null, HorizontalAlignment.CENTER);
+            XSSFFont font = wb.getFontAt(style.getFontIndex());
+            font.setFontName("Aptos Narrow");
+            font.setColor(bold ? org.apache.poi.ss.usermodel.IndexedColors.BLACK.getIndex()
+                    : org.apache.poi.ss.usermodel.IndexedColors.AUTOMATIC.getIndex());
+            style.setVerticalAlignment(VerticalAlignment.BOTTOM);
+            style.setWrapText(false);
+            return style;
         }
 
         private static XSSFColor rgb(int r, int g, int b) {
@@ -325,6 +437,7 @@ final class StudentReportArchiveBuilder {
                                           XSSFColor fill, HorizontalAlignment align) {
             XSSFCellStyle style = wb.createCellStyle();
             XSSFFont font = wb.createFont();
+            font.setFontName("Calibri");
             font.setBold(bold);
             font.setFontHeightInPoints((short) size);
             style.setFont(font);
@@ -343,34 +456,8 @@ final class StudentReportArchiveBuilder {
         }
     }
 
-    /**
-     * Nội dung feedback.txt của 1 SV — vẫn dùng cho nút "Sinh feedback" (ZIP .txt theo MSSV);
-     * hồ sơ phúc khảo KHÔNG còn kèm file này.
-     */
-    static String renderFeedbackText(ExamResult row) {
-        String cached = row.getFeedbackJson();
-        if (cached == null || cached.isBlank()) return "";
-        try {
-            JsonNode fb = MAPPER.readTree(cached);
-            StringBuilder sb = new StringBuilder();
-            sb.append("NHẬN XÉT BÀI LÀM — ").append(row.getStudentId()).append("\n");
-            String summary = fb.path("scoreSummary").asText("");
-            if (!summary.isBlank()) sb.append("Điểm: ").append(summary).append("\n");
-            sb.append("\n").append(fb.path("feedbackText").asText("")).append("\n");
-            if (fb.path("teacherReviewRequired").asBoolean(false)) {
-                sb.append("\n[Bot khuyến nghị giảng viên xem lại bài này]\n");
-                for (JsonNode reason : fb.path("reviewReasons")) {
-                    sb.append("  - ").append(reason.asText()).append("\n");
-                }
-            }
-            return sb.toString();
-        } catch (Exception broken) {
-            return cached;   // JSON lạ thì trả nguyên văn còn hơn nuốt mất
-        }
-    }
-
     // ── logs/grading.log ────────────────────────────────────────────
-    private String gradingLog(String examId, ExamResult row, JsonNode result, String resultJsonHash) {
+    private String gradingLog(String examId, ExamResult row, JsonNode result) {
         JsonNode grading = result.path("grading_result");
         StringBuilder sb = new StringBuilder();
         sb.append("=== GRADING LOG ===\n");
@@ -388,14 +475,12 @@ final class StudentReportArchiveBuilder {
         sb.append("Engine: ").append(grading.path("engine_version").asText("?"))
           .append(" | Schema: ").append(result.path("schema_version").asText("1")).append("\n");
 
-        // ĐỐI CHỨNG — hai chuỗi này là thứ duy nhất trong hồ sơ chứng minh được "bài nào đã được
-        // chấm" và "file kết quả có bị sửa sau khi phát hay không".
+        // Giữ dấu vân tay bài gốc trong log để phục vụ đối chứng khi phúc khảo.
         sb.append("\n--- Đối chứng ---\n");
         sb.append("SHA-256 bài nộp (.zip lúc chấm): ")
           .append(row.getSubmissionHash() == null ? "(không ghi được)" : row.getSubmissionHash()).append("\n");
-        sb.append("SHA-256 file kết quả kèm theo:   ").append(resultJsonHash).append("\n");
         sb.append("Đối chiếu: băm lại file .zip bài nộp lưu ở kho gốc, khớp chuỗi trên nghĩa là\n")
-          .append("đúng bản đã được chấm. Băm lại file .json cùng thư mục để kiểm tra toàn vẹn.\n");
+          .append("đúng bản đã được chấm.\n");
 
         if (row.getDiagnosticCode() != null && !row.getDiagnosticCode().isBlank()) {
             sb.append("Chẩn đoán: [").append(row.getDiagnosticCode())
@@ -477,22 +562,112 @@ final class StudentReportArchiveBuilder {
         return v == null ? "?" : v;
     }
 
-    /** 15.0 → "15", 3.75 giữ nguyên — trọng số hay mang .0 thừa. */
+    /** Giữ cả điểm rất nhỏ; chỉ bỏ số 0 thừa thay vì làm tròn mất trọng số. */
     private static String num(double v) {
-        return v == Math.rint(v) ? String.valueOf((long) v)
-                : String.format(java.util.Locale.ROOT, "%.2f", v).replaceAll("0+$", "");
+        return Double.isFinite(v) ? java.math.BigDecimal.valueOf(v).stripTrailingZeros().toPlainString()
+                : String.valueOf(v);
     }
 
-    /** SHA-256 dạng hex của nội dung file kết quả — băm ĐÚNG chuỗi được ghi vào zip. */
-    private static String sha256(String content) {
+    private static String groupKey(JsonNode tc) {
+        String id = tc.path("group_id").asText("");
+        String label = tc.path("group_name").asText("");
+        return id.isBlank() ? (label.isBlank() ? "KHAC" : label) : id;
+    }
+
+    private static String statusLabel(String status) {
+        return switch (status.toLowerCase(java.util.Locale.ROOT)) {
+            case "passed", "pass" -> "Passed";
+            case "failed", "fail" -> "Failed";
+            case "not_run", "not run" -> "Not run";
+            case "error" -> "Error";
+            case "skipped" -> "Skipped";
+            case "blocked" -> "Blocked";
+            case "pending" -> "Pending";
+            case "running" -> "Running";
+            default -> status.isBlank() ? "Unknown" : status;
+        };
+    }
+
+    private static final class DetailCheckpoint {
+        final JsonNode result;
+        String requires = "", reference;
+        DetailCheckpoint parent;
+
+        DetailCheckpoint(JsonNode result) { this.result = result; }
+    }
+
+    private List<DetailCheckpoint> detailCheckpoints(ExamResult row, JsonNode result) {
+        List<DetailCheckpoint> checkpoints = new ArrayList<>();
+        for (JsonNode tc : result.path("test_cases")) checkpoints.add(new DetailCheckpoint(tc));
+        Path testcase = testcaseDirFor.apply(row);
+        if (testcase == null) return checkpoints;
+        Map<String, JsonNode> cases = new HashMap<>();
+        Set<String> duplicateIds = new HashSet<>();
         try {
-            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
-                    .digest(content.getBytes(StandardCharsets.UTF_8));
-            StringBuilder hex = new StringBuilder(64);
-            for (byte b : digest) hex.append(String.format("%02x", b));
-            return hex.toString();
-        } catch (Exception e) {
-            return "(không tính được)";
+            JsonNode plan = MAPPER.readTree(Files.readString(testcase.resolve("behavior_plan.json"), StandardCharsets.UTF_8));
+            for (JsonNode item : plan.path("cases")) {
+                String id = planText(item, "test_id", "");
+                if (!id.isBlank() && cases.putIfAbsent(id, item) != null) duplicateIds.add(id);
+            }
+        } catch (Exception unavailable) {
+            return checkpoints;
         }
+        for (DetailCheckpoint checkpoint : checkpoints) {
+            String testId = planText(checkpoint.result, "test_id", "");
+            JsonNode item = duplicateIds.contains(testId) ? null : cases.get(testId);
+            if (item == null) continue;
+            checkpoint.requires = planText(item.path("checkpoint"), "requires", "");
+            if (checkpoint.requires.isBlank()) continue;
+            List<DetailCheckpoint> matches = new ArrayList<>();
+            for (DetailCheckpoint candidate : checkpoints) {
+                String candidateId = planText(candidate.result, "test_id", "");
+                JsonNode candidateCase = duplicateIds.contains(candidateId) ? null : cases.get(candidateId);
+                if (candidateCase == null) continue;
+                if (checkpoint.requires.equals(planText(candidateCase.path("checkpoint"), "id", candidateId))
+                        && sameExecution(item, candidateCase)) matches.add(candidate);
+            }
+            // Trùng định danh thì không đoán; sinh viên vẫn thấy tên tiên quyết gốc.
+            if (matches.size() == 1) checkpoint.parent = matches.get(0);
+        }
+        return checkpoints;
+    }
+
+    private static boolean sameExecution(JsonNode left, JsonNode right) {
+        String execution = planText(left, "execution_code", planText(left, "scenario_code", ""));
+        String otherExecution = planText(right, "execution_code", planText(right, "scenario_code", ""));
+        return !execution.isEmpty() && execution.equals(otherExecution);
+    }
+
+    /** Cùng quy tắc _text của engine: chuỗi rỗng sau trim phải dùng giá trị dự phòng. */
+    private static String planText(JsonNode item, String key, String fallback) {
+        String value = item.path(key).asText("").trim();
+        return value.isEmpty() ? fallback : value;
+    }
+
+    private static void orderCheckpoint(DetailCheckpoint checkpoint, String group,
+                                        Set<DetailCheckpoint> visited, List<DetailCheckpoint> ordered) {
+        if (!visited.add(checkpoint)) return;
+        if (checkpoint.parent != null && groupKey(checkpoint.parent.result).equals(group)) {
+            orderCheckpoint(checkpoint.parent, group, visited, ordered);
+        }
+        ordered.add(checkpoint);
+    }
+
+    private static boolean hasCycle(DetailCheckpoint checkpoint) {
+        Set<DetailCheckpoint> seen = new HashSet<>();
+        for (DetailCheckpoint cursor = checkpoint; cursor != null; cursor = cursor.parent) {
+            if (!seen.add(cursor)) return true;
+        }
+        return false;
+    }
+
+    private static int checkpointDepth(DetailCheckpoint checkpoint) {
+        if (hasCycle(checkpoint)) return 0;
+        int depth = 0;
+        for (DetailCheckpoint parent = checkpoint.parent; parent != null; parent = parent.parent) {
+            if (!groupKey(parent.result).equals(groupKey(checkpoint.result))) break;
+            depth++;
+        }
+        return Math.min(depth, 6);
     }
 }

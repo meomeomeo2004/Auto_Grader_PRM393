@@ -61,17 +61,15 @@ class StudentReportArchiveBuilderTest {
     }
 
     @Test
-    void buildsJsonXlsxAndLogWithoutFeedbackTxt(@TempDir Path tmp) throws Exception {
-        // Hồ sơ 2026-08-22: json + xlsx + logs. feedback.txt (bot NLP) đã bỏ hẳn.
-        byte[] archive = new StudentReportArchiveBuilder(s -> s, null, r -> tmp)
+    void buildsXlsxAndLogWithoutBundledJson(@TempDir Path tmp) throws Exception {
+        byte[] archive = new StudentReportArchiveBuilder(null, r -> tmp, null)
                 .build("PE_PRM393_FA26", List.of(row()));
 
         Map<String, byte[]> entries = readAll(archive);
         String home = "Result_of_PE_PRM393_FA26/HE180037/";
-        assertNotNull(entries.get(home + "HE180037.json"), "thiếu file JSON cá nhân");
+        assertTrue(entries.keySet().stream().noneMatch(name -> name.endsWith(".json")));
         assertNotNull(entries.get(home + "HE180037.xlsx"), "thiếu file Excel cá nhân");
         assertNotNull(entries.get(home + "logs/grading.log"), "thiếu logs/grading.log");
-        assertNull(entries.get(home + "feedback.txt"), "feedback.txt phải bị bỏ khỏi hồ sơ");
         assertNull(entries.get(home + "HE180037.xls"), "định dạng cũ .xls phải biến mất");
 
         // .xlsx thật (không phải HTML đội lốt): POI mở được, có bảng nhóm + chi tiết.
@@ -83,19 +81,24 @@ class StudentReportArchiveBuilderTest {
             // Nhóm Thêm: 1/2 đạt, 2/4 điểm — điểm lẻ nổi lên ở cấp nhóm, không ở từng dòng.
             assertTrue(text.contains("Thêm khoản chi") && text.contains("1/2") && text.contains("2/4"), text);
             assertTrue(text.contains("CHI TIẾT TIÊU CHÍ"));
-            assertTrue(text.contains("Trượt") && text.contains("Chưa chấm") && text.contains("Đạt"));
+            assertTrue(text.contains("Failed") && text.contains("Not run") && text.contains("Passed"));
+            assertTrue(text.contains("Check point"));
             assertTrue(text.contains("không thấy nút nào"), "quan sát của dòng trượt phải có mặt");
-            assertTrue(text.contains("a".repeat(64)), "SHA bài nộp phải nằm trong bảng tóm tắt");
+            assertFalse(text.contains("SHA-256") || text.contains("a".repeat(64)));
+            int details = findRow(sheet, "CHI TIẾT TIÊU CHÍ");
+            long groupNames = java.util.stream.StreamSupport.stream(sheet.spliterator(), false)
+                    .filter(line -> line.getRowNum() > details)
+                    .flatMap(line -> java.util.stream.StreamSupport.stream(line.spliterator(), false))
+                    .filter(c -> c.toString().equals("Thêm khoản chi")).count();
+            assertEquals(1, groupNames, "tên nhóm chỉ xuất hiện một lần trong chi tiết");
         }
 
         // Log giữ nguyên vai trò đối chứng.
         String log = new String(entries.get(home + "logs/grading.log"), StandardCharsets.UTF_8);
         assertTrue(log.contains("[FAILED] TC_02 (WIDGET_NOT_FOUND)"), log);
         assertTrue(log.contains("[NOT_RUN] TC_03"), log);
-        String expectedJsonHash = java.util.HexFormat.of().formatHex(
-                java.security.MessageDigest.getInstance("SHA-256")
-                        .digest(entries.get(home + "HE180037.json")));
-        assertTrue(log.contains(expectedJsonHash), "hash file kết quả không khớp nội dung thật");
+        assertTrue(log.contains("a".repeat(64)));
+        assertFalse(log.contains("file .json") || log.contains("file kết quả kèm theo"));
     }
 
     @Test
@@ -108,7 +111,7 @@ class StudentReportArchiveBuilderTest {
         Files.createDirectories(goldens);
         Files.write(goldens.resolve("L1__VP_1.png"), TINY_PNG);
 
-        byte[] archive = new StudentReportArchiveBuilder(s -> s, goldens, r -> evidence)
+        byte[] archive = new StudentReportArchiveBuilder(goldens, r -> evidence, null)
                 .build("PE_PRM393_FA26", List.of(row()));
         byte[] xlsx = readAll(archive).get("Result_of_PE_PRM393_FA26/HE180037/HE180037.xlsx");
 
@@ -132,7 +135,7 @@ class StudentReportArchiveBuilderTest {
         legacy.setResultJson(RESULT_JSON);
 
         Map<String, byte[]> entries = readAll(
-                new StudentReportArchiveBuilder(s -> s, null, r -> null).build("PE_OLD", List.of(legacy)));
+                new StudentReportArchiveBuilder(null, r -> null, null).build("PE_OLD", List.of(legacy)));
         String log = new String(entries.get("Result_of_PE_OLD/HE000009/logs/grading.log"), StandardCharsets.UTF_8);
         assertTrue(log.contains("(không ghi được)"));
         try (XSSFWorkbook wb = new XSSFWorkbook(
@@ -144,25 +147,172 @@ class StudentReportArchiveBuilderTest {
     }
 
     @Test
-    void rendersCachedBotFeedbackForTheSeparateExportButton() {
-        // renderFeedbackText vẫn phục vụ nút "Sinh feedback" riêng — không nằm trong hồ sơ.
-        ExamResult row = new ExamResult();
-        row.setStudentId("HE000001");
-        row.setFeedbackJson("""
-                {"studentId":"HE000001","scoreSummary":"7.0/10",
-                 "feedbackText":"Bài làm tốt phần CRUD, cần xem lại validate.",
-                 "teacherReviewRequired":true,"reviewReasons":["Điểm lệch giữa 2 lần chấm"]}
+    void linksHistoricalPrerequisitesWithActualStatusesAndKeepsZeroPointParents(@TempDir Path tmp) throws Exception {
+        Files.writeString(tmp.resolve("behavior_plan.json"), """
+                {"cases":[
+                  {"test_id":"TC_02","scenario_id":"ADD","execution_code":"ADD_VP1",
+                   "checkpoint":{"id":"child","requires":"boot"}},
+                  {"test_id":"TC_01","scenario_id":"ADD","execution_code":"ADD_VP1",
+                   "checkpoint":{"id":"boot"}},
+                  {"test_id":"TC_03","scenario_id":"DELETE","execution_code":"DELETE_VP1",
+                   "checkpoint":{"id":"del","requires":"missing"}},
+                  {"test_id":"TC_04","scenario_id":"ADD","execution_code":"ADD_VP1",
+                   "checkpoint":{"id":"edit","requires":"child"}}
+                ]}
                 """);
-        String feedback = StudentReportArchiveBuilder.renderFeedbackText(row);
-        assertTrue(feedback.contains("7.0/10"));
-        assertTrue(feedback.contains("cần xem lại validate"));
-        assertTrue(feedback.contains("Điểm lệch giữa 2 lần chấm"));
+        ExamResult student = row();
+        student.setResultJson(RESULT_JSON.replace("\"status\":\"passed\",\"max_score\":2",
+                "\"status\":\"passed\",\"max_score\":0"));
+        byte[] archive = new StudentReportArchiveBuilder(null, null, r -> tmp)
+                .build("PE_PRM393_FA26", List.of(student));
+        try (XSSFWorkbook wb = workbook(archive)) {
+            XSSFSheet sheet = wb.getSheetAt(0);
+            int parent = findRow(sheet, "App khởi động");
+            int child = findRow(sheet, "  Thêm sinh viên");
+            assertTrue(parent < child);
+            assertEquals("1.1", sheet.getRow(parent).getCell(0).toString());
+            assertEquals("0/0", sheet.getRow(parent).getCell(4).toString());
+            assertEquals("1.1 · Passed", sheet.getRow(child).getCell(2).toString());
+            assertEquals("'Ket qua'!B" + (parent + 1), sheet.getRow(child).getCell(2).getHyperlink().getAddress());
+            int otherGroup = findRow(sheet, "Sửa sinh viên");
+            assertEquals("1.2 · Failed · Thêm khoản chi", sheet.getRow(otherGroup).getCell(2).toString());
+            assertEquals("missing (unresolved)", sheet.getRow(findRow(sheet, "Xoá sinh viên")).getCell(2).toString());
+            assertEquals(4, java.util.stream.StreamSupport.stream(sheet.spliterator(), false)
+                    .filter(line -> line.getRowNum() > findRow(sheet, "CHI TIẾT TIÊU CHÍ"))
+                    .filter(line -> line.getCell(0) != null && line.getCell(0).toString().matches("\\d+\\.\\d+")).count());
+        }
+    }
+
+    @Test
+    void cyclesAmbiguousExecutionAndUnknownStatusesDoNotLoseRows(@TempDir Path tmp) throws Exception {
+        Files.writeString(tmp.resolve("behavior_plan.json"), """
+                {"cases":[
+                  {"test_id":"TC_01","execution_code":"A","checkpoint":{"id":"one","requires":"two"}},
+                  {"test_id":"TC_02","execution_code":"A","checkpoint":{"id":"two","requires":"one"}},
+                  {"test_id":"TC_03","execution_code":"B","checkpoint":{"id":"three","requires":"one"}},
+                  {"test_id":"TC_04","execution_code":"C","checkpoint":{"id":"one"}}
+                ]}
+                """);
+        ExamResult student = row();
+        student.setResultJson(RESULT_JSON.replace("\"status\":\"not_run\"", "\"status\":\"error\""));
+        try (XSSFWorkbook wb = workbook(new StudentReportArchiveBuilder(null, null, r -> tmp)
+                .build("PE_PRM393_FA26", List.of(student)))) {
+            XSSFSheet sheet = wb.getSheetAt(0);
+            assertTrue(sheetText(sheet).contains("(cycle)"));
+            int unrelated = findRow(sheet, "Xoá sinh viên");
+            assertEquals("Error", sheet.getRow(unrelated).getCell(3).toString());
+            assertEquals("one (unresolved)", sheet.getRow(unrelated).getCell(2).toString());
+            assertNull(sheet.getRow(unrelated).getCell(2).getHyperlink());
+            assertEquals(4, java.util.stream.StreamSupport.stream(sheet.spliterator(), false)
+                    .filter(line -> line.getRowNum() > findRow(sheet, "CHI TIẾT TIÊU CHÍ"))
+                    .filter(line -> line.getCell(0) != null && line.getCell(0).toString().matches("\\d+\\.\\d+")).count());
+        }
+    }
+
+    private static XSSFWorkbook workbook(byte[] archive) throws Exception {
+        return new XSSFWorkbook(new ByteArrayInputStream(readAll(archive)
+                .get("Result_of_PE_PRM393_FA26/HE180037/HE180037.xlsx")));
+    }
+
+    @Test
+    void matchesReferenceProfileAndFourColumnSummaryWithoutChangingDetailLayout() throws Exception {
+        ExamResult student = row();
+        student.setStudentName("Nguyễn Văn An");
+        student.setResultJson(RESULT_JSON.replace("không thấy nút nào", "first\\nsecond\\nthird"));
+        try (XSSFWorkbook wb = workbook(new StudentReportArchiveBuilder(null, null, null)
+                .build("PE_PRM393_FA26", List.of(student)))) {
+            XSSFSheet sheet = wb.getSheetAt(0);
+            assertEquals(14.5f, sheet.getDefaultRowHeightInPoints());
+            int[] widths = {5, 26, 40, 12, 12, 60};
+            for (int col = 0; col < widths.length; col++) assertEquals(widths[col] * 256, sheet.getColumnWidth(col));
+            assertTrue(sheet.getMergedRegions().stream().anyMatch(region -> region.formatAsString().equals("A1:C1")));
+            assertEquals(org.apache.poi.ss.usermodel.HorizontalAlignment.CENTER, sheet.getRow(0).getCell(0).getCellStyle().getAlignment());
+            assertEquals("Calibri", sheet.getRow(0).getCell(0).getCellStyle().getFont().getFontName());
+            assertEquals(13, sheet.getRow(0).getCell(0).getCellStyle().getFont().getFontHeightInPoints());
+            for (int line = 1; line <= 6; line++) {
+                assertEquals(14.5f, sheet.getRow(line).getHeightInPoints());
+                assertEquals(org.apache.poi.ss.usermodel.HorizontalAlignment.CENTER, sheet.getRow(line).getCell(0).getCellStyle().getAlignment());
+                int current = line;
+                assertFalse(sheet.getMergedRegions().stream().anyMatch(region -> region.isInRange(current, 2)));
+            }
+            int score = findRow(sheet, "Điểm");
+            assertEquals("6.5", sheet.getRow(score).getCell(2).toString());
+            int summary = findRow(sheet, "ĐIỂM THEO NHÓM TIÊU CHÍ");
+            assertTrue(sheet.getMergedRegions().stream().anyMatch(region -> region.getFirstRow() == summary
+                    && region.getFirstColumn() == 0 && region.getLastColumn() == 2));
+            assertEquals(org.apache.poi.ss.usermodel.BorderStyle.NONE, sheet.getRow(summary).getCell(0).getCellStyle().getBorderTop());
+            assertEquals("FFEEF2FF", sheet.getRow(summary).getCell(3).getCellStyle().getFillForegroundXSSFColor().getARGBHex());
+            var head = sheet.getRow(summary + 1);
+            assertEquals(List.of("STT", "Nhóm", "Check point", "Điểm"),
+                    java.util.stream.IntStream.range(0, 4).mapToObj(col -> head.getCell(col).toString()).toList());
+            assertEquals("Aptos Narrow", head.getCell(0).getCellStyle().getFont().getFontName());
+            assertEquals(org.apache.poi.ss.usermodel.FillPatternType.NO_FILL, head.getCell(1).getCellStyle().getFillPattern());
+            var first = sheet.getRow(summary + 2);
+            assertEquals(1, first.getCell(0).getNumericCellValue());
+            assertEquals("Thêm khoản chi", first.getCell(1).toString());
+            assertEquals("1/2", first.getCell(2).toString());
+            assertEquals("2/4", first.getCell(3).toString());
+            assertNull(first.getCell(4));
+            assertEquals(14.5f, first.getHeightInPoints());
+            int total = findRow(sheet, "TỔNG");
+            assertEquals(org.apache.poi.ss.usermodel.BorderStyle.THIN, sheet.getRow(total).getCell(0).getCellStyle().getBorderLeft());
+            assertEquals("4/8", sheet.getRow(total).getCell(2).toString());
+            assertTrue(sheet.getMergedRegions().stream().anyMatch(region -> region.getFirstRow() == total
+                    && region.getFirstColumn() == 2 && region.getLastColumn() == 3));
+            int details = findRow(sheet, "CHI TIẾT TIÊU CHÍ");
+            assertEquals(List.of("Check point", "Prerequisite", "Status", "Score", "Observation"),
+                    java.util.stream.IntStream.range(1, 6).mapToObj(col -> sheet.getRow(details + 1).getCell(col).toString()).toList());
+            int band = details + 2;
+            assertTrue(sheet.getMergedRegions().stream().anyMatch(region -> region.getFirstRow() == band
+                    && region.getFirstColumn() == 1 && region.getLastColumn() == 5));
+            assertEquals("1.1", sheet.getRow(band + 1).getCell(0).toString());
+            assertEquals(43.5f, sheet.getRow(findRow(sheet, "Thêm sinh viên")).getHeightInPoints());
+            for (var line : sheet) if (line.getRowNum() >= details) {
+                assertEquals(0f, line.getHeightInPoints() % 14.5f);
+                for (var cell : line) {
+                    assertEquals("Calibri", wb.getFontAt(cell.getCellStyle().getFontIndex()).getFontName());
+                    assertEquals(11, wb.getFontAt(cell.getCellStyle().getFontIndex()).getFontHeightInPoints());
+                }
+            }
+        }
+    }
+
+    @Test
+    void matchesEngineFallbackScopeAndPreservesTinyScores(@TempDir Path tmp) throws Exception {
+        Files.writeString(tmp.resolve("behavior_plan.json"), """
+                {"cases":[
+                  {"test_id":"TC_01","execution_code":"  ","scenario_code":" LEGACY ",
+                   "scenario_id":"irrelevant-one","checkpoint":{"id":"  "}},
+                  {"test_id":"TC_02","execution_code":" LEGACY ","scenario_code":"other",
+                   "scenario_id":"irrelevant-two","checkpoint":{"id":" child ","requires":" TC_01 "}},
+                  {"test_id":"TC_03","scenario_code":" DIFFERENT ","scenario_id":"irrelevant-two",
+                   "checkpoint":{"id":"delete","requires":" child "}}
+                ]}
+                """);
+        ExamResult student = row();
+        student.setResultJson(RESULT_JSON.replace("\"max_score\":2", "\"max_score\":0.001"));
+        try (XSSFWorkbook wb = workbook(new StudentReportArchiveBuilder(null, null, r -> tmp)
+                .build("PE_PRM393_FA26", List.of(student)))) {
+            XSSFSheet sheet = wb.getSheetAt(0);
+            int parent = findRow(sheet, "App khởi động");
+            assertEquals("0.001/0.001", sheet.getRow(parent).getCell(4).toString());
+            int child = findRow(sheet, "  Thêm sinh viên");
+            assertEquals("1.1 · Passed", sheet.getRow(child).getCell(2).toString());
+            assertEquals("child (unresolved)", sheet.getRow(findRow(sheet, "Xoá sinh viên")).getCell(2).toString());
+        }
     }
 
     private static String sheetText(XSSFSheet sheet) {
         StringBuilder sb = new StringBuilder();
         sheet.forEach(row -> row.forEach(cell -> sb.append(cell.toString()).append('\n')));
         return sb.toString();
+    }
+
+    private static int findRow(XSSFSheet sheet, String text) {
+        for (var line : sheet) for (var cell : line) {
+            if (cell.toString().equals(text)) return line.getRowNum();
+        }
+        throw new AssertionError("Không thấy: " + text);
     }
 
     private static Map<String, byte[]> readAll(byte[] archive) throws Exception {

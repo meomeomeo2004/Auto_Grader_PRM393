@@ -46,7 +46,8 @@ public class GoldenRuntimeService {
     // gửi kèm định danh để HIỆN (v20 đổi target sang định danh, làm tiêu chí thôi kiểm nội
     // dung) · v20: locator duy nhất + chốt giá trị nhập theo ranh giới thao tác · v4: quét
     // thành phần CHỈ trong flutter-view.
-    private static final String RECORDER_BRIDGE_VERSION = "responsive-rects-v27";
+    // v28: nạp DB ẩn vào tên dò từ Golden, bỏ tên app.db cố định; đổi version để rebuild cache cũ.
+    private static final String RECORDER_BRIDGE_VERSION = "detected-database-v28";
 
     @Value("${grader.base-image:grading-base:latest}")
     private String baseImage;
@@ -203,7 +204,17 @@ public class GoldenRuntimeService {
         Files.createDirectories(target);
         copyTree(source.resolve("lib"), target.resolve("lib"));
         normalizeInternalPackageImports(source, target.resolve("lib"));
-        writeRecorderEntry(target.resolve("lib"));
+        String contractJson = suite(suiteId).getDatabaseContractJson();
+        var contract = mapper.readTree(contractJson == null || contractJson.isBlank() ? "{}" : contractJson);
+        // Bộ cũ có thể chỉ khai path; engine ưu tiên nó, web dùng phần tên file cùng hợp đồng.
+        String databaseName = contract.path("path").asText("").replace('\\', '/');
+        if (!databaseName.isBlank()) databaseName = databaseName.substring(databaseName.lastIndexOf('/') + 1);
+        if (databaseName.isBlank()) databaseName = contract.path("database_name").asText("");
+        if (databaseName.isBlank()) databaseName = contract.path("name").asText("");
+        if (!databaseName.matches("[-A-Za-z0-9_.]+[.]db")) {
+            throw new IllegalArgumentException("Chưa xác định được tên database hợp lệ. Hãy tải lại ZIP Golden.");
+        }
+        writeRecorderEntry(target.resolve("lib"), databaseName);
         if (Files.isDirectory(source.resolve("assets"))) copyTree(source.resolve("assets"), target.resolve("assets"));
         // hidden.db vào assets của bản web: recorder entry nạp nó vào SQLite web TRƯỚC khi
         // app chạy — đúng cách engine chấm reset database rồi mới boot. Nhờ vậy người soạn
@@ -329,7 +340,7 @@ public class GoldenRuntimeService {
      * trước khi chạy {@code main()} của Golden Solution. Sinh tệp bằng Java thay vì bằng shell
      * để không phụ thuộc cách dash/bash xử lý dấu nháy lồng nhau.
      */
-    private void writeRecorderEntry(Path lib) throws Exception {
+    private void writeRecorderEntry(Path lib, String databaseName) throws Exception {
         Files.createDirectories(lib);
         Files.writeString(lib.resolve("_recorder_entry.dart"), """
                 // Tệp do hệ thống sinh cho phiên ghi thao tác — không có trong bài nộp sinh viên.
@@ -378,7 +389,7 @@ public class GoldenRuntimeService {
                     sqflite_common.databaseFactory = sqflite_web.databaseFactoryFfiWebNoWebWorker;
                     final ByteData bytes = await rootBundle.load('assets/grader_hidden.db');
                     await sqflite_common.databaseFactory.writeDatabaseBytes(
-                      'app.db',
+                      '{{DATABASE_NAME}}',
                       bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
                     );
                   } catch (e) {
@@ -388,7 +399,8 @@ public class GoldenRuntimeService {
                   }
                   golden_app.main();
                 }
-                """.replace("{{VERSION}}", RECORDER_BRIDGE_VERSION), StandardCharsets.UTF_8);
+                """.replace("{{VERSION}}", RECORDER_BRIDGE_VERSION)
+                        .replace("{{DATABASE_NAME}}", databaseName), StandardCharsets.UTF_8);
     }
 
     private void injectRecorderBridge(Path index) throws Exception {

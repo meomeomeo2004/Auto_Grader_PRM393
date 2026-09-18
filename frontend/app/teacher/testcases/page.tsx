@@ -239,10 +239,10 @@ export default function QuanLyBoTestcasePage() {
               <FileArchive size={18} />
             </div>
             <div>
-              <h2 className="text-sm font-bold text-slate-800">Bộ testcase trên máy này</h2>
+              <h2 className="text-sm font-bold text-slate-800">Danh sách bộ testcase</h2>
             </div>
           </div>
-          <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-500 ring-1 ring-slate-200">
+          <span className="rounded-full bg-blue px-3 py-1 text-xs font-semibold text-slate-500 ring-1 ring-slate-200">
             {ds.length} bộ
           </span>
         </div>
@@ -263,12 +263,12 @@ export default function QuanLyBoTestcasePage() {
           <div className="overflow-x-auto">
             <table className="w-full min-w-[680px] text-sm">
               <thead>
-                <tr className="border-b border-slate-100 bg-slate-50/40 text-left text-xs font-bold uppercase tracking-wider text-slate-500">
-                  <th className="px-6 py-3">Mã bộ</th>
-                  <th className="px-6 py-3">Trạng thái</th>
-                  <th className="px-6 py-3 text-right">Bài đã chấm</th>
-                  <th className="px-6 py-3">Nhận lúc</th>
-                  <th className="px-6 py-3 text-right">Xóa</th>
+                <tr className="border-b border-slate-100 bg-slate-50/40 text-center text-xs font-bold uppercase tracking-wider text-slate-500">
+                  <th className="w-[35%] px-6 py-3 text-center">Mã bộ</th>
+                  <th className="w-[20%] px-6 py-3 text-center">Trạng thái</th>
+                  <th className="w-[20%] px-6 py-3 text-center">Bài đã chấm</th>
+                  <th className="w-[25%] px-6 py-3 text-center">Thời gian Upload</th>
+                  <th className="w-[10%] px-6 py-3 text-center"></th>
                 </tr>
               </thead>
               <tbody>
@@ -276,8 +276,8 @@ export default function QuanLyBoTestcasePage() {
                   const tt = nhanTrangThai(b);
                   return (
                     <tr key={b.examId} className="border-b border-slate-50 transition-colors last:border-0 hover:bg-slate-50/60">
-                      <td className="px-6 py-4">
-                        <div className="flex items-center gap-3">
+                      <td className="px-6 py-4 text-center">
+                        <div className="flex items-center justify-center gap-3">
                           <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-indigo-50 font-mono text-[11px] font-bold text-indigo-600">
                             {b.examId.slice(0, 2).toUpperCase()}
                           </span>
@@ -289,18 +289,18 @@ export default function QuanLyBoTestcasePage() {
                           </div>
                         </div>
                       </td>
-                      <td className="px-6 py-4">
+                      <td className="px-6 py-4 text-center">
                         <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold ${TONE_CHIP[tt.tone]}`}>
                           {tt.tone === "emerald" ? <CheckCircle2 size={13} /> : <ShieldAlert size={13} />}
                           {tt.text}
                         </span>
-                        {tt.moTa && <p className="mt-1 max-w-xs text-xs leading-relaxed text-slate-400">{tt.moTa}</p>}
+                        {tt.moTa && <p className="mx-auto mt-1 max-w-xs text-xs leading-relaxed text-slate-400">{tt.moTa}</p>}
                       </td>
-                      <td className="px-6 py-4 text-right font-mono text-sm font-semibold text-slate-600">
+                      <td className="px-6 py-4 text-center font-mono text-sm font-semibold text-slate-600">
                         {b.resultCount ?? 0}
                       </td>
-                      <td className="px-6 py-4 text-xs text-slate-500">{gioVN(b.createdAt)}</td>
-                      <td className="px-6 py-4 text-right">
+                      <td className="px-6 py-4 text-center text-xs text-slate-500">{gioVN(b.createdAt)}</td>
+                      <td className="px-6 py-4 text-center">
                         <button
                           type="button"
                           onClick={() => { setDinhXoa(b); setGoXacNhan(""); setLoiXoa(null); }}

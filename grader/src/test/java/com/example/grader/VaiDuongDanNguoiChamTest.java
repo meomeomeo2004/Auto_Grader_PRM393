@@ -1,17 +1,27 @@
 package com.example.grader;
 
+import com.example.grader.controller.ResultController;
+import com.example.grader.entity.ExamResult;
+import com.example.grader.entity.GradingOutcome;
+import com.example.grader.entity.GradingStatus;
+import com.example.grader.repository.ExamResultRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 
 import java.util.Set;
+import java.util.List;
+import java.util.Map;
 
 import static com.example.grader.VaiDuongDan.coNhom;
 import static com.example.grader.VaiDuongDan.cua;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
 /**
  * Bản người chấm phục vụ đúng những đường nào.
@@ -26,6 +36,38 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class VaiDuongDanNguoiChamTest {
 
     @Autowired RequestMappingHandlerMapping mapping;
+    @Autowired ExamResultRepository results;
+    @Autowired ResultController controller;
+
+    @Test
+    @Transactional
+    void lichSuVanDocDuocDiemMayVaDiemTayQuaProjection() {
+        ExamResult row = new ExamResult();
+        row.setStudentId("HE_HISTORY");
+        row.setExamId("PE_HISTORY_PROJECTION");
+        row.setStatus(GradingStatus.DONE);
+        row.setScore(6.5f);
+        row.setManualScore(8f);
+        row.setPreviousScore(5f);
+        row.setResultJson("{}");
+        row.setManualJson("{\"criteria\":[{\"points\":2,\"maxPoints\":2},{\"points\":1,\"maxPoints\":2}]}");
+        results.saveAndFlush(row);
+
+        List<?> history = assertInstanceOf(List.class, controller.getExamHistory(row.getExamId()).getBody());
+        assertEquals(1, history.size());
+        Map<?, ?> entry = assertInstanceOf(Map.class, history.get(0));
+        assertEquals("HE_HISTORY", entry.get("studentId"));
+        assertEquals(6.5f, entry.get("score"));
+        assertEquals(8f, entry.get("manualScore"));
+        assertEquals(5f, entry.get("previousScore"));
+        assertEquals(GradingOutcome.SCORED, entry.get("outcome"));
+        assertEquals(true, entry.get("hasJson"));
+        assertEquals(1, entry.get("manualPass"));
+        assertEquals(2, entry.get("manualTotal"));
+        assertFalse(entry.containsKey("resultJson"));
+        assertFalse(entry.containsKey("manualJson"));
+        assertFalse(entry.containsKey("hasFeedback"));
+    }
 
     @Test
     void chiCoPhanChamBaiVaMoiTruongCham() {
@@ -33,7 +75,10 @@ class VaiDuongDanNguoiChamTest {
 
         assertTrue(coNhom(co, "/api/batch"), "phải có chấm bài");
         assertTrue(coNhom(co, "/api/results"), "phải có kết quả chấm");
-        assertTrue(coNhom(co, "/api/feedback"), "phải có nhận xét AI");
+        assertFalse(coNhom(co, "/api/feedback"), "đã bỏ hệ thống nhận xét AI");
+        assertFalse(co.contains("/api/results/exam/{examId}/grading-sheet"), "đã bỏ phiếu chấm tay");
+        assertFalse(co.contains("/api/batch/submission/{examId}/{studentId}/files"), "đã bỏ xem file bài nộp");
+        assertFalse(co.contains("/api/batch/testcase/{examId}/{studentId}/files"), "đã bỏ xem file testcase");
         assertTrue(coNhom(co, "/api/grading-runtime"), "phải có cấu hình hiệu năng");
         assertTrue(coNhom(co, "/api/grading-env"), "Thư viện chấm là của chung, phải có");
         assertTrue(co.contains("/api/statistics/exams"),

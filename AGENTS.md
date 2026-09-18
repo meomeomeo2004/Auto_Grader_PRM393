@@ -45,7 +45,6 @@ dot-source nó. Đừng khai lại cổng ở chỗ khác.
 | `BatchController` | nc | `/api/batch` |
 | `ResultController` | nc | `/api/results` |
 | `GradingRuntimeController` | nc | `/api/grading-runtime` |
-| `FeedbackController` | nc | `/api/feedback` |
 | `ExamCatalogController` | *(cả hai)* | `/api/exam-setup` |
 | `GradingEnvController` | *(cả hai)* | `/api/grading-env` |
 

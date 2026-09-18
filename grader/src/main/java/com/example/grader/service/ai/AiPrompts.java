@@ -36,7 +36,7 @@ final class AiPrompts {
      * Điểm số KHÔNG còn khai trong đề — trọng số cấu hình riêng ở UI Behavior Authoring (scenario/
      * checkpoint), khai trùng hai nơi dễ lệch nhau.
      */
-    static String draftSystem(String databaseName, List<String> allowedPackages) {
+    static String draftSystem(String databaseName, List<String> imagePackages) {
         return """
                Bạn là giảng viên ra đề thi thực hành môn PRM393 (Flutter/Dart) của FPT University.
                Viết đề theo ĐÚNG khuôn "ĐỀ THI THỰC HÀNH" của bộ môn: tiếng Việt, mỗi hợp đồng là
@@ -59,11 +59,13 @@ final class AiPrompts {
                Thời gian: <thời lượng> · Điểm: 100
 
                ## 1. Môi trường làm bài và nộp bài
-               (CỐ ĐỊNH — chép gần như nguyên văn, chỉ đổi PACKAGES cho khớp đề này:
+               (CỐ ĐỊNH — chép gần như nguyên văn:
                 "Làm bài bằng Android Studio, chạy thử trên máy ảo Android. Không cần chạy trên
                 trình duyệt hay trên Windows."; "Nộp thư mục `lib/` của dự án, nén thành một file
                 .zip."; "Mọi thứ khác (pubspec, android, test, build…) sẽ bị bỏ qua khi chấm — hệ
-                thống dùng bộ thư viện chuẩn giống nhau cho mọi bài."; rồi liệt kê PACKAGES)
+                thống dùng bộ thư viện chuẩn giống nhau cho mọi bài.";
+                "Không được thêm package hoặc import package ngoài khung phát; vi phạm là 0 điểm.")
+               Thân đề KHÔNG liệt kê danh sách package, ở mục 1 hay bất kỳ mục nào khác.
                ## 2. Hợp đồng dữ liệu (BẮT BUỘC ĐÚNG TỪNG CHỮ)
                (Tên database DB_NAME_INLINE_TOKEN; câu lệnh CREATE TABLE IF NOT EXISTS đầy đủ tên
                 bảng/cột/kiểu dữ liệu, suy từ thực thể giáo viên mô tả; danh sách mã cố định — enum/
@@ -107,18 +109,37 @@ final class AiPrompts {
                  thành hai, và không được thêm màn nào ngoài danh sách.
                - Mỗi định danh trong bảng mục 3 phải DUY NHẤT trong toàn đề — không trùng giữa hai
                  màn hình khác nhau.
-               - Chỉ dùng CÁC PACKAGE SAU khi mô tả yêu cầu kỹ thuật (không gợi ý package khác):
-                 PACKAGES
-
                DB_NAME_HINT_TOKEN
                """
-                .replace("PACKAGES", String.join(", ", allowedPackages))
                 .replace("DB_NAME_INLINE_TOKEN", databaseName == null || databaseName.isBlank()
                         ? "<đặt một tên hợp lý, ví dụ app.db>" : "`" + databaseName + "`")
                 .replace("DB_NAME_HINT_TOKEN", databaseName == null || databaseName.isBlank()
                         ? "Đề này chưa khai tên file database ở Bước 1 — bạn tự chọn một tên hợp lý "
                           + "và ghi rõ trong \"summary\" để giáo viên khai lại đúng tên đó."
-                        : "Tên file database dùng đúng: " + databaseName + ".");
+                        : "Tên file database dùng đúng: " + databaseName + ".")
+                + packageReference(imagePackages);
+    }
+
+    static String packageReference(List<String> imagePackages) {
+        return """
+
+               PHẠM VI THƯ VIỆN CỦA ẢNH CHẤM — KHÔNG CHÉP DANH SÁCH NÀY VÀO THÂN ĐỀ:
+               Package đọc được từ ảnh chấm: IMAGE_TOKEN.
+               Danh sách này chỉ để nhận ra yêu cầu cần thêm thư viện, không quyết định nội dung
+               đề. AI được phép gợi ý package NGOÀI ảnh chấm khi yêu cầu của giảng viên cần nó.
+               Khi cần package ngoài ảnh, đặt ghi chú ở dòng đầu tiên của de_bai_markdown,
+               TRƯỚC tiêu đề đề thi, theo mẫu:
+               [CẦN BỔ SUNG THƯ VIỆN] <tên package>: <lý do cần cho yêu cầu của giảng viên>.
+               Có nhiều package thì ghi đủ tên và lý do cho từng gói trong ghi chú đầu đề.
+               Không đẩy cảnh báo này vào summary thay cho đầu đề. Giảng viên tự quyết định
+               có cần thêm gói hay không. Nếu chưa đọc được ảnh, nói rõ chưa thể xác nhận
+               package được đề xuất trong ghi chú đầu đề; không khẳng định ảnh đang thiếu gói.
+               Từ tiêu đề đề thi trở xuống, tuyệt đối không nhắc tên thư viện nào, kể cả khi
+               giảng viên ghi tên thư viện trong yêu cầu lưu trữ. Mô tả bằng hành vi người dùng
+               và hợp đồng dữ liệu. Các API Flutter lõi như Semantics, InputDecoration vẫn dùng
+               bình thường. Không tự thêm chức năng ngoài yêu cầu của giảng viên.
+               Mục 1 chỉ có câu cấm thêm package/import ngoài khung phát, vi phạm là 0 điểm.
+               """.replace("IMAGE_TOKEN", imagePackages.isEmpty() ? "chưa đọc được ảnh" : String.join(", ", imagePackages));
     }
 
     static String draftUser(Map<String, Object> req) {
@@ -153,6 +174,10 @@ final class AiPrompts {
                hình · 4. Chức năng phải làm · 5. Tự kiểm trước khi nộp). Mục 3 vẫn phải giữ định
                dạng bảng | Thành phần | Cách đặt | Giá trị bắt buộc | Định danh | và mỗi định danh
                vẫn phải duy nhất trong toàn đề. Đề KHÔNG có bảng điểm — điểm cấu hình riêng ở UI.
+               Nếu đề cũ có danh sách package thì bỏ danh sách đó; chỉ giữ câu cấm thêm package
+               hoặc import package ngoài khung phát, vi phạm là 0 điểm. Không in danh sách package
+               trong bất kỳ mục nào của thân đề. Ghi chú đầu đề cho giảng viên được xử lý theo
+               phạm vi thư viện ảnh chấm bên dưới.
                """;
     }
 

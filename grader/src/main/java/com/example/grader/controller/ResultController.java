@@ -53,40 +53,6 @@ public class ResultController {
 
     private final ObjectMapper mapper = new ObjectMapper();
 
-    /**
-     * Phiếu chấm tay in được — render trực tiếp từ skills_matrix.json mà máy đang dùng
-     * để chấm đề này, nên không bao giờ lệch ma trận (bài học phiếu 17 dòng bị trôi).
-     */
-    @GetMapping("/exam/{examId}/grading-sheet")
-    public ResponseEntity<?> gradingSheet(@PathVariable String examId) {
-        var exam = examRepo.findByExamId(examId).orElse(null);
-        if (exam == null) {
-            return ResponseEntity.status(404).body(Map.of("error", "Không tìm thấy đề " + examId));
-        }
-        String testcasePath = exam.getTestcasePath();
-        if (testcasePath == null || testcasePath.isBlank()) {
-            return ResponseEntity.status(404)
-                    .body(Map.of("error", "Đề chưa publish bộ chấm nên chưa có ma trận tiêu chí"));
-        }
-        java.nio.file.Path matrixPath = java.nio.file.Path.of(testcasePath).resolve("skills_matrix.json");
-        if (!java.nio.file.Files.isRegularFile(matrixPath)) {
-            return ResponseEntity.status(404)
-                    .body(Map.of("error", "Không thấy skills_matrix.json của đề " + examId));
-        }
-        try {
-            JsonNode matrix = mapper.readTree(
-                    java.nio.file.Files.readString(matrixPath, StandardCharsets.UTF_8));
-            String html = GradingSheetBuilder.render(
-                    examId, exam.getExamName(), exam.getTestcaseVersion(), matrix);
-            return ResponseEntity.ok()
-                    .contentType(MediaType.parseMediaType("text/html; charset=UTF-8"))
-                    .body(html);
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError()
-                    .body(Map.of("error", "Không dựng được phiếu chấm tay: " + e.getMessage()));
-        }
-    }
-
     // /search đã bỏ cùng ô tìm kiếm trên thanh tiêu đề — nó không có người gọi nào khác.
 
     /** Chi tiết 1 bài cho trang chấm tay: result_json (test_cases) + điểm tự động + điểm tay đã lưu. */
@@ -167,8 +133,6 @@ public class ResultController {
             m.put("diagnosticStage", r.diagnosticStage());
             m.put("requiresManualReview", r.requiresManualReview());
             m.put("hasJson", Boolean.TRUE.equals(r.hasJson()));
-            // Nút feedback trên trang Lịch sử: đã có nhận xét cache → "xem", chưa có → "sinh".
-            m.put("hasFeedback", Boolean.TRUE.equals(r.hasFeedback()));
             // Số tiêu chí ĐẠT sau chấm tay — để trang Lịch sử hiện "pass mới" cạnh "pass cũ".
             // Đếm tại đây rồi bỏ manualJson, không phát hành nguyên văn breakdown ra API này.
             int[] manualPass = manualPassCounts(r.manualJson());
@@ -275,7 +239,7 @@ public class ResultController {
     }
 
     /**
-     * HỒ SƠ PHÁT CHO SINH VIÊN: Result_of_&lt;đề&gt;/&lt;MSSV&gt;/{json, xlsx có ảnh đối chứng, logs/}.
+     * HỒ SƠ PHÁT CHO SINH VIÊN: Result_of_&lt;đề&gt;/&lt;MSSV&gt;/{xlsx có ảnh đối chứng, logs/}.
      * Chỉ bài đã chấm xong; xem {@link StudentReportArchiveBuilder} cho cấu trúc và lý do từng file.
      */
     @GetMapping(value = "/exam/{examId}/report-package", produces = "application/zip")
@@ -291,10 +255,12 @@ public class ResultController {
                     .map(path -> java.nio.file.Path.of(path).resolve("fixtures").resolve("screens"))
                     .orElse(null);
             java.nio.file.Path submissionsRoot = examService.resolveSibling(submissionsDir).resolve(examId);
-            byte[] archive = new StudentReportArchiveBuilder(this::pretty, goldenScreens,
+            byte[] archive = new StudentReportArchiveBuilder(goldenScreens,
                     row -> row.getBatchId() == null ? null
                             : submissionsRoot.resolve(row.getBatchId())
-                                    .resolve("_evidence").resolve(row.getStudentId()))
+                                    .resolve("_evidence").resolve(row.getStudentId()),
+                    row -> row.getBatchId() == null ? null
+                            : submissionsRoot.resolve(row.getBatchId()).resolve("_testcase"))
                     .build(examId, rows);
             String downloadName = "Result_of_" + safeArchivePart(examId) + ".zip";
             return ResponseEntity.ok()

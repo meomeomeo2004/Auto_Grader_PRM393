@@ -23,6 +23,8 @@ import {
   Image as ImageIcon,
 } from "lucide-react";
 
+const LAST_EXAM_DRAFT_KEY = "grader_exam_authoring_last_draft";
+
 interface AuthoredExam { exam_id: string; title: string; updated_at: string }
 interface Mockup { id: string; title: string; svg: string }
 
@@ -36,6 +38,7 @@ function ExamAuthoringEditor() {
   const [loadingList, setLoadingList] = useState(false);
 
   const [examId, setExamId] = useState("");
+  const [draftReady, setDraftReady] = useState(false);
   const [source, setSource] = useState<"ai" | "upload">("ai");
   const [importedName, setImportedName] = useState("");
   const [req, setReq] = useState({
@@ -65,6 +68,10 @@ function ExamAuthoringEditor() {
   }, []);
 
   useEffect(() => { loadAuthored(); }, [loadAuthored]);
+
+  const restoreDraft = (state: Record<string, unknown> | undefined) => {
+    if (state?.req) setReq((cur) => ({ ...cur, ...(state.req as object) }));
+  };
 
   const call = async <T,>(path: string, body: unknown, label: string): Promise<T | null> => {
     setBusy(label); setError(null); setInfo(null);
@@ -99,7 +106,7 @@ function ExamAuthoringEditor() {
 
   /** Mở lại một đề đã soạn: nạp de_bai.md + (nếu có) bản nháp form đã lưu trên server. */
   const openExam = async (id: string) => {
-    setError(""); setBusy("open");
+    setError(""); setBusy("open"); setDraftReady(false);
     try {
       const res = await fetch(`${API_BASE}/exam-setup/${encodeURIComponent(id)}/handout`);
       const data = await res.json();
@@ -109,13 +116,17 @@ function ExamAuthoringEditor() {
       setSummary("");
       setExamAccepted(true);
       setMockups(Array.isArray(data.mockups) ? data.mockups : []);
-      const draft = (await fetchAiDraftFromServer(API_BASE, id)) || readAiDraft(id);
-      if (draft?.state?.req) setReq((cur) => ({ ...cur, ...(draft.state.req as object) }));
+      const serverDraft = await fetchAiDraftFromServer(API_BASE, id);
+      const localDraft = readAiDraft(id);
+      // Mở lại đề ngay sau khi sửa có thể diễn ra trước lượt lưu server 800ms.
+      const draft = localDraft && (!serverDraft || localDraft.updatedAt >= serverDraft.updatedAt)
+        ? localDraft : serverDraft;
+      restoreDraft(draft?.state);
       setInfo(`Đã mở đề ${id}.`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Không mở được đề này.");
     } finally {
-      setBusy(null);
+      setBusy(null); setDraftReady(true);
     }
   };
 
@@ -124,19 +135,38 @@ function ExamAuthoringEditor() {
   useEffect(() => {
     const id = searchParams.get("examId");
     if (id) void openExam(id);
+    else {
+      let active = true;
+      let lastId = DRAFT_NO_EXAM;
+      try { lastId = localStorage.getItem(LAST_EXAM_DRAFT_KEY) || DRAFT_NO_EXAM; } catch { /* Trình duyệt có thể khóa lưu cục bộ. */ }
+      void fetchAiDraftFromServer(API_BASE, lastId).then((serverDraft) => {
+        if (!active) return;
+        const localDraft = readAiDraft(lastId);
+        // Người dùng có thể chuyển trang trước 800ms gửi server; bản cục bộ mới hơn phải thắng.
+        const draft = localDraft && (!serverDraft || localDraft.updatedAt >= serverDraft.updatedAt)
+          ? localDraft : serverDraft;
+        if (draft) {
+          setExamId(typeof draft.state.exam_id === "string" ? draft.state.exam_id : lastId === DRAFT_NO_EXAM ? "" : lastId);
+          restoreDraft(draft.state);
+        } else restoreDraft(readAiDraft(DRAFT_NO_EXAM)?.state);
+        setDraftReady(true);
+      });
+      return () => { active = false; };
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Ghi nháp form (chỉ req — de_bai đã có endpoint lưu riêng) mỗi khi đổi, hoãn 800ms.
+  // Lưu cục bộ ngay khi đổi để chuyển trang không mất mã/nội dung đang soạn;
+  // chỉ gửi server sau 800ms để không tạo request theo từng phím gõ.
   useEffect(() => {
+    if (!draftReady || busy === "open") return;
     const id = examId.trim() || DRAFT_NO_EXAM;
-    const timer = setTimeout(() => {
-      const state = { req };
-      writeAiDraft(id, state);
-      pushAiDraftToServer(API_BASE, id, state);
-    }, 800);
+    const state = { req, exam_id: examId };
+    writeAiDraft(id, state);
+    try { localStorage.setItem(LAST_EXAM_DRAFT_KEY, id); } catch { /* Mất lưu cục bộ vẫn có nháp server. */ }
+    const timer = setTimeout(() => { pushAiDraftToServer(API_BASE, id, state); }, 800);
     return () => clearTimeout(timer);
-  }, [examId, req]);
+  }, [examId, req, draftReady, busy]);
 
   const importExam = async (file: File) => {
     setBusy("import"); setError(null); setInfo(null);

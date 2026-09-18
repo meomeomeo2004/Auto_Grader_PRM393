@@ -189,7 +189,7 @@ class BanGiaoServiceTest {
         when(kho.findByExamId("DE_X")).thenReturn(Optional.of(exam));
         BehaviorSuiteRepository suites = mock(BehaviorSuiteRepository.class);
         when(suites.findByExamIdOrderByUpdatedAtDesc("DE_X")).thenReturn(new ArrayList<>());
-        return new StarterSyncService(kho, suites, mock(BehaviorArtifactService.class));
+        return new StarterSyncService(kho, suites, mock(BehaviorArtifactService.class), mock(ExamService.class));
     }
 
     private void datToKhai(String goldenSha) throws Exception {

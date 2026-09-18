@@ -1,5 +1,7 @@
 package com.example.grader.service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.example.grader.entity.BehaviorArtifact;
 import com.example.grader.entity.BehaviorArtifactType;
 import com.example.grader.entity.BehaviorSuite;
@@ -41,7 +43,7 @@ import java.util.stream.Stream;
  *   <li>Cấu trúc bảng database — sinh viên xây trên một schema, máy chấm đọc một schema khác.</li>
  *   <li>Danh sách định danh — lệch một chuỗi là mọi bước tìm theo định danh trượt.</li>
  *   <li>Tên file trong assets — tiêu chí ảnh so đúng tên asset.</li>
- *   <li>Danh sách package — khung cho phép gói mà ảnh chấm không có thì bài nộp không biên dịch.</li>
+ *   <li>Package và ràng buộc phiên bản — Golden phải dùng đúng bộ gói phát cho sinh viên.</li>
  * </ul>
  *
  * <p>Vì sao so MÃ NGUỒN chứ không chạy thật: khung phát chỉ là bộ khung, ứng dụng của nó không
@@ -54,6 +56,8 @@ public class StarterSyncService {
     private static final Logger log = LoggerFactory.getLogger(StarterSyncService.class);
     private static final int MAX_ZIP_ENTRIES = 20_000;
     private static final long MAX_UNCOMPRESSED_BYTES = 300L * 1024 * 1024;
+    private static final ObjectMapper DEPENDENCY_JSON = new ObjectMapper()
+            .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
 
     /** Trạng thái của một đề trước cửa chấm. */
     public static final String MIEN_TRU = "EXEMPT";
@@ -64,13 +68,16 @@ public class StarterSyncService {
     private final ExamRepository exams;
     private final BehaviorSuiteRepository suites;
     private final BehaviorArtifactService artifacts;
+    private final ExamService examFiles;
 
     public StarterSyncService(ExamRepository exams,
                               BehaviorSuiteRepository suites,
-                              BehaviorArtifactService artifacts) {
+                              BehaviorArtifactService artifacts,
+                              ExamService examFiles) {
         this.exams = exams;
         this.suites = suites;
         this.artifacts = artifacts;
+        this.examFiles = examFiles;
     }
 
     // ==================== TRẠNG THÁI ====================
@@ -91,7 +98,22 @@ public class StarterSyncService {
         if (daKiem == null || daKiem.isBlank()) return CHUA_KIEM;
         String hienTai = shaGoldenHienTai(examId);
         if (hienTai == null) return CHUA_KIEM;
-        return daKiem.equals(hienTai) ? DAT : HET_HAN;
+        if (!daKiem.equals(hienTai)) return HET_HAN;
+        // Ảnh có thể đổi phiên bản mà Golden không đổi: khung tải hôm nay cũng phải còn khớp.
+        for (BehaviorSuite suite : suites.findByExamIdOrderByUpdatedAtDesc(examId)) {
+            Optional<BehaviorArtifact> golden = artifacts.activeOptional(suite.getId(), BehaviorArtifactType.GOLDEN_SOLUTION);
+            if (golden.isPresent()) {
+                try {
+                    return PubspecDependencies.readZip(Path.of(golden.get().getStoragePath()))
+                            .equals(examFiles.starterDependencies(examId)) ? DAT : HET_HAN;
+                } catch (Exception e) {
+                    log.warn("Không xác nhận được package khung phát của {}: {}", examId, e.getMessage());
+                    return HET_HAN;
+                }
+            }
+        }
+        // Bản người chấm không giữ Golden hay khung phát; vẫn dùng dấu đã nhận trong gói.
+        return DAT;
     }
 
     public boolean chamDuoc(String examId) {
@@ -186,9 +208,16 @@ public class StarterSyncService {
             phepKiem.add(soSanh("Tên file trong assets",
                     tenAsset(golden), tenAsset(khung),
                     "Tiêu chí ảnh so đúng tên asset."));
-            phepKiem.add(soSanh("Danh sách package",
+            Map<String, Object> packageCheck = soSanh("Danh sách package",
                     goiPhuThuoc(golden), goiPhuThuoc(khung),
-                    "Khung cho phép gói mà ảnh chấm không có thì bài nộp không biên dịch được."));
+                    "Golden phải khai cùng package và ràng buộc phiên bản với khung phát.");
+            Map<String, Object> currentDependencies = examFiles.starterDependencies(examId);
+            if (!PubspecDependencies.read(khung).equals(currentDependencies)) {
+                packageCheck.put("passed", false);
+                packageCheck.put("detail", "Khung tải lên không khớp lựa chọn/package hiện tại. "
+                        + "Tải lại khung phát từ hệ thống rồi kiểm lại. " + packageCheck.get("detail"));
+            }
+            phepKiem.add(packageCheck);
 
             boolean dat = phepKiem.stream().allMatch(p -> Boolean.TRUE.equals(p.get("passed")));
             if (dat) {
@@ -211,6 +240,12 @@ public class StarterSyncService {
             ra.put("checks", phepKiem);
             ra.put("checked_at", exam.getStarterCheckedAt());
             return ra;
+        } catch (Exception e) {
+            // Thiếu/hỏng pubspec là không kiểm được, không được giữ dấu đạt của lần trước.
+            exam.setStarterCheckedGoldenSha(null);
+            exam.setStarterCheckedAt(null);
+            exams.save(exam);
+            throw e;
         } finally {
             xoaSach(lamViec);
         }
@@ -335,22 +370,12 @@ public class StarterSyncService {
         }
     }
 
-    /** Tên các package khai ở khối dependencies của pubspec (bỏ qua dev_dependencies). */
+    /** Package kèm khai báo gốc; bỏ qua dev_dependencies và phiên bản resolve trong lock. */
     List<String> goiPhuThuoc(Path duAn) throws Exception {
-        Path pubspec = duAn.resolve("pubspec.yaml");
-        if (!Files.isRegularFile(pubspec)) return List.of();
         List<String> ra = new ArrayList<>();
-        boolean trongKhoi = false;
-        Pattern ten = Pattern.compile("^ {2}([A-Za-z0-9_]+)\\s*:");
-        for (String tho : Files.readAllLines(pubspec, StandardCharsets.UTF_8)) {
-            String dong = tho.replace("\t", "  ");
-            if (dong.isBlank() || dong.trim().startsWith("#")) continue;
-            if (!dong.startsWith(" ")) {
-                trongKhoi = dong.split(":")[0].trim().equals("dependencies");
-                continue;
-            }
-            Matcher m = ten.matcher(dong);
-            if (trongKhoi && m.find()) ra.add(m.group(1));
+        for (Map.Entry<String, Object> dependency : PubspecDependencies.read(duAn).entrySet()) {
+            // JSON giữ ranh giới giá trị và chuẩn hoá thứ tự khóa của khai báo sdk/git/hosted.
+            ra.add(dependency.getKey() + ": " + DEPENDENCY_JSON.writeValueAsString(dependency.getValue()));
         }
         ra.sort(Comparator.naturalOrder());
         return ra;

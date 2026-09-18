@@ -36,7 +36,94 @@ class BehaviorSuiteMaterializerTest {
         // Suite test không có ảnh chuẩn — trả thư mục không tồn tại để writeBundle bỏ qua.
         when(artifacts.goldenScreenshotDir(anyString()))
                 .thenReturn(tempDir.resolve("golden-screens-missing"));
+        mockGoldenPubspec(artifacts);
         return new BehaviorSuiteMaterializer(authoring, artifacts, staticRules, exams);
+    }
+
+    private void mockGoldenPubspec(BehaviorArtifactService artifacts) {
+        Path golden = tempDir.resolve("golden-packages.zip");
+        assertDoesNotThrow(() -> {
+            try (var zip = new java.util.zip.ZipOutputStream(Files.newOutputStream(golden))) {
+                zip.putNextEntry(new java.util.zip.ZipEntry("lib/main.dart"));
+                zip.write("void main() {}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                zip.closeEntry();
+                zip.putNextEntry(new java.util.zip.ZipEntry("pubspec.yaml"));
+                zip.write("dependencies:\n  flutter: {sdk: flutter}\n  path: ^1.9.0\ndev_dependencies:\n  flutter_lints: ^4.0.0\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                zip.closeEntry();
+            }
+        });
+        BehaviorArtifact goldenArtifact = new BehaviorArtifact();
+        goldenArtifact.setStoragePath(golden.toString());
+        when(artifacts.active(anyString(), eq(BehaviorArtifactType.GOLDEN_SOLUTION))).thenReturn(goldenArtifact);
+    }
+
+    @Test
+    void preservesZeroPointCheckpointAndFullScoreOfPaidCheckpoint() throws Exception {
+        BehaviorAuthoringService authoring = mock(BehaviorAuthoringService.class);
+        BehaviorArtifactService artifacts = mock(BehaviorArtifactService.class);
+        ExamRepository exams = mock(ExamRepository.class);
+        BehaviorSuiteMaterializer materializer = newMaterializer(authoring, artifacts, exams);
+        Map<String, Object> scenario = Map.of(
+                "scenario_code", "ZERO_SCORE", "name", "Checkpoint không tính điểm", "weight", 2.0,
+                "steps", List.of(Map.of("action", "boot")),
+                "checkpoints", List.of(
+                        Map.of("id", "PREREQUISITE", "kind", "checkpoint", "weight", 0.0),
+                        Map.of("id", "PAID", "kind", "checkpoint", "weight", 2.0,
+                                "requires", "PREREQUISITE")));
+        when(authoring.previewExecutionPlan("suite-zero")).thenReturn(Map.of(
+                "suite", Map.of("id", "suite-zero", "suite_code", "ZERO"),
+                "scenarios", List.of(scenario)));
+
+        Map<String, Object> preview = materializer.previewCode("suite-zero", null);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> files = (List<Map<String, Object>>) preview.get("files");
+        String content = files.stream().filter(file -> "skills_matrix.json".equals(file.get("name")))
+                .findFirst().orElseThrow().get("content").toString();
+        JsonNode matrix = new ObjectMapper().readTree(content);
+        assertEquals(0.0, matrix.path("ZERO_ZERO_SCORE_PREREQUISITE").path("weight").asDouble(), 0.0);
+        assertEquals(2.0, matrix.path("ZERO_ZERO_SCORE_PAID").path("weight").asDouble(), 0.0);
+        assertEquals(2, matrix.size(), "Checkpoint 0 điểm vẫn phải được thực thi để kiểm tiên quyết");
+    }
+
+    @Test
+    void preservesFreelyEnteredDecimalScoresWithoutRoundingThemToZero() throws Exception {
+        BehaviorAuthoringService authoring = mock(BehaviorAuthoringService.class);
+        BehaviorArtifactService artifacts = mock(BehaviorArtifactService.class);
+        BehaviorSuiteMaterializer materializer = newMaterializer(authoring, artifacts, mock(ExamRepository.class));
+        for (double score : List.of(0.0000001, 0.1234567)) {
+            when(authoring.previewExecutionPlan("suite-decimal")).thenReturn(Map.of(
+                    "suite", Map.of("id", "suite-decimal", "suite_code", "DECIMAL"),
+                    "scenarios", List.of(Map.of(
+                            "scenario_code", "TEST", "name", "Điểm thập phân", "weight", score,
+                            "steps", List.of(Map.of("action", "boot")),
+                            "checkpoints", List.of(Map.of("id", "PAID", "kind", "checkpoint", "weight", score))))));
+            Map<String, Object> preview = materializer.previewCode("suite-decimal", null);
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> files = (List<Map<String, Object>>) preview.get("files");
+            String content = files.stream().filter(file -> "skills_matrix.json".equals(file.get("name")))
+                    .findFirst().orElseThrow().get("content").toString();
+            JsonNode matrix = new ObjectMapper().readTree(content);
+            assertEquals(score, matrix.path("DECIMAL_TEST_PAID").path("weight").asDouble(), 0.0);
+        }
+    }
+
+    @Test
+    void rejectsFunctionWithoutValidPositiveCheckpointTotal() {
+        BehaviorAuthoringService authoring = mock(BehaviorAuthoringService.class);
+        BehaviorSuiteMaterializer materializer = newMaterializer(authoring,
+                mock(BehaviorArtifactService.class), mock(ExamRepository.class));
+        for (List<Map<String, Object>> checkpoints : List.of(
+                List.<Map<String, Object>>of(Map.of("id", "ONLY", "kind", "checkpoint", "weight", 0.0)),
+                List.<Map<String, Object>>of(
+                        Map.of("id", "FIRST", "kind", "checkpoint", "weight", 1e308),
+                        Map.of("id", "SECOND", "kind", "checkpoint", "weight", 1e308)))) {
+            when(authoring.previewExecutionPlan("suite-zero")).thenReturn(Map.of(
+                "suite", Map.of("id", "suite-zero", "suite_code", "ZERO"),
+                "scenarios", List.of(Map.of(
+                        "scenario_code", "TEST", "weight", 2.0,
+                        "checkpoints", checkpoints))));
+            assertThrows(IllegalArgumentException.class, () -> materializer.previewCode("suite-zero", null));
+        }
     }
 
     @Test
@@ -96,6 +183,9 @@ class BehaviorSuiteMaterializerTest {
 
         assertEquals(true, result.get("ready_for_grading"));
         Path output = tempDir.resolve("RAR_USER_EXAM").resolve("testcase");
+        JsonNode contract = new ObjectMapper().readTree(output.resolve("contract.json").toFile());
+        assertEquals(List.of("flutter", "path"), new ObjectMapper().convertValue(contract.get("allowed_packages"), List.class),
+                "Policy phải đọc dependencies của Golden, không đọc mặc định/runtime hay dev_dependencies");
         for (String file : List.of("exam_test.dart", "grader.dart", "behavior_plan.json",
                 "skills_matrix.json", "contract.json", "suite_manifest.json")) {
             assertTrue(Files.exists(output.resolve(file)), file + " phải được sinh");
@@ -384,7 +474,8 @@ class BehaviorSuiteMaterializerTest {
                 && String.valueOf(file.get("content")).contains("void main()")));
         assertTrue(files.stream().anyMatch(file -> "skills_matrix.json".equals(file.get("name"))
                 && String.valueOf(file.get("content")).contains("FIELD_EMAIL")));
-        verifyNoInteractions(artifacts, exams);
+        verify(artifacts).active("suite-1", BehaviorArtifactType.GOLDEN_SOLUTION);
+        verifyNoInteractions(exams);
     }
 
     @Test
@@ -410,6 +501,7 @@ class BehaviorSuiteMaterializerTest {
                 .thenReturn(tempDir.resolve("golden-screens-missing"));
         BehaviorSuiteMaterializer materializer =
                 new BehaviorSuiteMaterializer(authoring, artifacts, staticRules, exams);
+        mockGoldenPubspec(artifacts);
         ReflectionTestUtils.setField(materializer, "templateDir", Path.of("..", "grader-base").toString());
         ReflectionTestUtils.setField(materializer, "examsDir", tempDir.toString());
 
