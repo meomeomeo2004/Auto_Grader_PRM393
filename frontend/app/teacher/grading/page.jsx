@@ -228,10 +228,18 @@ export default function AutomaticGradingPage() {
       .then((r) => (r.ok ? r.json() : []))
       .then((data) => {
         if (cancelled) return;
+        // Mang theo cả lý do KHÔNG chấm được. Không lọc bộ hỏng ra khỏi danh sách: biến mất
+        // thì người dùng đi tìm "bộ của tôi đâu rồi", còn để đó kèm lý do thì họ biết phải
+        // sửa gì. Cổng chặn thật nằm ở backend, đây chỉ là nói trước cho đỡ mất công.
         const options = Array.isArray(data)
           ? data
               .filter((e) => e?.examId)
-              .map((e) => ({ examId: String(e.examId), examName: e.examName || String(e.examId) }))
+              .map((e) => ({
+                examId: String(e.examId),
+                examName: e.examName || String(e.examId),
+                thieuGoi: Array.isArray(e.thieuGoi) ? e.thieuGoi : [],
+                gradable: e.gradable !== false,
+              }))
           : [];
         setExamOptions(options);
       })
@@ -725,8 +733,15 @@ export default function AutomaticGradingPage() {
                   options={examOptions.map((e) => ({
                     value: e.examId,
                     label: e.examId,
-                    sublabel: e.examName !== e.examId ? e.examName : undefined,
+                    sublabel: !e.gradable
+                      ? (e.thieuGoi.length > 0
+                          ? `Chưa chấm được — Thư viện chấm thiếu ${e.thieuGoi.join(", ")}`
+                          : "Chưa chấm được — bộ chưa đủ dữ kiện")
+                      : e.examName !== e.examId ? e.examName : undefined,
                     badge: e.examId.slice(0, 2).toUpperCase(),
+                    // Bộ chưa chấm được thì KHÔNG chọn được, nhưng vẫn hiện kèm lý do: ẩn đi
+                    // thì người dùng đi tìm "bộ của tôi đâu", để đó thì họ biết phải sửa gì.
+                    disabled: !e.gradable,
                   }))}
                   value={examId}
                   onChange={setExamId}

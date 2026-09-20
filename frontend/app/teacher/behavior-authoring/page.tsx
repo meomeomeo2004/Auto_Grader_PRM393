@@ -76,6 +76,7 @@ interface GoldenApp { id: string; name: string; runtime_url?: string | null; sta
 interface Suite { id: string; suite_code: string; exam_id?: string; golden_app_id: string; name: string; status: string; database_contract?: JsonMap; runtime_config?: JsonMap; recordings?: Recording[]; scenarios?: JsonMap[] }
 interface Recording { id: string; suite_id: string; name: string; status: string; revision_scenario_id?: string | null; raw_trace?: JsonMap[]; initial_state?: JsonMap }
 interface Artifact { id: string; type: ArtifactType; version: number; file_name: string; size_bytes: number; active: boolean; sha256: string }
+interface MissingPackageSpec { name: string; version: string }
 interface Readiness { ready: boolean; missing: ArtifactType[]; artifacts: Partial<Record<ArtifactType, Artifact | null>> }
 interface GoldenValidation { status: "NOT_RUN" | "RUNNING" | "PASSED" | "FAILED" | "UNAVAILABLE"; current: boolean; total_checkpoints?: number; passed_checkpoints?: number; log?: string }
 interface RuntimeStatus { status: string; runtime_url?: string | null; runtime_path?: string | null; available?: boolean; cached?: boolean; message?: string; metadata?: JsonMap }
@@ -648,8 +649,20 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const failure = new Error(String(data.error || `HTTP ${response.status}`)) as Error & { missingPackages?: string[] };
-    if (Array.isArray(data.missing_packages)) failure.missingPackages = data.missing_packages.map(String);
+    const failure = new Error(String(data.error || `HTTP ${response.status}`)) as Error & { missingPackages?: MissingPackageSpec[] };
+    if (Array.isArray(data.missing_package_specs)) {
+      failure.missingPackages = data.missing_package_specs.flatMap((item: unknown) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+        const spec = item as Record<string, unknown>;
+        return typeof spec.name === "string"
+          ? [{ name: spec.name, version: typeof spec.version === "string" ? spec.version : "" }]
+          : [];
+      });
+    }
+    // Backend đời cũ chỉ trả tên; giữ fallback để giao diện vẫn dẫn đúng package.
+    if (!failure.missingPackages?.length && Array.isArray(data.missing_packages)) {
+      failure.missingPackages = data.missing_packages.map((name: unknown) => ({ name: String(name), version: "" }));
+    }
     throw failure;
   }
   return data as T;
@@ -741,9 +754,7 @@ function BehaviorAuthoringEditor() {
   // KIỂM ĐỒNG BỘ KHUNG PHÁT. Khung được bóc ra từ Golden sau cùng, nên nó rất dễ tụt lại
   // phía sau; lệch schema hay lệch định danh làm hỏng cả lớp mà không khâu nào khác thấy.
   const [deDaPublish, setDeDaPublish] = useState<JsonMap[]>([]);
-  const [deKiem, setDeKiem] = useState("");
   const [deGiao, setDeGiao] = useState("");
-  const [ketQuaDongBo, setKetQuaDongBo] = useState<JsonMap | null>(null);
   // parseCheckpointLog đã lọc sẵn dòng trượt, nên đây là danh sách CHƯA ĐẠT chứ không phải toàn bộ.
   const checkpointFails = useMemo(() => parseCheckpointLog(validation?.log), [validation?.log]);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
@@ -751,7 +762,7 @@ function BehaviorAuthoringEditor() {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [missingGoldenPackages, setMissingGoldenPackages] = useState<string[]>([]);
+  const [missingGoldenPackages, setMissingGoldenPackages] = useState<MissingPackageSpec[]>([]);
   const [action, setAction] = useState("tap");
   const [locator, setLocator] = useState("semanticId");
   const [locatorValue, setLocatorValue] = useState("");
@@ -869,6 +880,9 @@ function BehaviorAuthoringEditor() {
   // liệt kê được chúng (không nhãn thì không thành một dòng tick), mà đúng chúng mới là
   // đích của tiêu chí bố cục.
   const [dinhDanhTrenMan, setDinhDanhTrenMan] = useState<string[]>([]);
+  /** Lệch định danh backend trả về ngay lúc tải Golden lên. Ở lại tới lần tải sau chứ không
+   *  phải toast: đây là việc phải sửa, mà sửa xong mới tải lại được. */
+  const [canhBaoDinhDanh, setCanhBaoDinhDanh] = useState<string[]>([]);
   // KHÔNG điền sẵn: mã/tên luồng là danh tính của tiêu chí trong bảng điểm,
   // để mặc định thì mọi bộ chấm đều đầy "MAIN_FLOW/Luồng chính" vô nghĩa.
   const [scenarioCode, setScenarioCode] = useState("");
@@ -1166,14 +1180,24 @@ function BehaviorAuthoringEditor() {
     run(`upload-${type}`, async () => {
       const form = new FormData();
       form.append("file", file);
+      let ketQua: JsonMap = {};
       try {
-        await api(`/behavior-authoring/suites/${suite.id}/artifacts/${type}`, { method: "POST", body: form });
+        ketQua = await api<JsonMap>(`/behavior-authoring/suites/${suite.id}/artifacts/${type}`, { method: "POST", body: form });
       } catch (caught) {
-        const missing = (caught as Error & { missingPackages?: string[] }).missingPackages;
+        const missing = (caught as Error & { missingPackages?: MissingPackageSpec[] }).missingPackages;
         if (type === "GOLDEN_SOLUTION" && missing?.length) setMissingGoldenPackages(missing);
         throw caught;
       }
       await refresh(suite.id);
+      if (type === "GOLDEN_SOLUTION") {
+        const canhBao = Array.isArray(ketQua?.canh_bao_dinh_danh)
+          ? (ketQua.canh_bao_dinh_danh as string[]) : [];
+        setCanhBaoDinhDanh(canhBao);
+        if (canhBao.length) {
+          setNotice(`Đã lưu ${file.name}, nhưng định danh còn ${canhBao.length} chỗ lệch — xem cảnh báo dưới ô Golden Solution.`);
+          return;
+        }
+      }
       setNotice(`Đã lưu ${file.name} thành version mới của ${type}.`);
     });
   };
@@ -1403,6 +1427,24 @@ function BehaviorAuthoringEditor() {
     return [...ra].filter(Boolean).sort();
   }, [uiInventory, dinhDanhTrenMan]);
 
+  /**
+   * Định danh gõ vào mà màn Golden đang mở KHÔNG có. Gần như luôn là gõ sai một chữ, mà sai
+   * một chữ thì phải tới lượt Kiểm Golden mới lộ — lúc đó câu lỗi chỉ nói "không tìm thấy",
+   * không nói là do chính tả.
+   *
+   * CHỈ cảnh báo, KHÔNG chặn: ảnh chụp định danh là của MÀN ĐANG MỞ (lệnh snapshot_identifiers),
+   * nên đích nằm trong hộp thoại chưa bật hay ở màn chưa vào vẫn hợp lệ dù chưa thấy. Chặn cứng
+   * là chặn luôn việc đúng.
+   */
+  const dinhDanhLa = (gt: string) => {
+    const v = gt.trim();
+    return v.length > 0 && dinhDanhDaThay.length > 0 && !dinhDanhDaThay.includes(v);
+  };
+  const vienDinhDanh = (gt: string) =>
+    dinhDanhLa(gt) ? "border-amber-500 ring-1 ring-amber-400" : "border-slate-300 dark:border-slate-700";
+  const NHAC_DINH_DANH_LA = "Chưa thấy định danh này trên màn Golden đang mở — kiểm lại chính tả, "
+    + "hoặc mở tới màn có nó rồi bấm “Đọc lại định danh”.";
+
   /** Đổi loại thì nạp sẵn giá trị mặc định, để ô đang hiện trên màn cũng là ô sẽ gửi đi. */
   const doiLoaiCh7 = (ma: string) => {
     setCh7Kind(ma);
@@ -1574,7 +1616,7 @@ function BehaviorAuthoringEditor() {
     return ra;
   };
 
-  // Danh sách đề đã publish testcase, để chọn đề cần kiểm đồng bộ.
+  // Danh sách đề đã publish testcase, để chọn đề cần bàn giao.
   useEffect(() => {
     fetch(`${API_BASE}/exam-setup/list`)
       .then((r) => (r.ok ? r.json() : []))
@@ -1582,54 +1624,61 @@ function BehaviorAuthoringEditor() {
         const loc = (Array.isArray(ds) ? ds : []).filter(
           (d: JsonMap) => String(d.testcaseStatus || "") === "PUBLISHED");
         setDeDaPublish(loc);
-        setDeKiem((truoc) => truoc || String(loc[0]?.examId || ""));
         setDeGiao((truoc) => truoc || String(loc[0]?.examId || ""));
       })
       .catch(() => setDeDaPublish([]));
   }, []);
 
-  const kiemDongBoKhung = (tep: File) => {
-    if (!deKiem) { setError("Chưa chọn đề để kiểm."); return; }
-    run("kiem-dong-bo", async () => {
-      const form = new FormData();
-      form.append("file", tep);
-      const ra = await api<JsonMap>(
-        `/exam-setup/${encodeURIComponent(deKiem)}/starter-check`,
-        { method: "POST", body: form });
-      setKetQuaDongBo(ra);
-      if (ra.passed) {
-        setNotice(`Khung phát khớp Golden của đề ${deKiem}. Đề đã mở ở phần chấm.`);
-      } else {
-        setError(`Khung phát chưa khớp Golden của đề ${deKiem} — xem chi tiết bên dưới. Đề chưa mở ở phần chấm.`);
-      }
-    });
+  /** Trình duyệt không cho gọi thẳng "lưu file", phải mượn một thẻ <a> ẩn. */
+  const taiBlob = (blob: Blob, ten: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = ten;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const tepTuApi = async (duong: string) => {
+    const res = await fetch(`${API_BASE}${duong}`);
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({} as JsonMap));
+      throw new Error(String(d.error || `HTTP ${res.status}`));
+    }
+    return res.blob();
   };
 
   /**
-   * GIAO BỘ CHẤM cho người chấm: tải về một gói .zip rồi gửi cho họ bằng cách nào tuỳ bạn.
+   * GIAO BỘ CHẤM: tải về HAI file trong một lần bấm — gói cho người chấm và khung phát cho sinh viên.
    *
-   * Máy chủ từ chối nếu đề chưa qua kiểm đồng bộ khung phát — bên người chấm không có Golden
-   * nên sang tới đó thì không ai kiểm được nữa, và cũng không ai sửa được.
+   * Sinh cùng lúc là cố ý: khung phát dựng từ chính Golden đang xuất, nên hai thứ chắc chắn ra từ
+   * một bản Golden. Tách thành hai lần bấm là mở lại đúng cái cửa sổ để chúng trôi khỏi nhau.
+   *
+   * Hai file riêng chứ không lồng vào nhau: cửa nạp bên người chấm đòi các file testcase nằm ở
+   * GỐC zip, bọc thêm một lớp là gãy.
    */
   const xuatGoiBanGiao = () => {
     if (!deGiao) { setError("Chưa chọn đề để giao."); return; }
     run("xuat-goi", async () => {
-      const res = await fetch(`${API_BASE}/exam-setup/${encodeURIComponent(deGiao)}/xuat-goi`);
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({} as JsonMap));
-        throw new Error(String(d.error || `HTTP ${res.status}`));
-      }
-      const blob = await res.blob();
-      // Trình duyệt không cho gọi thẳng "lưu file", phải mượn một thẻ <a> ẩn.
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `bo-cham-${deGiao}.zip`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-      setNotice(`Đã tải gói bàn giao của đề ${deGiao}. Bên người chấm nạp gói này ở màn Chấm tự động.`);
+      const truoc = await fetch(
+        `${API_BASE}/exam-setup/${encodeURIComponent(deGiao)}/khung-phat/trang-thai`,
+      ).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+
+      taiBlob(await tepTuApi(`/exam-setup/${encodeURIComponent(deGiao)}/xuat-goi`),
+        `bo-cham-${deGiao}.zip`);
+      taiBlob(await tepTuApi(`/exam-setup/${encodeURIComponent(deGiao)}/khung-phat`),
+        `khung-phat-${deGiao}.zip`);
+
+      setNotice(
+        `Đã tải 2 file của đề ${deGiao}: bo-cham-${deGiao}.zip gửi người chấm, `
+        + `khung-phat-${deGiao}.zip phát cho sinh viên.`
+        + (truoc?.lech
+          ? " ⚠ Golden đã đổi so với lần xuất trước — khung phát cũ sinh viên đang cầm KHÔNG còn"
+            + " khớp bộ dùng để chấm, nhớ phát lại khung mới."
+          : ""),
+      );
     });
   };
 
@@ -2413,7 +2462,7 @@ function BehaviorAuthoringEditor() {
           <div className={`fixed bottom-6 left-1/2 z-50 flex max-w-[min(92vw,44rem)] -translate-x-1/2 items-start gap-3 rounded-xl border px-4 py-3 shadow-xl ${error ? "border-rose-300 bg-rose-50 text-rose-700 dark:border-rose-700 dark:bg-rose-950 dark:text-rose-200" : "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-700 dark:bg-emerald-950 dark:text-emerald-200"}`} role="alert">
             {error ? <XCircle size={20} className="mt-0.5 shrink-0" /> : <CheckCircle2 size={20} className="mt-0.5 shrink-0" />}
             <div className="min-w-0 font-medium">{error || notice}
-              {error && missingGoldenPackages.length > 0 && <a className="mt-2 block underline underline-offset-2" href={`/teacher/libraries?packages=${encodeURIComponent(missingGoldenPackages.join(","))}`}>Mở Thư viện chấm để thêm {missingGoldenPackages.join(", ")}</a>}
+              {error && missingGoldenPackages.length > 0 && <a className="mt-2 block underline underline-offset-2" href={`/teacher/libraries?package_specs=${encodeURIComponent(JSON.stringify(missingGoldenPackages))}`}>Mở Thư viện chấm để thêm {missingGoldenPackages.map((item) => item.name).join(", ")}</a>}
             </div>
             <button onClick={() => { setError(""); setNotice(""); setMissingGoldenPackages([]); }} aria-label="Đóng thông báo" className="ml-1 shrink-0 rounded-md p-1 hover:bg-black/5 dark:hover:bg-white/10"><XCircle size={15} /></button>
           </div>,
@@ -2483,46 +2532,6 @@ function BehaviorAuthoringEditor() {
             </div>
             <div className="grid items-start gap-5 lg:grid-cols-2">
               <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
-                <p className="text-sm font-bold">Kiểm đồng bộ khung phát cho sinh viên</p>
-                <p className="mt-2 text-sm leading-relaxed text-slate-500">
-                  Kiểm tra cấu trúc database, định danh, ảnh và package của khung phát so với Golden. Cần đạt trước khi xuất gói bàn giao.
-                </p>
-                <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <select aria-label="Đề cần kiểm đồng bộ khung phát" value={deKiem} onChange={(e) => { setDeKiem(e.target.value); setKetQuaDongBo(null); }} className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700">
-                    {deDaPublish.length === 0 && <option value="">Chưa có đề nào publish testcase</option>}
-                    {deDaPublish.map((d) => (
-                      <option key={String(d.examId)} value={String(d.examId)}>
-                        {String(d.examId)}{d.starterCheck ? ` · ${String(d.starterCheck)}` : ""}
-                      </option>
-                    ))}
-                  </select>
-                  <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-amber-600 px-3 py-2 text-sm font-bold text-white">
-                    {busy === "kiem-dong-bo" ? <Loader2 className="animate-spin" size={16} /> : <Check size={16} />}
-                    Chọn gói khung phát (.zip)
-                    <input type="file" accept=".zip" className="hidden" disabled={Boolean(busy) || !deKiem}
-                      onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) kiemDongBoKhung(f); }} />
-                  </label>
-                  {ketQuaDongBo && (
-                    <span className={`text-sm font-bold ${ketQuaDongBo.passed ? "text-emerald-600" : "text-rose-600"}`}>
-                      {ketQuaDongBo.passed ? "Đồng bộ" : "Chưa đồng bộ"}
-                    </span>
-                  )}
-                </div>
-                {ketQuaDongBo && Array.isArray(ketQuaDongBo.checks) && (
-                  <div className="mt-3 grid gap-1">
-                    {(ketQuaDongBo.checks as JsonMap[]).map((c) => (
-                      <div key={String(c.name)} className={`rounded-lg border px-3 py-2 text-xs ${c.passed ? "border-emerald-300 bg-emerald-50/50 dark:border-emerald-800 dark:bg-emerald-950/20" : "border-rose-300 bg-rose-50/50 dark:border-rose-800 dark:bg-rose-950/20"}`}>
-                        <p className="font-bold">{c.passed ? "Khớp" : "Lệch"} · {String(c.name)}</p>
-                        <p className="mt-1 whitespace-pre-line text-slate-600 dark:text-slate-300">{String(c.detail || "")}</p>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* GIAO BỘ CHẤM — hệ thống được chia làm hai bản, bản người chấm không có màn soạn
-                  đề. Gói này là đường duy nhất để bộ chấm sang được máy của họ. */}
-              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
                 <p className="text-sm font-bold">Giao bộ chấm cho người chấm</p>
                 <p className="mt-2 text-sm leading-relaxed text-slate-500">
                   Tải bộ testcase đã xuất bản để nạp vào bản người chấm. Đề cần đạt kiểm đồng bộ khung phát trước khi bàn giao.
@@ -2532,15 +2541,36 @@ function BehaviorAuthoringEditor() {
                     {deDaPublish.length === 0 && <option value="">Chưa có đề nào publish testcase</option>}
                     {deDaPublish.map((d) => (
                       <option key={String(d.examId)} value={String(d.examId)}>
-                        {String(d.examId)}{d.starterCheck ? ` · ${String(d.starterCheck)}` : ""}
+                        {String(d.examId)}
                       </option>
                     ))}
                   </select>
                   <button onClick={xuatGoiBanGiao} disabled={Boolean(busy) || !deGiao}
                     className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-bold text-white disabled:opacity-50">
                     {busy === "xuat-goi" ? <Loader2 className="animate-spin" size={16} /> : <Download size={16} />}
-                    Tải gói bàn giao (.zip)
+                    Tải gói bàn giao + khung phát
                   </button>
+                </div>
+              </div>
+
+              {/* Đặt ở MÀN NÀY chứ không phải trong màn soạn: file cần TRƯỚC khi viết Golden, mà
+                  màn soạn chỉ mở được sau khi đã có Golden để tải lên. Trước nằm trong ô "Tạo bộ
+                  chấm"; tách ra thành thẻ riêng vì nó không phải một bước của việc tạo bộ. */}
+              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
+                <div className="flex items-center gap-2 text-slate-700 dark:text-slate-200">
+                  <Code2 size={16} className="shrink-0 text-slate-400" />
+                  <h3 className="text-sm font-bold">Lần đầu dựng Golden?</h3>
+                </div>
+                <p className="mt-2 text-sm leading-relaxed text-slate-500">
+                  Đây là file identifier mẫu đi kèm hướng dẫn. Bạn có thể tải về, copy vào Golden và sửa theo hướng dẫn để có thể tạo identifier đúng cách.
+                </p>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <a
+                    href={`${API_BASE}/exam-setup/mau/dinh-danh`}
+                    className="inline-flex items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700 transition hover:border-indigo-400 hover:text-indigo-700 dark:border-slate-600 dark:text-slate-200 dark:hover:border-indigo-600 dark:hover:text-indigo-300"
+                  >
+                    <Download size={16} /> Tải dinh_danh.dart mẫu
+                  </a>
                 </div>
               </div>
             </div>
@@ -2567,6 +2597,20 @@ function BehaviorAuthoringEditor() {
                     <label className={`inline-flex shrink-0 items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold dark:border-slate-700 ${busy ? "cursor-not-allowed opacity-50" : "cursor-pointer hover:border-indigo-400 hover:text-indigo-600"}`}>{uploading ? <Loader2 size={15} className="animate-spin" /> : <UploadCloud size={15} />} {current ? "Thay file" : "Tải file"}<input aria-label={`Tải ${item.title.replace(/^\d+\.\s*/, "")}`} type="file" accept={item.accept} disabled={Boolean(busy)} className="hidden" onChange={(e) => { const file = e.target.files?.[0]; e.target.value = ""; if (file) uploadArtifact(item.type, file); }} /></label>
                   </div>
                   {item.type === "GOLDEN_SOLUTION" && current && <p className="mt-2 text-xs text-slate-500">Database: {databaseName ? <code className="break-all font-semibold text-slate-700 dark:text-slate-300">{databaseName}</code> : <span className="text-amber-600">Chưa xác định — hãy tải lại ZIP Golden</span>}<span className="ml-2 text-slate-400">· Tự động nhận diện</span></p>}
+                  {/* Cảnh báo SỚM, không chặn tải lên. Cùng phép kiểm ấy sẽ CHẶN lúc publish. */}
+                  {item.type === "GOLDEN_SOLUTION" && canhBaoDinhDanh.length > 0 && (
+                    <div className="mt-3 rounded-lg border border-amber-400 bg-amber-50 p-3 dark:border-amber-700 dark:bg-amber-950/40">
+                      <p className="flex items-center gap-1.5 text-xs font-bold text-amber-800 dark:text-amber-200">
+                        <XCircle size={14} className="shrink-0" /> Định danh còn {canhBaoDinhDanh.length} chỗ lệch — sẽ chặn lúc publish
+                      </p>
+                      <ul className="mt-2 space-y-1.5">
+                        {canhBaoDinhDanh.map((dong, i) => (
+                          <li key={i} className="text-xs leading-relaxed text-amber-800 dark:text-amber-200">• {dong}</li>
+                        ))}
+                      </ul>
+                      <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">Sửa trong Golden rồi tải lại ZIP. Sửa bây giờ rẻ hơn sửa sau khi đã ghi hình và chụp oracle.</p>
+                    </div>
+                  )}
                 </div>;
               })}
             </div>
@@ -2849,10 +2893,13 @@ function BehaviorAuthoringEditor() {
                         <>
                           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
                             <select value={layoutFirstLocator} onChange={(e) => setLayoutFirstLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{item} A</option>)}</select>
-                            <input value={layoutFirstValue} onChange={(e) => setLayoutFirstValue(e.target.value)} placeholder="Thành phần A" list="golden-layout-targets" className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />
+                            <input value={layoutFirstValue} onChange={(e) => setLayoutFirstValue(e.target.value)} placeholder="Thành phần A" list={layoutFirstLocator === "semanticId" ? "golden-dinh-danh" : "golden-layout-targets"} className={`min-w-0 rounded-lg border bg-transparent px-3 py-2 ${layoutFirstLocator === "semanticId" ? vienDinhDanh(layoutFirstValue) : "border-slate-300 dark:border-slate-700"}`} />
                             <select value={layoutSecondLocator} onChange={(e) => setLayoutSecondLocator(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">{LOCATORS.map((item) => <option key={item} value={item}>{item} B</option>)}</select>
-                            <input value={layoutSecondValue} onChange={(e) => setLayoutSecondValue(e.target.value)} placeholder="Thành phần B" list="golden-layout-targets" className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />
+                            <input value={layoutSecondValue} onChange={(e) => setLayoutSecondValue(e.target.value)} placeholder="Thành phần B" list={layoutSecondLocator === "semanticId" ? "golden-dinh-danh" : "golden-layout-targets"} className={`min-w-0 rounded-lg border bg-transparent px-3 py-2 ${layoutSecondLocator === "semanticId" ? vienDinhDanh(layoutSecondValue) : "border-slate-300 dark:border-slate-700"}`} />
                           </div>
+                          {((layoutFirstLocator === "semanticId" && dinhDanhLa(layoutFirstValue))
+                            || (layoutSecondLocator === "semanticId" && dinhDanhLa(layoutSecondValue)))
+                            && <p className="text-xs text-amber-700 dark:text-amber-300">{NHAC_DINH_DANH_LA}</p>}
                           <div className="grid gap-2 sm:grid-cols-[1.5fr_1fr_auto]">
                             <select value={layoutRelation} onChange={(e) => setLayoutRelation(e.target.value)} className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">
                               <option value="auto">Tự suy ra quan hệ từ Golden</option><option value="above">A nằm trên B</option><option value="below">A nằm dưới B</option><option value="left_of">A bên trái B</option><option value="right_of">A bên phải B</option><option value="same_row">A và B cùng hàng</option><option value="same_column">A và B cùng cột</option><option value="inside">A nằm trong B</option><option value="contains">A chứa B</option><option value="not_overlap">A và B không chồng lấp</option><option value="overlap">A và B chồng lấp</option><option value="wider_than">A rộng hơn B</option><option value="taller_than">A cao hơn B</option>
@@ -2866,7 +2913,8 @@ function BehaviorAuthoringEditor() {
                         <>
                           <label className="block space-y-1">
                             <span className="block text-xs font-bold text-slate-500">Đích — {loaiCh7Hien.dichNhan}</span>
-                            <input value={ch7Target} onChange={(e) => setCh7Target(e.target.value)} placeholder="định danh Semantics, ví dụ nguoi_dung.danh_sach" list="golden-dinh-danh" className="w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-sm dark:border-slate-700" />
+                            <input value={ch7Target} onChange={(e) => setCh7Target(e.target.value)} placeholder="định danh Semantics, ví dụ nguoi_dung.danh_sach" list="golden-dinh-danh" className={`w-full rounded-lg border bg-transparent px-3 py-2 font-mono text-sm ${vienDinhDanh(ch7Target)}`} />
+                            {dinhDanhLa(ch7Target) && <span className="block text-xs text-amber-700 dark:text-amber-300">{NHAC_DINH_DANH_LA}</span>}
                           </label>
                           <div className="grid gap-2 sm:grid-cols-2">
                             {loaiCh7Hien.truong.map((t) => (
@@ -2883,9 +2931,15 @@ function BehaviorAuthoringEditor() {
                                     inputMode={t.kieu === "so" ? "numeric" : undefined}
                                     list={t.kieu === "dinhdanh" ? "golden-dinh-danh" : undefined}
                                     placeholder={t.goiY || (t.kieu === "dinhdanh" ? "định danh Semantics" : "")}
-                                    className="w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-sm dark:border-slate-700"
+                                    className={`w-full rounded-lg border bg-transparent px-3 py-2 font-mono text-sm ${
+                                      t.kieu === "dinhdanh"
+                                        ? vienDinhDanh(ch7Expect[t.khoa] ?? "")
+                                        : "border-slate-300 dark:border-slate-700"
+                                    }`}
                                   />
                                 )}
+                                {t.kieu === "dinhdanh" && dinhDanhLa(ch7Expect[t.khoa] ?? "")
+                                  && <span className="block text-xs text-amber-700 dark:text-amber-300">{NHAC_DINH_DANH_LA}</span>}
                               </label>
                             ))}
                           </div>

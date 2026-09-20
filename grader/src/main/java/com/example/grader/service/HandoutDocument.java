@@ -22,7 +22,9 @@ public final class HandoutDocument {
     /** Một khối nội dung. type: h1 | h2 | h3 | p | li | ol | code | table | image. Với "table",
      *  {@code text()} là các dòng bảng gốc (đã bỏ dòng gạch ngang phân cách) nối bằng '\n' — dùng
      *  {@link #splitTableRows} để lấy lại từng ô. */
-    public record Block(String type, String text) {}
+    public record Block(String type, String text, int number, String align, int indent) {
+        public Block(String type, String text) { this(type, text, 0, "", 0); }
+    }
 
     /** Một hình minh họa: id (tên file), tiêu đề, nội dung SVG. */
     public record Mockup(String id, String title, String svg) {}
@@ -51,6 +53,13 @@ public final class HandoutDocument {
             if (inCode) { code.append(line).append('\n'); continue; }
 
             String trimmed = line.strip();
+            // Chỉ nhận chỉ dẫn căn lề hữu hạn do bộ đọc Word sinh, không cho HTML/CSS tùy ý.
+            if (trimmed.matches("<!-- layout:(left|center|right|justify):\\d{1,3} -->")) {
+                flushTable(blocks, tableRows);
+                flushParagraph(blocks, paragraph);
+                blocks.add(new Block("layout", trimmed.substring(12, trimmed.length() - 4)));
+                continue;
+            }
             // Dòng bảng Markdown: PHẢI bắt trước phần gộp đoạn văn ở dưới, không thì mỗi dòng
             // của bảng (mỗi dòng một hàng) bị nối lại thành một đoạn văn dài đầy dấu "|".
             if (isTableRow(trimmed)) {
@@ -77,16 +86,35 @@ public final class HandoutDocument {
             }
             if (trimmed.matches("^\\d+[.)]\\s+.*")) {
                 flushParagraph(blocks, paragraph);
-                blocks.add(new Block("ol", trimmed.replaceFirst("^\\d+[.)]\\s+", "")));
+                try {
+                    int number = Integer.parseInt(trimmed.split("[.)]", 2)[0]);
+                    blocks.add(new Block("ol", trimmed.replaceFirst("^\\d+[.)]\\s+", ""), number, "", 0));
+                } catch (NumberFormatException e) {
+                    blocks.add(new Block("p", trimmed));
+                }
                 continue;
             }
-            if (paragraph.length() > 0) paragraph.append(' ');
+            if (paragraph.length() > 0) paragraph.append('\n');
             paragraph.append(trimmed);
         }
         if (inCode && code.length() > 0) blocks.add(new Block("code", code.toString()));
         flushTable(blocks, tableRows);
         flushParagraph(blocks, paragraph);
-        return blocks;
+        List<Block> laidOut = new ArrayList<>();
+        String align = "";
+        int indent = 0;
+        for (Block b : blocks) {
+            if ("layout".equals(b.type())) {
+                String[] parts = b.text().split(":");
+                align = parts[0];
+                indent = Math.min(240, Integer.parseInt(parts[1]));
+            } else {
+                laidOut.add(new Block(b.type(), b.text(), b.number(), align, indent));
+                align = "";
+                indent = 0;
+            }
+        }
+        return laidOut;
     }
 
     private static void flushParagraph(List<Block> blocks, StringBuilder paragraph) {
@@ -119,8 +147,9 @@ public final class HandoutDocument {
         String inner = row.strip();
         if (inner.startsWith("|")) inner = inner.substring(1);
         if (inner.endsWith("|")) inner = inner.substring(0, inner.length() - 1);
-        String[] cells = inner.split("\\|", -1);
-        for (int i = 0; i < cells.length; i++) cells[i] = cells[i].strip();
+        String[] cells = inner.split("(?<!\\\\)\\|", -1);
+        for (int i = 0; i < cells.length; i++)
+            cells[i] = cells[i].strip().replace("\\|", "|").replace("<br>", "\n");
         return cells;
     }
 
@@ -171,6 +200,12 @@ public final class HandoutDocument {
                     + "letter-spacing:.08em;text-transform:uppercase}\n")
             .append(".mockup{margin:20px 0;padding:14px;border:1px solid #e2e8f0;border-radius:12px}\n")
             .append(".mockup h3{margin:0 0 10px}.mockup svg{max-width:100%;height:auto}\n")
+            // TRÊN MÀN HÌNH phải chặn CHIỀU CAO, không chỉ bề ngang: hình minh hoạ mang dáng máy
+            // (cao gấp 2,2 lần bề ngang, xem MockupRenderer) nên ở cỡ gốc một cái đã cao 733px —
+            // trong khung xem đề chỉ cao 70vh thì cuộn mãi mới hết MỘT màn. width/height:auto để
+            // trình duyệt thu theo tỉ lệ gốc, không thì hộp bị ép cao rồi hình co vào giữa, chừa
+            // hai bên trắng hoác. Bản IN không dính luật này — ở đó DocxWriter/PdfWriter tự lo.
+            .append("@media screen{.mockup svg{width:auto;height:auto;max-height:62vh}}\n")
             .append("@media print{body{margin:0}.mockup{break-inside:avoid}}\n")
             .append("</style>\n</head>\n<body>\n")
             .append("<p class=\"exam-id\">").append(esc(examId)).append("</p>\n")
@@ -184,14 +219,20 @@ public final class HandoutDocument {
                 if (wanted != null) html.append('<').append(wanted).append(">\n");
                 listOpen = wanted;
             }
+            String style = block.align().isEmpty() && block.indent() == 0 ? ""
+                    : " style=\"text-align:" + (block.align().isEmpty() ? "left" : block.align())
+                    + ";margin-left:" + block.indent() + "px\"";
             switch (block.type()) {
-                case "h1" -> html.append("<h2>").append(inline(block.text())).append("</h2>\n");
-                case "h2" -> html.append("<h2>").append(inline(block.text())).append("</h2>\n");
-                case "h3" -> html.append("<h3>").append(inline(block.text())).append("</h3>\n");
-                case "li", "ol" -> html.append("<li>").append(inline(block.text())).append("</li>\n");
+                case "h1", "h2" -> html.append("<h2").append(style).append('>').append(inline(block.text())).append("</h2>\n");
+                case "h3" -> html.append("<h3").append(style).append('>').append(inline(block.text())).append("</h3>\n");
+                case "li", "ol" -> {
+                    html.append("<li");
+                    if ("ol".equals(block.type())) html.append(" value=\"").append(block.number()).append('"');
+                    html.append(style).append('>').append(inline(block.text())).append("</li>\n");
+                }
                 case "code" -> html.append("<pre><code>").append(esc(block.text())).append("</code></pre>\n");
                 case "table" -> appendTable(html, splitTableRows(block.text()));
-                default -> html.append("<p>").append(inline(block.text())).append("</p>\n");
+                default -> html.append("<p").append(style).append('>').append(inline(block.text())).append("</p>\n");
             }
         }
         if (listOpen != null) html.append("</").append(listOpen).append(">\n");
@@ -233,7 +274,7 @@ public final class HandoutDocument {
         s = s.replaceAll("`([^`]+)`", "<code>$1</code>");
         s = s.replaceAll("\\*\\*([^*]+)\\*\\*", "<strong>$1</strong>");
         s = s.replaceAll("(?<!\\*)\\*([^*]+)\\*(?!\\*)", "<em>$1</em>");
-        return s;
+        return s.replace("\n", "<br>");
     }
 
     private static String stripXmlDeclaration(String svg) {

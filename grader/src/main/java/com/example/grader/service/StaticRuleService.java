@@ -197,6 +197,47 @@ public class StaticRuleService {
         return view(suiteId);
     }
 
+    /**
+     * KIỂM ĐỊNH DANH của Golden trước khi publish: khai mà không gắn, gắn mà không khai.
+     *
+     * <p>Đặt ở lớp này vì nó giữ bộ đọc duy nhất của mã nguồn Golden ({@code goldenSources});
+     * phép so thì nằm riêng ở {@link KiemDinhDanh}.
+     *
+     * <p>Vì sao chặn ở publish chứ không nhét vào Kiểm Golden: Kiểm Golden là một lượt Docker gần
+     * hai phút và nó trả lời câu "bộ chấm chạy đúng trên Golden không". Hai lệch dưới đây KHÔNG làm
+     * Golden sai — Golden luôn tự khớp với chính nó — nên bỏ vào đó thì vừa bắt người soạn chờ hai
+     * phút cho một phép đọc file, vừa làm báo cáo mất tiêu điểm.
+     */
+    public void requireDinhDanhNhatQuan(String suiteId) {
+        List<String> loi = kiemDinhDanh(suiteId);
+        if (!loi.isEmpty()) {
+            throw new IllegalStateException(
+                    "Định danh của Golden chưa nhất quán:" + System.lineSeparator()
+                            + "- " + String.join(System.lineSeparator() + "- ", loi));
+        }
+    }
+
+    /**
+     * Bản KHÔNG ném của phép kiểm trên — dùng để cảnh báo SỚM ngay lúc tải Golden lên.
+     *
+     * <p>Lúc đó người soạn còn đang mở Golden trong trình soạn thảo, sửa một dòng là xong. Đợi tới
+     * publish mới báo thì họ đã ghi hình và chụp oracle xong hết rồi, sửa Golden là phải làm lại
+     * từ đầu.
+     *
+     * <p>Không ném vì tải lên phải THÀNH CÔNG: chặn ngay ở đây thì người soạn không còn Golden nào
+     * trên hệ thống để mà đối chiếu, mà Golden lệch định danh vẫn ghi hình được bình thường.
+     */
+    public List<String> kiemDinhDanh(String suiteId) {
+        List<SourceFile> golden = goldenSources(suiteId);
+        if (golden == null) return List.of();   // chưa có Golden thì cổng khác đã chặn trước rồi
+        Map<String, String> nguon = new LinkedHashMap<>();
+        for (SourceFile f : golden) {
+            if (!f.relPath().endsWith(".dart")) continue;
+            nguon.put(f.relPath(), new String(f.content(), StandardCharsets.UTF_8));
+        }
+        return KiemDinhDanh.kiem(nguon);
+    }
+
     /** Gọi lại lúc publish: golden có thể đã được upload bản mới sau khi lưu luật. */
     public void requireGoldenCompliance(String suiteId) {
         BehaviorSuite suite = require(suiteId);

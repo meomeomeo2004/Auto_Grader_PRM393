@@ -71,7 +71,7 @@ public class BehaviorArtifactService {
             try (InputStream input = file.getInputStream()) {
                 Files.copy(input, temp, StandardCopyOption.REPLACE_EXISTING);
             }
-            validateContent(suiteId, type, temp);
+            List<String> canhBao = validateContent(suiteId, type, temp);
             int version = (int) artifacts.countBySuiteIdAndArtifactType(suiteId, type) + 1;
             String storedName = String.format(Locale.ROOT, "v%03d_%s", version, originalName);
             Path target = typeDir.resolve(storedName).normalize();
@@ -93,7 +93,9 @@ public class BehaviorArtifactService {
             artifact.setContentType(file.getContentType());
             artifact.setMetadataJson(normalizeMetadata(metadataJson));
             artifacts.save(artifact);
-            return view(artifact);
+            Map<String, Object> ra = new LinkedHashMap<>(view(artifact));
+            if (!canhBao.isEmpty()) ra.put("canh_bao", canhBao);
+            return ra;
         } catch (IllegalArgumentException | IllegalStateException e) {
             throw e;
         } catch (Exception e) {
@@ -562,17 +564,20 @@ public class BehaviorArtifactService {
         return found;
     }
 
-    private void validateContent(String suiteId, BehaviorArtifactType type, Path candidate) throws Exception {
+    /** Tra ve danh sach CANH BAO (rong = sach); loi that van nem ngoai le. */
+    private List<String> validateContent(String suiteId, BehaviorArtifactType type, Path candidate) throws Exception {
+        List<String> canhBao = List.of();
         switch (type) {
             case STUDENT_DATABASE, HIDDEN_DATABASE, OUTPUT_DATABASE -> validateSqlite(candidate);
             case AUTOMATION_RECORD, TESTCASE_DEFINITION, GRADING_ENVIRONMENT -> validateJson(type, candidate);
-            case GOLDEN_SOLUTION -> { validateZip(candidate); crossCheckGoldenDatabaseName(suiteId, candidate); }
+            case GOLDEN_SOLUTION -> { canhBao = validateZip(candidate); crossCheckGoldenDatabaseName(suiteId, candidate); }
         }
         // Ba phep so cau truc bang voi STUDENT_DATABASE da go bo cung luc voi chinh o artifact
         // do. Ca ba deu lay student.db lam moc, ma nay khong con ai tai len nen chung chi la ba
         // nhanh chet — giu lai thi bo de cu con mot student.db lech schema se chan luon ca lan
         // tai Database an moi len. Phep canh cau truc that nay nam o kiem dong bo khung phat,
         // noi no so tren MA NGUON cua khung phat voi Golden.
+        return canhBao;
     }
 
     private void validateJson(BehaviorArtifactType type, Path file) throws Exception {
@@ -817,7 +822,8 @@ public class BehaviorArtifactService {
         return checkpoint;
     }
 
-    private void validateZip(Path file) {
+    /** Tra ve danh sach CANH BAO (rong = sach); loi that van nem ngoai le nhu cu. */
+    private List<String> validateZip(Path file) {
         try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(file.toFile())) {
             if (!zip.entries().hasMoreElements()) throw new IllegalArgumentException("Golden Solution ZIP rỗng");
             boolean hasDartEntry = false;
@@ -838,15 +844,31 @@ public class BehaviorArtifactService {
             Set<String> inventory = exams.goiCoTrongAnhCham();
             // Docker tắt là chưa biết thư viện, theo cùng quy ước với bước lưu cấu hình.
             if (!inventory.isEmpty()) {
-                List<String> missing = dependencies.keySet().stream()
-                        .filter(name -> !name.equals("flutter") && !inventory.contains(name)).sorted().toList();
+                Map<String, Object> missing = new LinkedHashMap<>();
+                dependencies.entrySet().stream()
+                        .filter(entry -> !entry.getKey().equals("flutter") && !inventory.contains(entry.getKey()))
+                        .sorted(Map.Entry.comparingByKey())
+                        .forEach(entry -> missing.put(entry.getKey(), entry.getValue()));
                 if (!missing.isEmpty()) throw new PackageAvailabilityException(missing);
+            }
+            // Khai mot goi ma khong import no: khung phat se bat sinh vien tai ve mot thu vien
+            // vo dung, va contract.json cung mo cong cho no. Chi CANH BAO, khong chan — Golden
+            // van co the dang soan do.
+            Set<String> daDung = PubspecDependencies.importedInZip(file);
+            List<String> thua = dependencies.keySet().stream()
+                    .filter(ten -> !ten.equals("flutter") && !daDung.contains(ten))
+                    .sorted()
+                    .toList();
+            if (!thua.isEmpty()) {
+                return List.of("Golden khai package nhung khong import: " + String.join(", ", thua)
+                        + ". Bo khoi pubspec.yaml de khung phat khong mang thua thu vien.");
             }
         } catch (IllegalArgumentException e) {
             throw e;
         } catch (Exception e) {
             throw new IllegalArgumentException("Golden Solution không phải ZIP hợp lệ", e);
         }
+        return List.of();
     }
 
     private void validateExtension(BehaviorArtifactType type, String fileName) {

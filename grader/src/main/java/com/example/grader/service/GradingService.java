@@ -156,6 +156,15 @@ public class GradingService {
             // Bây giờ hàm này sẽ trả về thư mục ngay sát bên ngoài thư mục lib/
             Path projectRoot = detectProjectRoot(extractDir);
             Path studentLib = projectRoot.resolve("lib");
+
+            // CHẨN ĐOÁN hợp đồng dữ liệu — chỉ giải thích, không đổi điểm. Đọc mã NGAY SAU KHI
+            // GIẢI NÉN, trước mọi bản vá tương thích bên dưới: phải nhìn đúng thứ sinh viên nộp,
+            // không phải thứ ta đã chữa hộ.
+            List<String> lechHopDong = HopDongDuLieu.kiem(
+                    projectRoot, HopDongDuLieu.hiddenDbCuaTestcase(testcasePath));
+            if (!lechHopDong.isEmpty())
+                log.warn("[{}] Hợp đồng dữ liệu lệch: {}", studentId, String.join(" ", lechHopDong));
+
             // Chặn package ngoài TRƯỚC compile. Import nội bộ theo tên package của starter
             // được đổi sang exam_project vì image chạy --no-pub với package graph đã cache.
             SubmissionPackagePolicy.Policy packagePolicy = submissionPackagePolicy.load(testcasePath);
@@ -177,16 +186,23 @@ public class GradingService {
             if (isCancelled(batchId))
                 throw new IllegalStateException("Phiên chấm đã bị dừng trước khi container khởi động.");
 
-            return runDockerGrader(
-                    batchId, studentId, studentLib.toAbsolutePath().toString(),
-                    projectRoot.resolve("assets").toAbsolutePath().toString(),
-                    prepareRuntimePubspec(
-                            tempDir,
-                            Files.isDirectory(projectRoot.resolve("assets")),
-                            Files.isDirectory(studentLib.resolve("assets")),
-                            "exam_project"),
-                    examId, testcasePath, evidenceDir
-            );
+            try {
+                return HopDongDuLieu.ganVaoKetQua(runDockerGrader(
+                        batchId, studentId, studentLib.toAbsolutePath().toString(),
+                        projectRoot.resolve("assets").toAbsolutePath().toString(),
+                        prepareRuntimePubspec(
+                                tempDir,
+                                Files.isDirectory(projectRoot.resolve("assets")),
+                                Files.isDirectory(studentLib.resolve("assets")),
+                                "exam_project"),
+                        examId, testcasePath, evidenceDir
+                ), lechHopDong);
+            } catch (GradingDiagnosticException chanDoan) {
+                // Bài chết trước khi có result.json (thường là compile lỗi) — mà đó chính là lúc
+                // lời giải thích đáng giá nhất: cột lệch làm câu truy vấn gãy từ khâu biên dịch.
+                // Nối vào thông điệp, giữ nguyên phân loại để không đổi cách xử lý lượt chấm.
+                throw HopDongDuLieu.themVaoChanDoan(chanDoan, lechHopDong);
+            }
         } finally {
             // Chuyển ảnh bằng chứng ra chỗ bền TRƯỚC khi tempDir bị xoá. Ghi đè bản của lần
             // chấm trước (chấm lại = bằng chứng mới). Lỗi ở đây chỉ mất bằng chứng, nuốt.

@@ -4,7 +4,6 @@ import com.example.grader.config.AppActor;
 import com.example.grader.repository.ExamRepository;
 import com.example.grader.service.BanGiaoService;
 import com.example.grader.service.ExamService;
-import com.example.grader.service.StarterSyncService;
 import com.example.grader.service.ExamDocumentReader;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
@@ -29,43 +28,9 @@ public class ExamSetupController {
     @Autowired
     private ExamRepository examRepo;
     @Autowired
-    private StarterSyncService starterSyncService;
-    @Autowired
     private BanGiaoService banGiaoService;
     @Autowired
     private ExamDocumentReader examDocumentReader;
-
-    /**
-     * KIỂM ĐỒNG BỘ KHUNG PHÁT. Chọn một đề đã publish testcase, nạp gói khung phát cho sinh
-     * viên, hệ thống đối chiếu với Golden đang gắn với đề đó.
-     *
-     * Golden LẤY THẲNG từ artifact của bộ chấm, không cho nạp lại: nạp lại thì người ra đề có
-     * thể vô tình đưa một bản Golden khác với bản đã ghi hình, làm đổi nền tảng chấm mà không
-     * ai thấy.
-     *
-     * Đạt thì đề mới được hiện ở phần chấm; trượt thì không, kèm báo cáo lệch chỗ nào.
-     */
-    @PostMapping(value = "/{examId}/starter-check", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<?> kiemDongBoKhungPhat(@PathVariable String examId,
-                                                 @RequestPart("file") MultipartFile file) {
-        try {
-            return ResponseEntity.ok(starterSyncService.kiem(examId, file));
-        } catch (IllegalArgumentException | IllegalStateException e) {
-            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", String.valueOf(e.getMessage())));
-        }
-    }
-
-    /** Trạng thái kiểm đồng bộ của một đề, để màn hình biết có hiện nút chấm hay không. */
-    @GetMapping("/{examId}/starter-check")
-    public ResponseEntity<?> trangThaiDongBo(@PathVariable String examId) {
-        try {
-            return ResponseEntity.ok(starterSyncService.tomTat(examId));
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", String.valueOf(e.getMessage())));
-        }
-    }
 
     @PostMapping("/upload-testcase")
     public ResponseEntity<?> uploadTestcase(
@@ -265,8 +230,6 @@ public class ExamSetupController {
     public ResponseEntity<?> saveHandout(@PathVariable String examId,
                                          @RequestBody Map<String, Object> body) {
         try {
-            if (body != null && body.containsKey("allowed_packages"))
-                examService.saveExamAllowedPackages(examId, packageList(body));
             Object rawMockups = body == null ? null : body.get("mockups");
             java.util.List<Map<String, String>> mockups = rawMockups instanceof java.util.List
                     ? (java.util.List<Map<String, String>>) rawMockups : java.util.List.of();
@@ -281,33 +244,7 @@ public class ExamSetupController {
         }
     }
 
-    @GetMapping("/{examId}/allowed-packages")
-    public ResponseEntity<?> allowedPackages(@PathVariable String examId) {
-        try {
-            return ResponseEntity.ok(Map.of("allowed_packages", examService.getExamAllowedPackages(examId)));
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
-        }
-    }
 
-    @PutMapping("/{examId}/allowed-packages")
-    public ResponseEntity<?> saveAllowedPackages(@PathVariable String examId, @RequestBody Map<String, Object> body) {
-        try {
-            return ResponseEntity.ok(Map.of("allowed_packages", examService.saveExamAllowedPackages(examId, packageList(body))));
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
-        }
-    }
-
-    private java.util.List<?> packageList(Map<String, Object> body) {
-        if (body == null || !(body.get("allowed_packages") instanceof java.util.List<?> list))
-            throw new IllegalArgumentException("Phải khai allowed_packages dạng danh sách.");
-        return list;
-    }
 
     /**
      * Upload NGUYÊN file đề bài gốc (.docx/.pdf) giáo viên tự soạn ở ngoài — Kho tài liệu đề.
@@ -328,23 +265,11 @@ public class ExamSetupController {
                                                    @RequestParam(value = "examName", required = false) String examName,
                                                    @RequestPart("file") MultipartFile file) {
         try {
-            byte[] bytes = file.getBytes();
-            Map<String, Object> out = new java.util.LinkedHashMap<>(
-                    examService.saveOriginalHandoutFile(examId, examName, file.getOriginalFilename(), bytes));
-            String existing = examService.readDeBai(examId);
-            if (existing == null || existing.isBlank()) {
-                try {
-                    Map<String, Object> extracted = examDocumentReader.read(file.getOriginalFilename(), bytes);
-                    examService.saveDeBaiWithMockups(examId, String.valueOf(extracted.get("text")), java.util.List.of());
-                    out.put("de_bai_extracted", true);
-                } catch (Exception e) {
-                    out.put("de_bai_extracted", false);
-                    out.put("de_bai_extract_warning", e.getMessage());
-                }
-            } else {
-                out.put("de_bai_extracted", false);
-            }
-            return ResponseEntity.ok(out);
+            // KHÔNG bóc chữ ngầm nữa (20/9): xem chú thích ở saveOriginalHandoutFile. Muốn đưa
+            // nội dung vào hệ thống thì gọi /handout/chuyen-vao-he-thong — một thao tác có tên,
+            // có xác nhận, và ĐỔI LOẠI ĐỀ chứ không lặng lẽ đẻ ra một bản thứ hai.
+            return ResponseEntity.ok(examService.saveOriginalHandoutFile(
+                    examId, examName, file.getOriginalFilename(), file.getBytes()));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         } catch (Exception e) {
@@ -480,6 +405,44 @@ public class ExamSetupController {
     }
 
     /**
+     * XEM TRƯỚC đề bài ĐANG SOẠN (chưa lưu) dưới dạng HTML. Body: { de_bai, mockups? }.
+     *
+     * <p>Vì sao phải đi vòng qua máy chủ thay vì dựng HTML ngay trong trình duyệt: repo build
+     * offline nên không thêm được thư viện markdown cho frontend, mà tự viết một bộ dựng thứ hai
+     * thì sớm muộn nó khác bộ đang dùng để sinh {@code de_bai.html} và bản .docx — giảng viên
+     * xem một đằng, sinh viên nhận một nẻo. Đây dùng ĐÚNG {@link HandoutDocument#toHtml}, nên
+     * cái nhìn thấy lúc soạn là cái sẽ ra.
+     *
+     * <p>Hàm thuần, không đọc/ghi đĩa: gõ tới đâu xem tới đó mà không đụng bản đã lưu.
+     */
+    @SuppressWarnings("unchecked")
+    @PostMapping("/{examId}/de-bai/xem-truoc")
+    public ResponseEntity<?> xemTruocDeBai(@PathVariable String examId,
+                                           @RequestBody Map<String, Object> body) {
+        try {
+            String md = body == null || body.get("de_bai") == null ? "" : String.valueOf(body.get("de_bai"));
+            Object raw = body == null ? null : body.get("mockups");
+            java.util.List<com.example.grader.service.HandoutDocument.Mockup> mockups = new java.util.ArrayList<>();
+            if (raw instanceof java.util.List<?> ds) {
+                for (Object o : ds) {
+                    if (!(o instanceof Map<?, ?> m)) continue;
+                    String id = String.valueOf(m.get("id"));
+                    Object ten = m.get("title");
+                    mockups.add(new com.example.grader.service.HandoutDocument.Mockup(
+                            id, ten == null ? id : String.valueOf(ten), String.valueOf(m.get("svg"))));
+                }
+            }
+            // Tên đề lấy từ bản ghi thật, KHÔNG dùng mã đề thay tên: bản xuất ra in tên đề ở
+            // <h1>, nên truyền mã vào đây là bản xem trước và bản .docx lệch nhau ngay dòng
+            // đầu — đúng loại lệch làm người soạn mất lòng tin vào ô xem trước.
+            return ResponseEntity.ok(Map.of("html", com.example.grader.service.HandoutDocument.toHtml(
+                    examId, examService.tenDeHienThi(examId), md, mockups)));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", String.valueOf(e.getMessage())));
+        }
+    }
+
+    /**
      * Tải đề bài dạng .docx. Body: { images: [{ png_base64, width, height }] } — ảnh do trình
      * duyệt đổi từ SVG sang PNG (máy chủ không có thư viện rasterize). Bỏ trống = chỉ có chữ.
      */
@@ -600,6 +563,48 @@ public class ExamSetupController {
         }
     }
 
+    /**
+     * TẢI KHUNG PHÁT cho sinh viên — dựng từ chính Golden đang dùng, tải cùng lúc với gói bàn giao.
+     *
+     * <p>Không có nút riêng ở màn recorder: khung và gói cho người chấm phải ra từ MỘT bản Golden,
+     * mà cách chắc nhất là sinh cả hai trong cùng một thao tác.
+     */
+    @GetMapping("/{examId}/khung-phat")
+    public ResponseEntity<?> taiKhungPhat(@PathVariable String examId) {
+        try {
+            return zipResponse(examId + "_khung_phat.zip", examService.zipKhungPhat(examId));
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", String.valueOf(e.getMessage())));
+        }
+    }
+
+    /**
+     * Khung phát đã tải lần trước còn khớp Golden hiện tại không.
+     *
+     * <p>{@code lech = true} nghĩa là Golden đã đổi ở đúng những chỗ khung phát lấy về, nên bản
+     * sinh viên đang cầm không còn giống bộ dùng để chấm — phải phát lại khung.
+     */
+    @GetMapping("/{examId}/khung-phat/trang-thai")
+    public ResponseEntity<?> trangThaiKhungPhat(@PathVariable String examId) {
+        try {
+            String hienTai = examService.vanTayKhungPhat(examId);
+            String daXuat = examRepo.findByExamId(examId)
+                    .map(com.example.grader.entity.Exam::getKhungVanTay).orElse(null);
+            Map<String, Object> ra = new java.util.LinkedHashMap<>();
+            ra.put("van_tay", hienTai);
+            ra.put("van_tay_da_xuat", daXuat);
+            ra.put("da_tung_xuat", daXuat != null && !daXuat.isBlank());
+            ra.put("lech", daXuat != null && !daXuat.isBlank() && !daXuat.equals(hienTai));
+            return ResponseEntity.ok(ra);
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", String.valueOf(e.getMessage())));
+        }
+    }
+
     /** Tải STARTER: ZIP khung code (lib/…) phát cho SV. 404 nếu đề chưa lưu kèm. */
     @GetMapping("/{examId}/download/starter")
     public ResponseEntity<?> downloadStarter(@PathVariable String examId) {
@@ -645,6 +650,30 @@ public class ExamSetupController {
         out[0] = (byte) 0xEF; out[1] = (byte) 0xBB; out[2] = (byte) 0xBF;
         System.arraycopy(text, 0, out, 3, text.length);
         return out;
+    }
+
+    /**
+     * TẢI FILE MẪU {@code dinh_danh.dart}. Tĩnh, không gắn với đề nào — nên KHÔNG có {@code examId}
+     * trên đường dẫn: người lần đầu dựng Golden chưa có đề nào để mà gắn vào.
+     *
+     * <p>Đặt ở màn đầu của Bộ chấm Golden, cạnh khung "Tạo bộ chấm", vì đó là lúc người ta cần nó:
+     * trước khi viết Golden, không phải sau.
+     *
+     * <p>Đường phải có HAI đoạn: {@code ExamCatalogController} khai {@code @DeleteMapping("/{examId}")}
+     * trên cùng gốc {@code /api/exam-setup}, nên một đoạn duy nhất sẽ bị khớp thành mã đề. Đo trên
+     * bản đang chạy: GET /api/exam-setup/dinh-danh-mau trả 405 chứ không phải 404.
+     */
+    @GetMapping("/mau/dinh-danh")
+    public ResponseEntity<?> taiDinhDanhMau() {
+        try {
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"dinh_danh.dart\"")
+                    .contentType(MediaType.parseMediaType("text/plain; charset=UTF-8"))
+                    .body(examService.dinhDanhMau());
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError()
+                    .body(Map.of("error", "Không đọc được file mẫu: " + e.getMessage()));
+        }
     }
 
     private ResponseEntity<byte[]> zipResponse(String filename, byte[] data) {

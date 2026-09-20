@@ -37,9 +37,7 @@ export const TRANG_CHU                // nc → /teacher/grading, gv → /teache
 | Chấm bài › Lịch sử chấm | `/history` | nc |
 | Quản lý bộ testcase | `/teacher/testcases` | nc |
 | Thư viện chấm | `/teacher/libraries` | **cả hai** |
-| Tạo đề | `/teacher/exam-authoring` | gv |
-| Tạo Golden | `/teacher/golden-authoring` | gv |
-| Kho tài liệu đề | `/teacher/exam-documents` | gv |
+| Đề bài | `/teacher/exam-authoring` | gv |
 | Bộ chấm Golden | `/teacher/archive` | gv |
 
 **Mục nào không khai `vai` thì hiện ở CẢ HAI bản.** Thêm mục mới mà quên khai là rò màn hình
@@ -70,21 +68,25 @@ app/teacher/archive/      → 8 dòng, re-export thẳng behavior-authoring (gi�
 app/teacher/behavior-authoring/page.tsx   3200 dòng ← màn soạn bộ chấm Golden, to nhất repo
 app/teacher/grading/page.jsx              1400 dòng ← màn chấm tự động (nc)
 app/history/page.tsx                      1400 dòng ← lịch sử chấm (nc)
-app/teacher/{exam-authoring,golden-authoring,exam-documents,testcases,libraries,exam-view}/
+app/teacher/exam-authoring/page.tsx        ← màn "Đề bài" (gv): danh sách → chi tiết ?de=<mã>
+app/teacher/{testcases,libraries}/
 components/{layout,ui,grading,testcases}/
-lib/{vai,config,csv,errors,gradingSessions,gradingStatus,exam-pdf,mockup-image,aiAuthorDrafts}
+lib/{vai,config,csv,errors,gradingSessions,gradingStatus,exam-pdf,mockup-image}
 ```
+
+**Màn "Đề bài" gộp từ ba màn cũ (20/9/2026)**: `exam-authoring` (Tạo đề), `exam-documents`
+(Kho tài liệu đề) và `exam-view` (Xem đề) — hai cái sau đã xoá, cùng `lib/aiAuthorDrafts.ts`.
+Ba màn cùng ghi vào `handout/<mã đề>/` mà mỗi màn hiểu "nội dung đề" một kiểu, lại còn đọc hai
+API danh sách khác nhau (`authored-list` / `list`) nên thấy hai tập đề khác nhau. Trục mới là
+**loại đề**: `NGOAI` (file Word là bản chính) / `TRONG` (`de_bai.md` là bản chính), đổi một
+chiều qua `POST /handout/chuyen-vao-he-thong`.
 
 `dong-goi.ps1` **xoá hẳn** thư mục route của vai kia khi cắt bản:
 
 - `dist/gv` bỏ `teacher/grading`, `history`, `teacher/testcases`
-- `dist/nc` bỏ `teacher/behavior-authoring`, `teacher/archive`, `teacher/exam-view`,
-  `teacher/exam-authoring`, `teacher/golden-authoring`, `components/testcases`,
-  `lib/aiAuthorDrafts.ts`
+- `dist/nc` bỏ `teacher/behavior-authoring`, `teacher/archive`, `teacher/exam-authoring`,
+  `components/testcases`
 - `teacher/libraries` cố ý còn ở **cả hai** bản
-- `teacher/exam-documents` vẫn còn trong `dist/nc` nhưng là **rác**: nav ẩn nó (`vai: 'gv'`)
-  và mọi lời gọi của nó đi vào `ExamSetupController` — controller gv-only, đã bị chính
-  `dong-goi.ps1` xoá khỏi bản nc. Gõ thẳng URL thì trang lên nhưng mọi request 404.
 
 Nên đừng import chéo giữa hai nhóm route, bản cắt ra sẽ vỡ. Script có kiểm import treo sau khi
 cắt. `teacher/archive` chỉ là một dòng re-export `behavior-authoring` nên hai thư mục đó phải

@@ -186,6 +186,11 @@ class BehaviorSuiteMaterializerTest {
         JsonNode contract = new ObjectMapper().readTree(output.resolve("contract.json").toFile());
         assertEquals(List.of("flutter", "path"), new ObjectMapper().convertValue(contract.get("allowed_packages"), List.class),
                 "Policy phải đọc dependencies của Golden, không đọc mặc định/runtime hay dev_dependencies");
+        // Ràng buộc phiên bản đi ở khoá RIÊNG: bên người chấm thiếu gói thì thêm vào ảnh chấm
+        // bằng đúng ràng buộc này. `flutter: {sdk: flutter}` là khối lồng, không phải version
+        // điền được vào ô pub — phải quy về rỗng chứ không được đổ nguyên khối ra.
+        assertEquals(Map.of("flutter", "", "path", "^1.9.0"),
+                new ObjectMapper().convertValue(contract.get("allowed_package_specs"), Map.class));
         for (String file : List.of("exam_test.dart", "grader.dart", "behavior_plan.json",
                 "skills_matrix.json", "contract.json", "suite_manifest.json")) {
             assertTrue(Files.exists(output.resolve(file)), file + " phải được sinh");

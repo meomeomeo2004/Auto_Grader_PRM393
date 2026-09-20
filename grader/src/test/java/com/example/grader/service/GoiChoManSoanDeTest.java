@@ -55,7 +55,12 @@ class GoiChoManSoanDeTest {
         assertTrue(thieu.isEmpty(), "bộ đề FA26 phải tick được hết, đang thiếu: " + thieu);
 
         // Gói không có trong ảnh thì không xuất hiện ở đâu cả, nên không tick nhầm được.
-        for (String ngoai : List.of("dio", "get", "provider", "bloc")) {
+        //
+        // KHÔNG dùng dio/go_router làm mẫu phủ định nữa (19/9): người dùng thêm hai gói đó vào
+        // Thư viện chấm rồi dựng lại ảnh, nên chúng CÓ trong ảnh thật và phép khẳng định này
+        // trở thành sai — sai về môi trường, không phải về mã. Bài học: mẫu phủ định phải là
+        // thứ không ai có lý do thêm vào; dio là gói HTTP phổ biến, sớm muộn cũng có người cần.
+        for (String ngoai : List.of("get", "provider", "bloc")) {
             assertFalse(tickDuoc.contains(ngoai), ngoai + " không có trong ảnh, không được bày ra");
         }
     }

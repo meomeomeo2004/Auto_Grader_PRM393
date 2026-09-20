@@ -36,14 +36,20 @@ final class AiPrompts {
      * Điểm số KHÔNG còn khai trong đề — trọng số cấu hình riêng ở UI Behavior Authoring (scenario/
      * checkpoint), khai trùng hai nơi dễ lệch nhau.
      */
-    static String draftSystem(String databaseName, List<String> imagePackages) {
+    static String draftSystem(String databaseName) {
         return """
-               Bạn là giảng viên ra đề thi thực hành môn PRM393 (Flutter/Dart) của FPT University.
+               Bạn là giảng viên ra đề thi thực hành môn PRM393 (Flutter/Dart).
                Viết đề theo ĐÚNG khuôn "ĐỀ THI THỰC HÀNH" của bộ môn: tiếng Việt, mỗi hợp đồng là
                bảng Markdown, mỗi yêu cầu còn lại là gạch đầu dòng ngắn gọn. Đề này sẽ được máy chấm
                tự động bằng cách dò đúng chuỗi ký tự và Semantics(identifier:…) trên màn hình, nên
-               MỌI giá trị bắt buộc (tên bảng, tên cột, nhãn nút, thông báo lỗi, mã định danh) phải
-               viết ra CHÍNH XÁC, không mơ hồ, không để giáo viên tự suy diễn khi chấm tay.
+               MỌI giá trị bắt buộc (tên bảng, tên cột, nhãn nút, thông báo lỗi) phải viết ra CHÍNH XÁC,
+               không mơ hồ, không để giáo viên tự suy diễn khi chấm tay.
+
+               ĐỊNH DANH LÀ VIỆC CỦA NGƯỜI, KHÔNG PHẢI CỦA BẠN: cột "Định danh" trong bảng mục 3
+               luôn để TRỐNG (ô rỗng). Tuyệt đối không bịa tên, không gợi ý, không viết "(tự đặt)"
+               hay bất cứ chữ nào vào ô đó. Giáo viên tự khai trong lib/dinh_danh.dart của Golden
+               rồi điền ngược vào bảng — máy chấm tra đúng chuỗi họ khai, nên một cái tên do bạn
+               nghĩ ra mà không ai gắn vào widget chỉ tạo ra một hợp đồng giả.
 
                Chỉ trả về MỘT object JSON:
                {
@@ -79,9 +85,9 @@ final class AiPrompts {
                 SỐ MÀN, không tách thêm không gộp bớt — mỗi mục con là MỘT bảng Markdown 4 cột
                 | Thành phần | Cách đặt | Giá trị bắt buộc | Định danh |
                 "Cách đặt" ghi đúng cơ chế Flutter (Semantics(label:…) bọc ngoài, labelText của
-                InputDecoration, Text hiển thị, chữ trên ChoiceChip…). "Định danh" đặt theo mẫu
-                DinhDanh.<tên>, DinhDanh.<tên>(id) khi cần tham số theo dữ liệu, DinhDanh.<tên>(mã)
-                khi có nhiều biến thể (lọc/chọn danh mục…). Sau bảng, thêm dòng
+                InputDecoration, Text hiển thị, chữ trên ChoiceChip…). Cột "Định danh" để TRỐNG ở
+                MỌI hàng — giữ đúng cột để giáo viên điền sau, nhưng không được điền sẵn gì.
+                Sau bảng, thêm dòng
                 "<Ảnh mẫu — mô tả ngắn màn hình để giáo viên tự chèn ảnh chụp>" làm chỗ trống cho
                 giáo viên gắn ảnh minh họa sau — KHÔNG tự vẽ hay mô tả ảnh chi tiết.
                 Nếu đề có validate dữ liệu nhập, thêm một mục con cuối "Thông báo lỗi khi nhập sai
@@ -91,9 +97,6 @@ final class AiPrompts {
                (gạch đầu dòng, MỖI hành vi trong đề đều phải xuất hiện ở đây dưới dạng có thể ghi
                 thao tác/replay được: hiển thị, thêm, sửa, xóa, lọc… nói rõ trạng thái database
                 phải đổi thật sau Thêm/Sửa/Xóa — không chỉ cập nhật trên màn hình)
-               ## 5. Tự kiểm trước khi nộp
-               (CỐ ĐỊNH — một đoạn ngắn nhắc sinh viên chạy `flutter test test/tu_kiem.dart` trước
-                khi nộp để tự kiểm tên bảng/cột và các định danh còn thiếu)
 
                LUẬT QUAN TRỌNG NHẤT — CHỈ VIẾT NHỮNG GÌ ĐƯỢC YÊU CẦU:
                Toàn bộ NỘI DUNG của mục 2, 3, 4 phải suy ra từ phần mô tả yêu cầu của giảng viên
@@ -107,8 +110,7 @@ final class AiPrompts {
                Nguyên tắc còn lại:
                - Số màn hình ở mục 3 phải ĐÚNG con số giảng viên ghi; một màn thì không được tách
                  thành hai, và không được thêm màn nào ngoài danh sách.
-               - Mỗi định danh trong bảng mục 3 phải DUY NHẤT trong toàn đề — không trùng giữa hai
-                 màn hình khác nhau.
+               - Cột "Định danh" của mọi bảng ở mục 3 phải là ô rỗng — xem luật ở phần đầu.
                DB_NAME_HINT_TOKEN
                """
                 .replace("DB_NAME_INLINE_TOKEN", databaseName == null || databaseName.isBlank()
@@ -116,30 +118,7 @@ final class AiPrompts {
                 .replace("DB_NAME_HINT_TOKEN", databaseName == null || databaseName.isBlank()
                         ? "Đề này chưa khai tên file database ở Bước 1 — bạn tự chọn một tên hợp lý "
                           + "và ghi rõ trong \"summary\" để giáo viên khai lại đúng tên đó."
-                        : "Tên file database dùng đúng: " + databaseName + ".")
-                + packageReference(imagePackages);
-    }
-
-    static String packageReference(List<String> imagePackages) {
-        return """
-
-               PHẠM VI THƯ VIỆN CỦA ẢNH CHẤM — KHÔNG CHÉP DANH SÁCH NÀY VÀO THÂN ĐỀ:
-               Package đọc được từ ảnh chấm: IMAGE_TOKEN.
-               Danh sách này chỉ để nhận ra yêu cầu cần thêm thư viện, không quyết định nội dung
-               đề. AI được phép gợi ý package NGOÀI ảnh chấm khi yêu cầu của giảng viên cần nó.
-               Khi cần package ngoài ảnh, đặt ghi chú ở dòng đầu tiên của de_bai_markdown,
-               TRƯỚC tiêu đề đề thi, theo mẫu:
-               [CẦN BỔ SUNG THƯ VIỆN] <tên package>: <lý do cần cho yêu cầu của giảng viên>.
-               Có nhiều package thì ghi đủ tên và lý do cho từng gói trong ghi chú đầu đề.
-               Không đẩy cảnh báo này vào summary thay cho đầu đề. Giảng viên tự quyết định
-               có cần thêm gói hay không. Nếu chưa đọc được ảnh, nói rõ chưa thể xác nhận
-               package được đề xuất trong ghi chú đầu đề; không khẳng định ảnh đang thiếu gói.
-               Từ tiêu đề đề thi trở xuống, tuyệt đối không nhắc tên thư viện nào, kể cả khi
-               giảng viên ghi tên thư viện trong yêu cầu lưu trữ. Mô tả bằng hành vi người dùng
-               và hợp đồng dữ liệu. Các API Flutter lõi như Semantics, InputDecoration vẫn dùng
-               bình thường. Không tự thêm chức năng ngoài yêu cầu của giảng viên.
-               Mục 1 chỉ có câu cấm thêm package/import ngoài khung phát, vi phạm là 0 điểm.
-               """.replace("IMAGE_TOKEN", imagePackages.isEmpty() ? "chưa đọc được ảnh" : String.join(", ", imagePackages));
+                        : "Tên file database dùng đúng: " + databaseName + ".");
     }
 
     static String draftUser(Map<String, Object> req) {
@@ -172,8 +151,11 @@ final class AiPrompts {
                diễn đạt. Giữ đủ 5 mục theo khuôn "ĐỀ THI THỰC HÀNH" (1. Môi trường làm bài và nộp
                bài · 2. Hợp đồng dữ liệu · 3. Hợp đồng giao diện — bảng Định danh theo từng màn
                hình · 4. Chức năng phải làm · 5. Tự kiểm trước khi nộp). Mục 3 vẫn phải giữ định
-               dạng bảng | Thành phần | Cách đặt | Giá trị bắt buộc | Định danh | và mỗi định danh
-               vẫn phải duy nhất trong toàn đề. Đề KHÔNG có bảng điểm — điểm cấu hình riêng ở UI.
+               dạng bảng | Thành phần | Cách đặt | Giá trị bắt buộc | Định danh |. Cột "Định danh"
+               là của giáo viên: ô nào đang trống thì GIỮ TRỐNG, ô nào họ đã điền thì giữ nguyên
+               từng chữ — không tự đặt tên, không sửa, không "chuẩn hoá" lại. Máy chấm tra đúng
+               chuỗi trong lib/dinh_danh.dart của Golden, đổi một chữ ở đây là hỏng hợp đồng.
+               Đề KHÔNG có bảng điểm — điểm cấu hình riêng ở UI.
                Nếu đề cũ có danh sách package thì bỏ danh sách đó; chỉ giữ câu cấm thêm package
                hoặc import package ngoài khung phát, vi phạm là 0 điểm. Không in danh sách package
                trong bất kỳ mục nào của thân đề. Ghi chú đầu đề cho giảng viên được xử lý theo
@@ -190,50 +172,115 @@ final class AiPrompts {
 
     /**
      * AI KHÔNG được tự vẽ SVG trực tiếp — LLM sinh XML tự do rất hay ra thẻ hỏng/lệch toạ độ.
-     * Thay vào đó AI chỉ mô tả từng màn hình bằng JSON có cấu trúc (loại thành phần + nhãn), rồi
+     * Thay vào đó AI chỉ mô tả từng màn hình bằng JSON có cấu trúc, rồi
      * {@link com.example.grader.service.MockupRenderer} vẽ SVG THẬT một cách tất định — luôn hợp
      * lệ về cú pháp, xuống dòng đều, không lệch khung.
+     *
+     * <p>Sửa 20/9/2026 cùng lúc với {@code MockupRenderer}: vốn thành phần nở từ 10 lên 20 loại
+     * (fab, bottom_nav, tab_bar, chip_row, search, total, empty, dropdown, date…) và mỗi thành
+     * phần có thêm {@code sub}/{@code right}/{@code actions}. Kèm theo là HAI VÍ DỤ HOÀN CHỈNH
+     * "bảng mục 3 → JSON" ở cuối prompt: mô hình bắt chước một bài mẫu tốt hơn hẳn đọc mô tả
+     * schema, và đây là chỗ quyết định hình có ra dáng một màn app hay không.
      */
     static String mockupSystem() {
         return """
                Bạn đọc đề thi thực hành Flutter, tìm mục "3. Hợp đồng giao diện" (mỗi mục con
                "3.x <tên màn hình>" kèm một bảng | Thành phần | Cách đặt | Giá trị bắt buộc | Định
-               danh |), rồi mô tả LẠI từng màn hình đó thành một khung dây (wireframe) đơn giản để
-               giáo viên hình dung bố cục — bạn KHÔNG vẽ hình, chỉ mô tả bằng JSON có cấu trúc.
+               danh |), rồi mô tả LẠI từng màn hình đó để giáo viên hình dung bố cục — bạn KHÔNG
+               vẽ hình, chỉ mô tả bằng JSON. Máy sẽ dựng từ mô tả của bạn ra một MÀN HÌNH ĐIỆN
+               THOẠI đúng khung máy 412×915 dp mà hệ thống chấm bài dùng (app được vẽ 412×838, phần
+               còn lại là thanh trạng thái và thanh điều hướng của hệ điều hành), có app bar, vùng
+               nội dung, thanh dưới và nút nổi. Hãy mô tả như đang tả một app thật đang chạy.
 
                Chỉ trả về MỘT object JSON:
-               {
-                 "screens": [
-                   {
-                     "id": "<tên ngắn không dấu, vd man-hinh-danh-sach>",
-                     "title": "<đúng tên màn hình ở mục 3.x>",
-                     "elements": [
-                       {"type": "app_bar", "label": "<tiêu đề thanh trên cùng>"},
-                       {"type": "heading", "label": "<tiêu đề phụ nếu có>"},
-                       {"type": "input", "label": "<nhãn ô nhập, lấy từ cột Thành phần/Cách đặt>"},
-                       {"type": "button", "label": "<chữ trên nút>"},
-                       {"type": "list_item", "label": "<mẫu một dòng trong danh sách>"},
-                       {"type": "card", "label": "<mẫu một thẻ nếu giao diện dạng thẻ>"},
-                       {"type": "text", "label": "<đoạn chữ hiển thị thường>"},
-                       {"type": "checkbox", "label": "<nhãn ô chọn>"},
-                       {"type": "image", "label": "<mô tả ảnh/avatar nếu có>"},
-                       {"type": "divider", "label": ""}
-                     ]
-                   }
-                 ]
-               }
+               {"screens":[{"id":"<tên ngắn không dấu>","title":"<đúng tên màn ở mục 3.x>",
+                            "elements":[ ... ]}]}
+
+               Mỗi phần tử của "elements":
+               {"type":"<loại>","label":"<chữ chính>","sub":"<chữ phụ>","right":"<giá trị canh
+                phải>","actions":["<icon>"]}
+               Bắt buộc có "type" và "label"; ba trường còn lại bỏ hẳn đi nếu không dùng.
+
+               LOẠI ĐƯỢC PHÉP — dùng khi nào:
+                 app_bar        thanh tiêu đề trên cùng. sub:"back" cho màn con có nút quay lại,
+                                hoặc "menu". actions là icon góc phải: search|filter|add|more
+                 tab_bar        tab ngang; label ngăn bởi "|", vd "Tất cả|Thu|Chi"
+                 search         ô tìm kiếm; label là chữ mờ trong ô
+                 chip_row       hàng chip lọc; label ngăn bởi "|", cái ĐẦU là cái đang chọn
+                 heading        tiêu đề nhỏ trong vùng nội dung
+                 text           đoạn chữ thường (mô tả, ghi chú)
+                 input          ô nhập; label là nhãn trường, sub là chữ mờ gợi ý
+                 dropdown       ô chọn trong danh sách (có mũi tên xuống)
+                 date           ô chọn ngày (có icon lịch)
+                 checkbox       ô tích
+                 button         nút chính, nền đặc
+                 button_outline nút phụ dạng viền (vd "Huỷ")
+                 list_item      MỘT dòng của danh sách: label = tiêu đề dòng, sub = dòng phụ,
+                                right = giá trị canh phải, actions = icon cuối dòng edit|delete
+                 card           một thẻ: label + sub + right
+                 image          chỗ dành cho ảnh/avatar
+                 total          dải tổng kết nổi bật: label = tên, right = con số
+                 empty          trạng thái rỗng, vd "Chưa có khoản chi nào"
+                 divider        đường kẻ ngang
+                 fab            nút nổi góc dưới phải; label là việc nó làm
+                 bottom_nav     thanh điều hướng dưới; label ngăn bởi "|"
 
                QUY TẮC:
-               - MỘT phần tử "screens" cho MỖI mục con 3.x trong đề — đúng số màn, đúng thứ tự.
-               - "elements" LẤY TỪ cột "Thành phần" của bảng Định danh màn hình đó, KHÔNG bịa thêm
-                 thành phần đề không nhắc tới. Thứ tự phần tử theo đúng thứ tự dòng trong bảng.
-               - Luôn mở đầu mỗi màn hình bằng một "app_bar" lấy nhãn là tên màn hình (mục 3.x),
-                 trừ khi đề nói rõ màn hình không có thanh tiêu đề.
-               - "type" CHỈ được chọn trong 10 loại đã liệt kê ở ví dụ trên.
-               - "label" ngắn gọn (dưới 40 ký tự), lấy nguyên văn từ cột "Cách đặt"/"Giá trị bắt
-                 buộc" của bảng khi có thể — đây là khung dây nội bộ, không phải đề chính thức, nên
-                 không cần giữ dấu Semantics(...) hay cú pháp code.
-               - Bỏ qua màn hình nào đề không có bảng Định danh rõ ràng (ví dụ mô tả bằng lời).
+               - MỘT phần tử "screens" cho MỖI mục con 3.x — đúng số màn, đúng thứ tự.
+               - Nội dung LẤY TỪ cột "Thành phần"/"Giá trị bắt buộc" của bảng màn đó, KHÔNG bịa
+                 thêm thành phần đề không nhắc tới.
+               - Phần tử ĐẦU TIÊN của mỗi màn luôn là "app_bar", nhãn là tên màn hình.
+               - Màn có DANH SÁCH: vẽ 3 "list_item" với dữ liệu ví dụ CỤ THỂ (tên thật, số tiền
+                 thật, ngày thật) — ba dòng trống trơn không cho ai hình dung được gì. Đề có
+                 sửa/xoá từng dòng thì thêm "actions":["edit","delete"].
+               - Dữ liệu ví dụ đó CHỈ để minh hoạ, không được mâu thuẫn với "Giá trị bắt buộc"
+                 trong bảng: nhãn nút, tiêu đề màn, thông báo lỗi phải chép đúng từng chữ.
+               - Màn có nút "Thêm" dẫn sang màn khác: dùng "fab", KHÔNG dùng "button".
+               - Màn BIỂU MẪU (thêm/sửa): app_bar có sub:"back", rồi các ô nhập, rồi "button" ở
+                 cuối. Không fab, không bottom_nav.
+               - Có tổng/thống kê thì dùng "total" kèm con số ví dụ.
+               - Chỉ dùng "bottom_nav" khi đề nói rõ màn có thanh điều hướng dưới.
+               - Chữ NGẮN: label dưới 34 ký tự, sub dưới 40, right dưới 14 — dài hơn sẽ bị cắt khi
+                 vẽ. Bỏ hết cú pháp code (Semantics(...), labelText:…), chỉ giữ chữ người dùng thấy.
+               - 6–11 phần tử một màn là vừa khung; nhiều hơn thì máy phải thu nhỏ cho vừa.
+               - Bỏ qua màn hình nào đề không có bảng Định danh rõ ràng (mô tả bằng lời).
+
+               VÍ DỤ 1 — bảng mục 3 của một màn danh sách:
+               | Thành phần | Cách đặt | Giá trị bắt buộc |
+               | Tiêu đề màn | AppBar | Quản lý chi tiêu |
+               | Ô tìm kiếm | hintText | Tìm theo tiêu đề |
+               | Dòng khoản chi | ListTile | <tiêu đề> — <số tiền> |
+               | Nút xoá | IconButton | Xoá |
+               | Nút thêm | FloatingActionButton | Thêm khoản chi |
+               → trả về:
+               {"screens":[{"id":"man-danh-sach","title":"Danh sách khoản chi","elements":[
+                 {"type":"app_bar","label":"Quản lý chi tiêu","actions":["filter"]},
+                 {"type":"search","label":"Tìm theo tiêu đề"},
+                 {"type":"total","label":"Tổng chi tháng 9","right":"2.450.000đ"},
+                 {"type":"list_item","label":"Ăn trưa","sub":"12/09 · Ăn uống","right":"45.000đ",
+                  "actions":["edit","delete"]},
+                 {"type":"list_item","label":"Đổ xăng","sub":"11/09 · Đi lại","right":"120.000đ",
+                  "actions":["edit","delete"]},
+                 {"type":"list_item","label":"Tiền điện","sub":"05/09 · Hoá đơn","right":"380.000đ",
+                  "actions":["edit","delete"]},
+                 {"type":"fab","label":"Thêm khoản chi"}]}]}
+
+               VÍ DỤ 2 — bảng mục 3 của một màn biểu mẫu:
+               | Thành phần | Cách đặt | Giá trị bắt buộc |
+               | Tiêu đề màn | AppBar | Thêm khoản chi |
+               | Ô tiêu đề | labelText | Tiêu đề |
+               | Ô số tiền | labelText | Số tiền |
+               | Chọn danh mục | DropdownButton | Danh mục |
+               | Chọn ngày | DatePicker | Ngày chi |
+               | Nút lưu | ElevatedButton | Lưu |
+               → trả về:
+               {"screens":[{"id":"man-them","title":"Thêm khoản chi","elements":[
+                 {"type":"app_bar","label":"Thêm khoản chi","sub":"back"},
+                 {"type":"input","label":"Tiêu đề","sub":"vd: Ăn trưa"},
+                 {"type":"input","label":"Số tiền","sub":"vd: 45000"},
+                 {"type":"dropdown","label":"Danh mục","sub":"Ăn uống"},
+                 {"type":"date","label":"Ngày chi","sub":"12/09/2026"},
+                 {"type":"button","label":"Lưu"}]}]}
                """;
     }
 

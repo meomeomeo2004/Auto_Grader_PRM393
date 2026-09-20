@@ -32,6 +32,10 @@ public final class PdfWriter implements AutoCloseable {
     private static final float MARGIN = 50f;
     private static final float CONTENT_WIDTH = PAGE_WIDTH - 2 * MARGIN;
     private static final float BOTTOM = MARGIN;
+    /** Trần CHIỀU CAO của một ảnh minh hoạ (≈14,8cm in ra). Hình minh hoạ giao diện cao gấp đôi
+     *  bề ngang, thu vừa bề ngang trang vẫn còn cao hơn cả vùng in — mỗi hình chiếm trọn một
+     *  trang rồi vẫn bị cắt. Thu theo chiều nào CHẬT hơn thì ảnh luôn nằm gọn. */
+    private static final float MAX_IMAGE_HEIGHT = 420f;
 
     /** "**đậm**" hoặc "`mã`" — cùng cú pháp DocxWriter#INLINE_MARKUP để hai bản xuất khớp nhau. */
     private static final Pattern INLINE_MARKUP = Pattern.compile("\\*\\*([^*]+)\\*\\*|`([^`]+)`");
@@ -193,12 +197,12 @@ public final class PdfWriter implements AutoCloseable {
         return this;
     }
 
-    /** Ảnh minh họa — thu nhỏ vừa bề rộng trang, giữ tỉ lệ, không phóng to ảnh nhỏ hơn khổ trang. */
+    /** Ảnh minh họa — thu nhỏ vừa bề rộng VÀ chiều cao trang, giữ tỉ lệ, không phóng to ảnh nhỏ. */
     public PdfWriter image(byte[] png, int widthPx, int heightPx) {
         if (png == null || png.length == 0 || widthPx <= 0 || heightPx <= 0) return this;
         try {
             PDImageXObject image = PDImageXObject.createFromByteArray(document, png, "screenshot");
-            float scale = widthPx > CONTENT_WIDTH ? CONTENT_WIDTH / widthPx : 1f;
+            float scale = Math.min(1f, Math.min(CONTENT_WIDTH / widthPx, MAX_IMAGE_HEIGHT / heightPx));
             float drawWidth = widthPx * scale;
             float drawHeight = heightPx * scale;
             ensureSpace(drawHeight + 10f);

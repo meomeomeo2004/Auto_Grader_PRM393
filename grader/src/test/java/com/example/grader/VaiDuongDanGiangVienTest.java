@@ -25,8 +25,8 @@ class VaiDuongDanGiangVienTest {
         Set<String> co = cua(mapping);
 
         assertTrue(coNhom(co, "/api/behavior-authoring"), "phải có màn soạn bộ chấm");
-        assertTrue(co.contains("/api/exam-setup/{examId}/starter-check"),
-                "phải có kiểm đồng bộ khung phát");
+        assertTrue(co.contains("/api/exam-setup/{examId}/khung-phat"),
+                "phải có đường tải khung phát cho sinh viên");
         assertTrue(co.contains("/api/exam-setup/{examId}/xuat-goi"),
                 "phải có đường xuất gói bàn giao");
         assertTrue(coNhom(co, "/api/grading-env"), "Thư viện chấm là của chung, phải có");

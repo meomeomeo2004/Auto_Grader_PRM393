@@ -64,7 +64,6 @@ public class BatchGradingService {
     @Autowired private GradingBatchRepository batchRepo;
     @Autowired private ExamRepository examRepo;
     @Autowired private GradingRuntimeSettingsService runtimeSettings;
-    @Autowired private StarterSyncService starterSyncService;
 
     /** Bản hợp đồng `result.json` mà backend này phát hành — xem SPEC_grader_result_json/. */
     private static final String SCHEMA_VERSION = "2";
@@ -222,21 +221,6 @@ public class BatchGradingService {
      * khung phát và Golden làm hỏng CẢ LỚP, và không khâu nào khác nhìn thấy nó. Bộ đề publish
      * từ trước khi có khâu này được miễn trừ nên không đề nào đang chạy bị chặn oan.
      */
-    /**
-     * Lời báo phải nói đúng việc mà NGƯỜI ĐANG ĐỌC làm được. Bản người chấm không có màn soạn
-     * đề lẫn Golden, nên bảo họ "vào phần soạn đề mà kiểm" là chỉ vào một màn hình không tồn
-     * tại — họ sẽ ngồi bấm quanh rồi kết luận hệ thống hỏng.
-     */
-    private void chanNeuChuaDongBo(String examId) {
-        if (starterSyncService.chamDuoc(examId)) return;
-        String trangThai = starterSyncService.trangThai(examId);
-        String cachSua = coManSoanDe
-                ? "Vào phần soạn đề, chọn đề rồi nạp gói khung phát cho sinh viên để đối chiếu với Golden."
-                : "Bản này không có Golden nên không tự kiểm được. Báo người ra đề kiểm đồng bộ khung phát"
-                  + " rồi xuất lại gói bàn giao và gửi sang.";
-        throw new IllegalStateException("Đề này chưa qua kiểm đồng bộ khung phát (" + trangThai
-                + "). " + cachSua + " Đạt thì mới chấm được.");
-    }
 
     public BatchSubmitResponse enqueueBatch(List<MultipartFile> files, List<String> usernames,
                                             String examId, String createdBy) throws Exception {
@@ -245,7 +229,7 @@ public class BatchGradingService {
                     "Mỗi file .zip phải đi kèm đúng tên thư mục username.");
         Exam exam = examRepo.findByExamId(examId)
                 .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy đề thi: " + examId));
-        chanNeuChuaDongBo(examId);
+        chanNeuAnhChamThieuGoi(examId);
         // Không còn nút "Build Sandbox" thủ công: sandbox được chuẩn bị ngay lúc publish/import.
         // Lần đó có thể hỏng vì Docker chưa bật, nên thử lại tại đây — chấm bài vốn đã cần Docker.
         if (exam.getStatus() != ExamStatus.READY) {
@@ -364,9 +348,11 @@ public class BatchGradingService {
         String examId = batch.getExamId();
         Exam exam = examRepo.findByExamId(examId)
                 .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy đề thi: " + examId));
-        chanNeuChuaDongBo(examId);
         if (exam.getStatus() != ExamStatus.READY)
             throw new IllegalStateException("Đề thi chưa sẵn sàng để chấm: " + exam.getStatus());
+        // Phiên có thể đã mở từ trước khi ai đó gỡ gói rồi dựng lại ảnh; nạp thêm bài vào phiên
+        // cũ cũng phải qua cùng một cửa, không thì đây thành đường vòng.
+        chanNeuAnhChamThieuGoi(examId);
 
         gradingService.clearCancelled(batchId);
 
@@ -460,7 +446,12 @@ public class BatchGradingService {
 
             float score = parseScore(resultJson);
             String fullJson = assembleResultJson(job, resultJson);   // JSON đầy đủ cho lịch sử/năng lực
-            GradingDiagnosticException diagnostic = diagnoseGraderResult(resultJson, score);
+            // Nối chẩn đoán hợp đồng dữ liệu vào thông điệp SẴN CÓ chứ không tự dựng chẩn đoán
+            // mới: bài trượt vì lệch schema thì đã có lý do trượt của nó rồi, cái thiếu chỉ là
+            // câu giải thích VÌ SAO. Bài không có chẩn đoán nào thì để yên — thêm vào là đổi
+            // cách hệ thống xử lý lượt chấm, mà đây chỉ được phép giải thích.
+            GradingDiagnosticException diagnostic = HopDongDuLieu.themVaoChanDoan(
+                    diagnoseGraderResult(resultJson, score), HopDongDuLieu.docTuKetQua(resultJson));
             if (isSystemFault(diagnostic)) {
                 manualReview = true;
                 updateStatus(job, GradingStatus.MANUAL_REVIEW, null, resultJson, fullJson);
@@ -587,6 +578,26 @@ public class BatchGradingService {
      *
      * <p>{@code null} = không có sự cố nào ⇒ không phải lỗi hệ thống.
      */
+    /**
+     * Ảnh chấm thiếu package đề đòi thì đừng cho chấm.
+     *
+     * <p>Không phải phép kiểm thừa so với cửa lúc nạp gói: cửa kia là ảnh chụp một thời điểm,
+     * còn ảnh chấm thì đổi được sau đó — màn Thư viện chấm có nút gỡ gói rồi dựng lại ảnh. Thiếu
+     * gói thì MỌI bài không biên dịch nổi; để chạy tiếp là đổi một lời báo rõ ràng lấy cả một lô
+     * bài 0 điểm mà nguyên nhân chôn trong log từng bài.
+     *
+     * <p>Chặn ở đây chứ không ở từng job: hỏng này là của cả đề, không của riêng bài nào — báo
+     * một lần lúc bấm chấm thì người dùng còn sửa được, báo 40 lần thì không ai đọc.
+     */
+    private void chanNeuAnhChamThieuGoi(String examId) {
+        List<String> thieu = examService.thieuGoiCuaDe(examId, examService.goiCoTrongAnhCham());
+        if (thieu.isEmpty()) return;
+        throw new IllegalStateException("Ảnh chấm trên máy này thiếu thư viện mà bộ " + examId
+                + " đòi: " + String.join(", ", thieu)
+                + ". Sang Thư viện chấm thêm đúng những gói đó rồi dựng lại ảnh chấm."
+                + " Chấm lúc này thì mọi bài đều không biên dịch được.");
+    }
+
     private boolean isSystemFault(GradingDiagnosticException diagnostic) {
         return diagnostic != null
                 && diagnostic.origin() != GradingDiagnosticException.Origin.STUDENT;
@@ -868,6 +879,11 @@ public class BatchGradingService {
 
             if (g.has("analyze_result"))
                 root.put("analyze_result", mapper.convertValue(g.get("analyze_result"), Object.class));
+
+            // Chẩn đoán hợp đồng dữ liệu: chuyển tiếp nguyên khối, KHÔNG dẫn xuất gì từ nó.
+            // Nó đứng ngoài test_cases[] nên không có đường nào chạm vào điểm.
+            if (g.has(HopDongDuLieu.KHOA))
+                root.put(HopDongDuLieu.KHOA, mapper.convertValue(g.get(HopDongDuLieu.KHOA), Object.class));
 
             return mapper.writeValueAsString(root);
         } catch (Exception e) {
