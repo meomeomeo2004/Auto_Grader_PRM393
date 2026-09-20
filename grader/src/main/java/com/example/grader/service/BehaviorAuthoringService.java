@@ -595,36 +595,17 @@ public class BehaviorAuthoringService {
         throw new IllegalArgumentException("Không tìm thấy event sequence " + sequence);
     }
 
-    @Transactional
-    /**
-     * Sửa GIÁ TRỊ NHẬP của một bước gõ chữ trong phiên record.
-     *
-     * Đây là nguồn sự thật duy nhất cho nội dung gõ. Recorder chỉ ghi được cú chạm vào ô;
-     * chữ thì người soạn tự khai ở đây, vì đọc chữ từ DOM của Flutter Web đã hỏng đủ ba
-     * kiểu: cắt cụt, mất trắng, và gán nhầm ô.
-     */
-    public Map<String, Object> updateEventValue(String recordingId, int sequence, String value) {
-        if (sequence < 1) throw new IllegalArgumentException("sequence event phải lớn hơn hoặc bằng 1");
-        GoldenRecording recording = recordingForUpdate(recordingId);
-        if (recording.getStatus() != RecordingStatus.ACTIVE) {
-            throw new IllegalStateException("Chỉ sửa được giá trị trong phiên ACTIVE");
-        }
-        List<Map<String, Object>> trace = readObjectList(recording.getRawTraceJson());
-        for (Map<String, Object> event : trace) {
-            Object raw = event.get("sequence");
-            if (raw instanceof Number number && number.intValue() == sequence) {
-                if (!"enter_text".equals(text(event, "action", ""))) {
-                    throw new IllegalArgumentException("Chỉ bước gõ chữ mới có giá trị nhập.");
-                }
-                event.put("value", value);
-                event.put("valueType", "string");
-                recording.setRawTraceJson(json(trace));
-                recordings.save(recording);
-                return event;
-            }
-        }
-        throw new IllegalArgumentException("Không tìm thấy event sequence " + sequence);
-    }
+    // ĐÃ GỠ updateEventValue (20/9/2026): sửa tay GIÁ TRỊ NHẬP của một bước gõ chữ.
+    //
+    // Nó sinh ra thời recorder chưa đọc được chữ từ DOM Flutter Web. Nay đường đọc có ba nguồn
+    // (input còn sống -> node semantics -> snapshot cuối của event input, xem chotEnterText
+    // trong GoldenRuntimeService) và đo trên Golden thật ngày 20/9 thì vào đủ, không mất dấu
+    // tiếng Việt.
+    //
+    // Vì sao gỡ hẳn chứ không để đó: bộ chấm chỉ được phép mô tả THỨ NGƯỜI SOẠN THẬT SỰ LÀM
+    // trên app. Một ô cho gõ đè nội dung là đường duy nhất để plan nói một đằng còn thao tác
+    // trên Golden một nẻo, mà lệch kiểu đó thì Kiểm Golden cũng không bắt được — nó replay
+    // đúng cái plan đã lệch. Ghi sai thì xóa bước rồi gõ lại trên Golden.
 
     // BẮT BUỘC @Transactional: recordingForUpdate() khóa bi quan PESSIMISTIC_WRITE, mà khóa
     // này đòi phải nằm trong transaction — thiếu là ném "No active transaction" ngay khi bấm

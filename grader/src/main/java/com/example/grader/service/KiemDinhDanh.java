@@ -1,6 +1,7 @@
 package com.example.grader.service;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -45,14 +46,64 @@ final class KiemDinhDanh {
     private static final Pattern KHAI_HAM = Pattern.compile(
             "\\bstatic\\s+(?:const\\s+)?[A-Za-z_][\\w<>?,\\s]*?\\s([A-Za-z_]\\w*)\\s*\\(");
 
+    /** Như {@link #KHAI_HANG} nhưng lấy cả GIÁ TRỊ: {@code them = 'chi_tieu.them'}. */
+    private static final Pattern HANG_KEM_GIA_TRI = Pattern.compile(
+            "\\bstatic\\s+(?:const\\s+|final\\s+)?[A-Za-z_][\\w<>?,\\s]*?\\s([A-Za-z_]\\w*)\\s*=\\s*(['\"])(.*?)\\2");
+
+    /** Như {@link #KHAI_HAM} nhưng lấy cả GIÁ TRỊ: {@code dong(int id) => 'chi_tieu.dong.$id'}. */
+    private static final Pattern HAM_KEM_GIA_TRI = Pattern.compile(
+            "\\bstatic\\s+(?:const\\s+)?[A-Za-z_][\\w<>?,\\s]*?\\s([A-Za-z_]\\w*)\\s*\\([^)]*\\)\\s*=>\\s*(['\"])(.*?)\\2");
+
     /**
-     * Soát Golden. Trả về danh sách câu lỗi đã diễn giải; rỗng nghĩa là khớp.
+     * Kết quả soát. Tách ba nhóm thay vì một danh sách câu chữ để {@link KetQua#gon()} ghép được
+     * một dòng gọn, và để bài test khẳng định được TỪNG nhóm thay vì dò chuỗi.
+     */
+    record KetQua(String hong, List<String> khaiMaKhongGan, List<String> ganMaKhongKhai,
+                  List<String> goThangGiaTri) {
+
+        static KetQua khong() {
+            return new KetQua(null, List.of(), List.of(), List.of());
+        }
+
+        static KetQua hong(String ly) {
+            return new KetQua(ly, List.of(), List.of(), List.of());
+        }
+
+        boolean coLech() {
+            return hong != null || !khaiMaKhongGan.isEmpty() || !ganMaKhongKhai.isEmpty()
+                    || !goThangGiaTri.isEmpty();
+        }
+
+        /**
+         * Một dòng, đủ để biết phải sửa CÁI GÌ ở đâu — dùng khi từ chối nhận file.
+         *
+         * <p>Phải gọn thật: câu này đi thẳng vào thanh báo lỗi của giao diện, nối thêm
+         * "— Upload không thành công." ở cuối. Liệt kê theo NHÓM chứ không mỗi lệch một đoạn văn,
+         * vì sửa một chỗ trong Golden thường đẻ ra hai triệu chứng cùng lúc.
+         */
+        String gon() {
+            if (hong != null) return hong;
+            List<String> ve = new ArrayList<>();
+            // Vế này đứng TRƯỚC: nó là ca hay gặp nhất, và là ca mà hai vế kia mô tả sai bản chất.
+            if (!goThangGiaTri.isEmpty()) {
+                ve.add("gõ thẳng giá trị thay vì dùng hằng số: " + String.join(", ", goThangGiaTri));
+            }
+            if (!khaiMaKhongGan.isEmpty()) {
+                ve.add("khai mà không gắn: " + String.join(", ", khaiMaKhongGan));
+            }
+            if (!ganMaKhongKhai.isEmpty()) {
+                ve.add("gắn mà không khai: " + String.join(", ", ganMaKhongKhai));
+            }
+            return "Định danh chưa nhất quán — " + String.join("; ", ve);
+        }
+    }
+
+    /**
+     * Soát Golden.
      *
      * @param nguon đường dẫn tương đối (bắt đầu bằng {@code lib/}) → nội dung file
      */
-    static List<String> kiem(Map<String, String> nguon) {
-        List<String> loi = new ArrayList<>();
-
+    static KetQua kiem(Map<String, String> nguon) {
         String tepKhai = null;
         for (String duong : nguon.keySet()) {
             if (duong.endsWith("/" + TEN_TEP) || duong.equals("lib/" + TEN_TEP)) {
@@ -61,17 +112,16 @@ final class KiemDinhDanh {
             }
         }
         if (tepKhai == null) {
-            loi.add("Golden chưa có lib/" + TEN_TEP
-                    + ". Đây là file hợp đồng định danh, khung phát cho sinh viên chép thẳng từ đây "
-                    + "— thiếu nó thì không xuất được khung. Tải file mẫu ở màn đầu Bộ chấm Golden.");
-            return loi;
+            return KetQua.hong("Golden thiếu lib/" + TEN_TEP
+                    + " — đây là file hợp đồng định danh, khung phát cho sinh viên chép thẳng từ đây. "
+                    + "Tải file mẫu ở màn đầu Bộ chấm Golden.");
         }
 
         String maKhai = MaNguonDart.boChuThich(nguon.get(tepKhai));
         Matcher mLop = TEN_LOP.matcher(maKhai);
         if (!mLop.find()) {
-            loi.add(tepKhai + " không có khai báo class nào — máy không biết tra tham chiếu theo tên gì.");
-            return loi;
+            return KetQua.hong(tepKhai + " không có khai báo class nào — máy không biết tra tham chiếu "
+                    + "theo tên gì.");
         }
         String tenLop = mLop.group(1);
 
@@ -81,9 +131,8 @@ final class KiemDinhDanh {
             while (m.find()) daKhai.add(m.group(1));
         }
         if (daKhai.isEmpty()) {
-            loi.add(tepKhai + " chưa khai định danh nào. Xoá phần ví dụ trong file mẫu rồi thì phải "
-                    + "thay bằng định danh của đề.");
-            return loi;
+            return KetQua.hong(tepKhai + " chưa khai định danh nào — xoá phần ví dụ trong file mẫu rồi "
+                    + "thì phải thay bằng định danh của đề.");
         }
 
         // Tham chiếu <Lớp>.<thành viên> ở mọi file KHÁC file khai.
@@ -98,19 +147,58 @@ final class KiemDinhDanh {
             chuoiGoTay.addAll(chuoiGanThang(ma));
         }
 
-        for (String ten : daKhai) {
-            if (!daDung.contains(ten)) {
-                loi.add("KHAI MÀ KHÔNG GẮN: " + tenLop + "." + ten + " có trong " + tepKhai
-                        + " nhưng không chỗ nào trong lib/ dùng tới. Sinh viên nhận được file này sẽ "
-                        + "đi gắn một định danh không tiêu chí nào chấm — xoá nó, hoặc gắn nó vào widget.");
+        // GIÁ TRỊ của từng hằng số, để phân biệt hai ca mà bản đầu gộp làm một:
+        //  - gõ thẳng ĐÚNG giá trị của một hằng số đã khai  -> chỉ là không dùng hằng số
+        //  - gõ thẳng một chuỗi KHÔNG hằng số nào mang      -> sinh viên không có đường biết
+        // Bản đầu báo ca thứ nhất thành HAI lỗi rời nhau ("khai mà không gắn X" + "gắn mà không
+        // khai 'giá trị của X'"), đọc lên như hai chỗ phải sửa trong khi chỉ có một dòng.
+        Map<String, String> giaTri = new LinkedHashMap<>();
+        for (Pattern p : List.of(HANG_KEM_GIA_TRI, HAM_KEM_GIA_TRI)) {
+            Matcher m = p.matcher(maKhai);
+            while (m.find()) giaTri.putIfAbsent(m.group(1), m.group(3));
+        }
+
+        List<String> goThang = new ArrayList<>();
+        List<String> goTay = new ArrayList<>();
+        Set<String> daKeBangGoThang = new LinkedHashSet<>();
+        for (String chuoi : chuoiGoTay) {
+            String chu = tenHangMangGiaTri(giaTri, chuoi);
+            if (chu != null) {
+                daKeBangGoThang.add(chu);
+                String nhan = tenLop + "." + chu;
+                if (!goThang.contains(nhan)) goThang.add(nhan);
+            } else {
+                goTay.add("'" + chuoi + "'");
             }
         }
-        for (String chuoi : chuoiGoTay) {
-            loi.add("GẮN MÀ KHÔNG KHAI: Golden gắn identifier: '" + chuoi + "' bằng chuỗi gõ thẳng, "
-                    + "không đi qua " + tenLop + ". Chuỗi này không có trong " + tepKhai + " nên sinh viên "
-                    + "không có đường nào biết mà gắn. Khai nó thành hằng số rồi dùng lại.");
+
+        List<String> thua = new ArrayList<>();
+        for (String ten : daKhai) {
+            if (daDung.contains(ten)) continue;
+            // Đã kể ở vế "gõ thẳng giá trị" rồi thì đừng kể lại lần nữa dưới tên khác.
+            if (daKeBangGoThang.contains(ten)) continue;
+            thua.add(tenLop + "." + ten);
         }
-        return loi;
+        return new KetQua(null, thua, goTay, goThang);
+    }
+
+    /**
+     * Hằng số nào mang đúng giá trị {@code chuoi}, hoặc mang khuôn sinh ra nó.
+     *
+     * <p>Khớp TUYỆT ĐỐI trước rồi mới tới khuôn: {@code 'chi_tieu.dong.$id'} có tiền tố
+     * {@code chi_tieu.dong.} nên nếu xét trước, nó sẽ cướp mất một hằng số khác trùng khít.
+     * Khuôn có tiền tố RỖNG (giá trị mở đầu bằng {@code $}) thì bỏ qua — nó khớp mọi thứ.
+     */
+    private static String tenHangMangGiaTri(Map<String, String> giaTri, String chuoi) {
+        for (Map.Entry<String, String> e : giaTri.entrySet()) {
+            if (e.getValue().equals(chuoi)) return e.getKey();
+        }
+        for (Map.Entry<String, String> e : giaTri.entrySet()) {
+            int dau = e.getValue().indexOf('$');
+            if (dau <= 0) continue;
+            if (chuoi.startsWith(e.getValue().substring(0, dau))) return e.getKey();
+        }
+        return null;
     }
 
     /**

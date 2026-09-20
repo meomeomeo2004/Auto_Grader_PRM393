@@ -446,6 +446,7 @@ Future<void> _runStep(
         timeout,
       );
       await tester.ensureVisible(finder);
+      _chanChamVaoCum(tester, finder, _asMap(step['target']));
       await tester.tap(finder, warnIfMissed: false);
       return;
     case 'enter_text':
@@ -3903,6 +3904,76 @@ void _assertRouteState(
       'Checkpoint route_state không có giá trị nào để kiểm tra.',
     );
   }
+}
+
+/// CHẶN CHẠM VÀO CẢ CỤM — đích trỏ vào lớp bao nhiều control chứ không vào một nút.
+///
+/// `tester.tap` chạm theo TÂM KHUNG nên nó không bao giờ than phiền: bọc
+/// `Semantics(identifier:)` quanh cả `Form`/`Column` thì chạm vẫn "thành công", chỉ là rơi vào
+/// giữa cụm chứ không vào nút nào. Đo 20/9/2026: cùng ca ấy `enter_text` ném "Too many elements"
+/// nên lộ ngay, còn `tap` thì IM — Golden có thể vẫn đạt vì tâm cụm tình cờ trúng, rồi bài sinh
+/// viên bọc sát control lại chạm trượt. Đó là kiểu hỏng đắt nhất: sai mà không ai biết.
+///
+/// Dấu hiệu tách được hai ca, đo trên bảy kiểu bọc:
+///  - chính nút CÓ `tap` (ô nhập, dòng ListTile có onTap) → nó là control, cho qua ngay.
+///  - không có `tap` của riêng mình thì đếm NHÁNH LÁ mang tap bên trong. Lớp bọc đúng của một
+///    control luôn ra ĐÚNG MỘT — chip 1, FAB 1, nút Xoá 1 (hai node tap lồng nhau của Material
+///    nằm trên cùng một nhánh nên gộp lại thành một lá) — còn cụm ra 2 (hai nút) hoặc 3 (ba ô nhập).
+///
+/// KHÔNG dùng tỉ lệ diện tích như chốt chặn bên recorder: đo ra dòng ListTile HỢP LỆ 25 lần,
+/// còn Form SAI chỉ 3 lần — ngưỡng nào cũng cắt nhầm. Hai chỗ hai dấu hiệu khác nhau là đúng,
+/// vì bên kia so với phần tử vừa bấm, bên này không có phần tử nào để so.
+void _chanChamVaoCum(
+  WidgetTester tester,
+  Finder finder,
+  Map<String, dynamic> target,
+) {
+  SemanticsNode nut;
+  try {
+    nut = tester.getSemantics(finder.first);
+  } catch (_) {
+    return; // Không đọc được cây ngữ nghĩa thì bỏ phép kiểm, đừng làm hỏng lượt chấm.
+  }
+  if (nut.getSemanticsData().hasAction(SemanticsAction.tap)) return;
+  final soLa = _demNhanhLaCoTap(nut);
+  if (soLa < 2) return;
+  throw StateError(
+    '${_moTaTarget(target)} không phải một nút: bên trong nó có $soLa thành phần bấm được. '
+    'Nhiều khả năng Golden bọc Semantics(identifier:) quanh cả cụm (Form/Column/Card) thay vì '
+    'quanh chính nút — chạm vào đây là chạm vào giữa cụm, không trúng nút nào. Bọc sát control '
+    'rồi ghi hình lại bước này.',
+  );
+}
+
+/// Số nhánh lá mang `tap`: node có tap mà bên dưới nó không còn node nào có tap.
+/// Đếm theo lá chứ không đếm tổng, vì một nút Material sinh ra hai node tap lồng nhau.
+int _demNhanhLaCoTap(SemanticsNode goc) {
+  var dem = 0;
+  void di(SemanticsNode x) {
+    var conCoTap = false;
+    x.visitChildren((c) {
+      if (_coTapTrongCay(c)) conCoTap = true;
+      di(c);
+      return true;
+    });
+    if (x.getSemanticsData().hasAction(SemanticsAction.tap) && !conCoTap) dem++;
+  }
+
+  goc.visitChildren((c) {
+    di(c);
+    return true;
+  });
+  return dem;
+}
+
+bool _coTapTrongCay(SemanticsNode x) {
+  if (x.getSemanticsData().hasAction(SemanticsAction.tap)) return true;
+  var co = false;
+  x.visitChildren((c) {
+    if (_coTapTrongCay(c)) co = true;
+    return true;
+  });
+  return co;
 }
 
 Future<void> _assertLayoutRelation(

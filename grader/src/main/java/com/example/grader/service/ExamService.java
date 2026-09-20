@@ -2017,9 +2017,11 @@ public class ExamService {
      * nhưng trước nay không chỗ nào chỉ cách viết file đó — người lần đầu dựng Golden phải tự đoán
      * cả cú pháp lẫn chỗ gắn. Chú thích trong file chỉ đọc được SAU KHI đã tự viết ra nó.
      *
-     * <p>Chú thích trong file cố ý KHÔNG dấu tiếng Việt, theo đúng {@code dinh_danh.dart} và
-     * {@link KhungMainDart#HOME_KHUNG} đang phát cho sinh viên: file này đi tới máy của người khác,
-     * mở bằng trình soạn thảo nào không biết trước.
+     * <p>Chú thích viết tiếng Việt CÓ DẤU. Bản đầu (20/9/2026) viết không dấu vì thấy
+     * {@code dinh_danh.dart} và {@code database_helper.dart} của Golden đều gần như thuần ASCII nên
+     * tưởng đó là luật — đo lại thì không phải: Dart là UTF-8 theo chuẩn, và chính Golden đang có
+     * {@code home_screen.dart} 425 byte có dấu, {@code expense_calculator.dart} 454 byte, chấm vẫn
+     * chạy. Người soạn đề không đọc nổi bản không dấu, mà file này tồn tại chỉ để họ đọc.
      */
     public byte[] dinhDanhMau() throws Exception {
         try (java.io.InputStream in = new ClassPathResource("golden-template/dinh_danh.dart").getInputStream()) {

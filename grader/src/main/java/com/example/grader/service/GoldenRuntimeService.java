@@ -47,7 +47,13 @@ public class GoldenRuntimeService {
     // dung) · v20: locator duy nhất + chốt giá trị nhập theo ranh giới thao tác · v4: quét
     // thành phần CHỈ trong flutter-view.
     // v28: nạp DB ẩn vào tên dò từ Golden, bỏ tên app.db cố định; đổi version để rebuild cache cũ.
-    private static final String RECORDER_BRIDGE_VERSION = "detected-database-v28";
+    // v29: đường leo cha dừng khi KHUNG PHÌNH quá 4 lần phần tử vừa bấm — chặn ca Golden bọc
+    // Semantics(identifier:) quanh cả Form/Column rồi mọi ô con ghi chung một đích (xem identifierOf).
+    // v30: ghép hai lớp DOM đòi thêm KÍCH THƯỚC TƯƠNG ĐƯƠNG, không chỉ chồng lấp — bấm vào khoảng
+    // trống không còn bị ghi thành một cú bấm vào nút nào đó (xem spatialSemanticNode).
+    // v31: bấm vào khoảng trống thì IM LẶNG bỏ qua, không còn nhả cảnh báo mỗi cú bấm trượt; chỉ
+    // còn cảnh báo khi bấm TRÚNG một control mà không suy ra được đích (xem coControlTaiDiem).
+    private static final String RECORDER_BRIDGE_VERSION = "identifier-scope-v31";
 
     @Value("${grader.base-image:grading-base:latest}")
     private String baseImage;
@@ -624,7 +630,22 @@ public class GoldenRuntimeService {
                       const minArea = targetRect
                         ? Math.min(rect.width * rect.height, Math.max(1, targetRect.width * targetRect.height)) : 1;
                       const overlapRatio = overlapArea / minArea;
-                      if (!containsPoint && overlapRatio < 0.6) continue;
+                      // LONG NHAU THI CHUA DU. minArea lay theo cai NHO HON, nen moi nut nam gon
+                      // trong khung cua phan tu bi cham deu ra overlapRatio = 1. Bam vao KHOANG
+                      // TRONG duoi bieu mau thi phan tu bi cham la ca FLUTTER-VIEW, moi nut tren man
+                      // deu thanh ung vien "hoan hao", containsPoint sai het, roi sizeDelta cham lay
+                      // cai nao kich thuoc gan ca man nhat - ghi ra mot cu bam khong ai bam.
+                      // Do 20/9/2026 tren DOM that: bam (640,600) o cho trong -> ghi thanh
+                      // chi_tieu.form.luu, sau ung vien deu overlapRatio 1.
+                      //
+                      // Nhanh nay sinh ra de ghep HAI LOP DOM cua CUNG mot control, ma hai lop do
+                      // khung xap xi nhau: do duoc input 1256x62 vs flt-semantics 1248x56, ti le dien
+                      // tich 0,90-0,92. Con ung vien luc bam cho trong chi 0,003-0,065. Khoang giua
+                      // rat rong nen doi them dieu kien kich thuoc tuong duong la du tach.
+                      const tiLeKhung = targetRect
+                        ? dienTichKhung(node) / Math.max(1, targetRect.width * targetRect.height) : 1;
+                      if (!containsPoint
+                          && (overlapRatio < 0.6 || tiLeKhung < 0.5 || tiLeKhung > 2)) continue;
                       const found = locatorFor(node, mode, elements);
                       if (!found) continue;
                       // Prefer the rectangle under the real pointer, then the closest
@@ -663,7 +684,26 @@ public class GoldenRuntimeService {
                   // Xoa, FAB mang id ngay tren phan tu co aria-label; o nhap va nut "Luu" mang id
                   // o phan tu CHA cua INPUT / cua nut. Cung luat voi _docDinhDanhTaiDich ben engine
                   // de dinh danh ghi luc soan va dinh danh engine tim luc cham la MOT.
+                  //
+                  // CHAN THU HAI - KHUNG PHINH TO. Nhan cua cha chi chan duoc khi cha CO nhan; ma
+                  // mot Semantics(identifier:) tran boc ca cum (Form, Column, Card) khong co nhan
+                  // nao ca, nen no lot qua het. Do tren DOM that ngay 20/9/2026, ban web cua Golden
+                  // FA26 (19 dinh danh):
+                  //   - lop boc DUNG cua control: khung trung TUNG PIXEL voi phan tu bi cham, 19/19
+                  //     deu ra ti le dien tich 1.00 (Semantics(identifier:) khong tu chiem cho nao).
+                  //   - bac tren nua: 32x (ca dong danh sach), 176x va 250x (ca man hinh).
+                  // Khoang trong giua 1 va 32 rat rong nen nguong 4 lan vua an toan vua du chat:
+                  // con cho cho nguoi boc them Padding quanh nut (48x48 + dem 8 -> 1.78 lan) ma van
+                  // chan duoc lop bao ca cum. Thieu chan nay thi ba o nhap trong mot Form deu ghi
+                  // thanh MOT dich, im lang, toi luc cham moi vo.
+                  const NGUONG_PHINH = 4;
+                  function dienTichKhung(el) {
+                    if (!el || !el.getBoundingClientRect) return 0;
+                    const r = el.getBoundingClientRect();
+                    return Math.max(0, r.width) * Math.max(0, r.height);
+                  }
                   function identifierOf(node, nhanCuaNode) {
+                    const dienTichGoc = dienTichKhung(node);
                     let cur = node;
                     for (let buoc = 0; cur instanceof Element && buoc < 5; buoc++) {
                       const id = cur.getAttribute('flt-semantics-identifier');
@@ -672,6 +712,7 @@ public class GoldenRuntimeService {
                       if (!cha) break;
                       const nhanCha = cha.getAttribute('aria-label') || '';
                       if (nhanCha && nhanCha !== nhanCuaNode) break;
+                      if (dienTichGoc > 0 && dienTichKhung(cha) > dienTichGoc * NGUONG_PHINH) break;
                       cur = cha;
                     }
                     return '';
@@ -700,15 +741,35 @@ public class GoldenRuntimeService {
                     return null;
                   }
                   function warnNoTarget() {
-                    const message = 'Khong ghi thao tac de tranh chon nham element cha. '
+                    const message = 'Khong ghi duoc thao tac nay. '
                       + (lastReject || 'Khong suy ra duoc semantic locator duy nhat.')
-                      + ' Hay gan Semantics(identifier: ...) duy nhat cho control neu cac nhan bi trung.';
+                      + ' Hay gan Semantics(identifier: ...) duy nhat cho control do.';
                     window.parent.postMessage({type: 'GOLDEN_RECORDER_WARNING', payload: {message}}, '*');
+                  }
+                  // CO CONTROL NAO NAM DUOI DIEM BAM KHONG.
+                  //
+                  // Bam vao KHOANG TRONG la viec binh thuong luc ghi hinh: cuon man, bo focus khoi o
+                  // nhap, hay bam bang quo. Khong co gi de ghi, va cung khong ai lam gi sai - nen
+                  // khong duoc canh bao. Canh bao moi cu bam truot thi nguoi soan quen luon ca nhung
+                  // canh bao that.
+                  //
+                  // Con bam TRUNG mot control ma khong suy ra duoc dich thi VAN phai keu: do la ca
+                  // "quen gan dinh danh / nhan bi trung", dung thu can bao.
+                  function coControlTaiDiem(event) {
+                    const x = event.clientX, y = event.clientY;
+                    if (!Number.isFinite(x) || !Number.isFinite(y) || (x === 0 && y === 0)) return true;
+                    for (const node of allSemanticElements()) {
+                      if (!INTERACTIVE_ROLES.has(roleOf(node))) continue;
+                      const r = node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+                      if (!r || r.width <= 0 || r.height <= 0) continue;
+                      if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return true;
+                    }
+                    return false;
                   }
                   function action(event, name, value = '') {
                     const found = semanticNode(event, 'tap');
                     if (!found) {
-                      warnNoTarget();
+                      if (coControlTaiDiem(event)) warnNoTarget();
                       return;
                     }
                     // Thao tác logic khác là ranh giới chắc chắn của phiên nhập. Chốt
