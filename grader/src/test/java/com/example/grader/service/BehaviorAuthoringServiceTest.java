@@ -11,6 +11,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
 
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -124,6 +125,75 @@ class BehaviorAuthoringServiceTest {
         assertEquals("cross_layer", consistency.get("scope"));
         assertEquals(List.of("final@example.com"), consistency.get("ui_values"));
         assertEquals("final@example.com", ((Map<?, ?>) consistency.get("row")).get("email"));
+    }
+
+    @Test
+    void emptyAndNullInputAreRecordedAndAbstractedAsIntentionalValues() {
+        Map<String, Object> golden = service.registerGoldenApp(Map.of(
+                "name", "Golden empty input",
+                "runtime_url", "http://localhost:9010",
+                "ready", true));
+        Map<String, Object> suite = service.createSuite(Map.of(
+                "suite_code", "EMPTY_AND_NULL_INPUT",
+                "name", "Empty and null input suite",
+                "golden_app_id", golden.get("id")));
+        Map<String, Object> recording = service.startRecording(String.valueOf(suite.get("id")), Map.of(
+                "name", "Clear two fields"));
+        String recordingId = String.valueOf(recording.get("id"));
+
+        service.appendEvent(recordingId, Map.of(
+                "kind", "action", "action", "enter_text",
+                "target", Map.of("semanticId", "field.name"),
+                "value", ""));
+        Map<String, Object> nullInput = new LinkedHashMap<>();
+        nullInput.put("kind", "action");
+        nullInput.put("action", "enter_text");
+        nullInput.put("target", Map.of("semanticId", "field.email"));
+        nullInput.put("value", null);
+        service.appendEvent(recordingId, nullInput);
+        service.appendEvent(recordingId, Map.of(
+                "kind", "component_present", "action", "observe_ui",
+                "target", Map.of("semanticId", "action.submit")));
+        service.stopRecording(recordingId, Map.of());
+
+        Map<String, Object> scenario = service.abstractRecording(recordingId, Map.of(
+                "scenario_code", "CLEAR_FIELDS"));
+        List<?> steps = (List<?>) scenario.get("steps");
+        assertEquals(2, steps.size());
+        Map<?, ?> emptyStep = (Map<?, ?>) steps.get(0);
+        Map<?, ?> nullStep = (Map<?, ?>) steps.get(1);
+        assertTrue(emptyStep.containsKey("value"));
+        assertEquals("", emptyStep.get("value"));
+        assertEquals("string", emptyStep.get("valueType"));
+        assertTrue(nullStep.containsKey("value"));
+        assertNull(nullStep.get("value"));
+        assertEquals("string", nullStep.get("valueType"));
+    }
+
+    @Test
+    void enterTextWithoutValueFieldIsRejectedButEmptyValueIsNot() {
+        Map<String, Object> golden = service.registerGoldenApp(Map.of(
+                "name", "Golden missing input",
+                "runtime_url", "http://localhost:9010",
+                "ready", true));
+        Map<String, Object> suite = service.createSuite(Map.of(
+                "suite_code", "MISSING_INPUT_VALUE",
+                "name", "Missing input value suite",
+                "golden_app_id", golden.get("id")));
+        Map<String, Object> recording = service.startRecording(String.valueOf(suite.get("id")), Map.of(
+                "name", "Missing input value"));
+        String recordingId = String.valueOf(recording.get("id"));
+
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+                service.appendEvent(recordingId, Map.of(
+                        "kind", "action", "action", "enter_text",
+                        "target", Map.of("semanticId", "field.name"))));
+        assertTrue(error.getMessage().contains("chưa có trường value"));
+
+        assertDoesNotThrow(() -> service.appendEvent(recordingId, Map.of(
+                "kind", "action", "action", "enter_text",
+                "target", Map.of("semanticId", "field.name"),
+                "value", "")));
     }
 
     @Test

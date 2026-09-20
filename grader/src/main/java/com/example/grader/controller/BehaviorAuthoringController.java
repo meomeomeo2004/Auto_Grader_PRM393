@@ -181,8 +181,16 @@ public class BehaviorAuthoringController {
         // DOM Flutter Web; nay đường đọc có ba nguồn và đo trên Golden thật thì vào đủ, không
         // mất dấu. Sửa tay nội dung là mở đường cho plan mô tả một thao tác KHÁC với thứ người
         // soạn thật sự làm trên app — ghi sai thì xóa bước rồi gõ lại.
-        return call(() -> service.updateEventWeight(id, sequence,
-                body.get("weight") instanceof Number number ? number.doubleValue() : 1.0));
+        return call(() -> {
+            // Không chỉ bỏ ô sửa trên UI: chặn cả request gọi thẳng API để plan không thể
+            // lệch khỏi thao tác thật đã được recorder chốt trên Golden.
+            if (body.containsKey("value")) {
+                throw new IllegalArgumentException(
+                        "Giá trị nhập do recorder chốt và không thể sửa tay; hãy xóa bước rồi thao tác lại trên Golden");
+            }
+            return service.updateEventWeight(id, sequence,
+                    body.get("weight") instanceof Number number ? number.doubleValue() : 1.0);
+        });
     }
 
     @DeleteMapping("/recordings/{id}/events/{sequence}")

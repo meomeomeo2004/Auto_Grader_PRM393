@@ -380,6 +380,13 @@ public class BehaviorAuthoringService {
                     && map(event.get("target")).isEmpty()) {
                 throw new IllegalArgumentException("Action " + action + " phải có target ngữ nghĩa");
             }
+            // Có key value mới chứng minh recorder đã chốt phiên nhập. Nội dung null và
+            // chuỗi rỗng đều HỢP LỆ: runner replay cả hai thành chuỗi rỗng để kiểm tra ca
+            // xóa sạch/để trống. Chỉ thiếu hẳn key mới là event hỏng hoặc bản ghi đời cũ.
+            if ("enter_text".equals(action) && !event.containsKey("value")) {
+                throw new IllegalArgumentException(
+                        "Action enter_text chưa có trường value từ recorder; null và chuỗi rỗng đều được chấp nhận");
+            }
             // Kéo mà không nói kéo bao xa thì engine không làm gì được — chặn ngay lúc
             // ghi, đừng để tới lượt capture mới nổ.
             if ("drag".equals(action)) {
@@ -400,7 +407,8 @@ public class BehaviorAuthoringService {
             event.putIfAbsent("stage", "ACTION");
             event.putIfAbsent("attribute", locatorAttribute(target));
             event.putIfAbsent("attributeValue", locatorValue(target));
-            event.putIfAbsent("valueType", valueType(event.get("value")));
+            if ("enter_text".equals(action)) event.put("valueType", "string");
+            else event.putIfAbsent("valueType", valueType(event.get("value")));
             event.putIfAbsent("value", event.getOrDefault("value", ""));
             event.putIfAbsent("browser", "flutter_tester");
         } else if ("database_observation".equals(kind)) {
@@ -606,7 +614,6 @@ public class BehaviorAuthoringService {
     // trên app. Một ô cho gõ đè nội dung là đường duy nhất để plan nói một đằng còn thao tác
     // trên Golden một nẻo, mà lệch kiểu đó thì Kiểm Golden cũng không bắt được — nó replay
     // đúng cái plan đã lệch. Ghi sai thì xóa bước rồi gõ lại trên Golden.
-
     // BẮT BUỘC @Transactional: recordingForUpdate() khóa bi quan PESSIMISTIC_WRITE, mà khóa
     // này đòi phải nằm trong transaction — thiếu là ném "No active transaction" ngay khi bấm
     // xóa action (đã xảy ra 31/8). Bốn hàm sửa phiên record còn lại đều đã có.
@@ -679,19 +686,20 @@ public class BehaviorAuthoringService {
         List<Map<String, Object>> trace = readObjectList(recording.getRawTraceJson());
         if (trace.isEmpty()) throw new IllegalStateException("Phiên record chưa có thao tác nào");
 
-        // CHẶN TẠI CỬA: bước gõ chữ mà chưa khai giá trị thì replay sẽ gõ chuỗi rỗng và
-        // mọi tiêu chí phía sau trượt theo — không được để lỗi đó trôi tới lượt capture.
+        // Chỉ chặn event enter_text thiếu HẲN trường value. Null và "" là hai giá trị
+        // có chủ đích, runner đều replay thành chuỗi rỗng; không được đánh đồng chúng với
+        // việc recorder chưa gửi dữ liệu.
         List<String> thieuGiaTri = new ArrayList<>();
         for (Map<String, Object> event : trace) {
             if (!"enter_text".equals(text(event, "action", ""))) continue;
-            if (text(event, "value", "").isEmpty()) {
+            if (!event.containsKey("value")) {
                 thieuGiaTri.add(locatorValue(map(event.get("target"))));
             }
         }
         if (!thieuGiaTri.isEmpty()) {
             throw new IllegalArgumentException(
-                    "Chưa khai giá trị cho ô: " + String.join(", ", thieuGiaTri)
-                    + ". Gõ nội dung vào ô nhập trên từng dòng gõ chữ rồi sinh testcase lại.");
+                    "Recorder chưa gửi trường value cho ô: " + String.join(", ", thieuGiaTri)
+                    + ". Hãy xóa bước hỏng và thao tác lại trên Golden; null và chuỗi rỗng vẫn hợp lệ.");
         }
         List<Map<String, Object>> steps = new ArrayList<>();
         List<Map<String, Object>> checkpoints = new ArrayList<>();

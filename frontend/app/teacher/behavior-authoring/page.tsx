@@ -1865,10 +1865,12 @@ function BehaviorAuthoringEditor() {
     });
   };
 
-  // Bước gõ chữ chưa khai giá trị: replay sẽ gõ chuỗi rỗng và mọi tiêu chí phía sau
-  // trượt theo, nên khoá nút sinh testcase cho tới khi điền đủ.
+  // Phân biệt "recorder không gửi trường value" với giá trị hợp lệ null/chuỗi rỗng.
+  // Cả null và "" đều có nghĩa là xóa sạch nội dung lúc replay; chỉ event cũ/hỏng bị
+  // thiếu hẳn key value mới phải chặn sinh testcase.
   const buocThieuGiaTri = (recording?.raw_trace || []).filter(
-    (ev) => String(ev.action || "") === "enter_text" && !String(ev.value || "").trim(),
+    (ev) => String(ev.action || "") === "enter_text"
+      && !Object.prototype.hasOwnProperty.call(ev, "value"),
   ).length;
 
   // Ngan sach 100 diem cua ca bo cham: luat tinh + trong so tung ham + tieu chi
@@ -2016,7 +2018,6 @@ function BehaviorAuthoringEditor() {
   //
   // Giữ ô sửa tay thì mở đúng một đường cho plan lệch khỏi thứ người soạn thật sự làm trên
   // app — mà đó là thứ duy nhất bộ chấm được phép mô tả. Ghi sai thì xóa bước rồi gõ lại.
-
   const deleteRecordedEvent = (sequence: number) => {
     const recordingId = activeRecordingId.current;
     if (!recordingId || !acceptsRecorderEvents.current || recording?.status !== "ACTIVE" || !suite) {
@@ -2934,7 +2935,15 @@ function BehaviorAuthoringEditor() {
                     .map((key) => readableValue(target[key]))
                     .find((value) => value.trim().length > 0) || "";
                   const laGoChu = String(item.action || "") === "enter_text";
+                  const coTruongGiaTri = Object.prototype.hasOwnProperty.call(item, "value");
                   const giaTri = readableValue(item.value);
+                  const giaTriNhapHienThi = !coTruongGiaTri
+                    ? "Recorder chưa gửi trường value"
+                    : item.value === null
+                      ? "null (replay thành chuỗi rỗng)"
+                      : giaTri.length === 0
+                        ? '\"\" (chuỗi rỗng — replay sẽ xóa nội dung)'
+                        : giaTri;
                   const delta = asJsonMap(item.delta);
                   const deltaText = Object.keys(delta).length
                     ? `x: ${readableValue(delta.x) || "0"}, y: ${readableValue(delta.y) || "0"}`
@@ -2966,9 +2975,11 @@ function BehaviorAuthoringEditor() {
                             20/9/2026 trên Golden thật: "Mua đèn học" và "55000" vào đủ, không
                             mất dấu), nên một ô cho sửa tay chỉ mở đường cho plan lệch khỏi thứ
                             người soạn thật sự làm trên app. Ghi sai thì ghi lại bước đó. */}
-                        {laGoChu && !String(item.value || "").trim()
-                          ? <span className="min-w-0 break-words font-semibold text-rose-600 dark:text-rose-400">(recorder không đọc được nội dung — ghi lại bước này)</span>
-                          : <span className="min-w-0 break-words font-semibold text-slate-700 dark:text-slate-200">{giaTri}</span>}
+                        {laGoChu ? <code
+                          aria-readonly="true"
+                          title="Giá trị do recorder chốt từ Golden; không thể sửa tay. Nếu sai, hãy xóa bước và thao tác lại trên Golden."
+                          className={`min-w-0 break-words rounded border px-2 py-1 font-mono font-semibold ${coTruongGiaTri ? "border-slate-300 bg-slate-100 text-slate-700 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200" : "border-rose-400 bg-rose-50 text-rose-700 dark:bg-rose-950/40 dark:text-rose-200"}`}
+                        >{giaTriNhapHienThi}</code> : <span className="min-w-0 break-words font-semibold text-slate-700 dark:text-slate-200">{giaTri}</span>}
                       </div>}
                       {deltaText && <div className="flex min-w-0 items-start gap-2"><span className="w-20 shrink-0 text-slate-400">Độ cuộn</span><span>{deltaText}</span></div>}
                       {expectation && <div className="flex min-w-0 items-start gap-2"><span className="w-20 shrink-0 text-slate-400">Kỳ vọng</span><span className="min-w-0 break-words">{expectation}</span></div>}
@@ -2976,7 +2987,7 @@ function BehaviorAuthoringEditor() {
                   </div>;
                 })}</div>
                 {recording.status === "STOPPED" && error && <div className="mt-4 rounded-xl border border-rose-300 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-200">Không thể sinh testcase: {error}. Phiên vẫn được giữ để bạn thử lại hoặc hủy.</div>}
-                {buocThieuGiaTri > 0 && <p className="mt-3 rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-200">Còn {buocThieuGiaTri} bước gõ chữ không đọc được nội dung (dòng đỏ ở trên). Xóa bước đó rồi gõ lại trên Golden — để trống thì lúc chấm sẽ gõ chuỗi rỗng và mọi tiêu chí phía sau trượt theo.</p>}
+                {buocThieuGiaTri > 0 && <p className="mt-3 rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-200">Còn {buocThieuGiaTri} bước gõ chữ không có trường value do bản ghi cũ hoặc recorder lỗi. Hãy xóa bước đó và thao tác lại trên Golden. Giá trị null và chuỗi rỗng vẫn hợp lệ, không bị tính vào cảnh báo này.</p>}
                 <div className="mt-4 flex flex-wrap gap-2"><button onClick={stopAndAbstract} disabled={Boolean(busy) || buocThieuGiaTri > 0} className="inline-flex items-center gap-2 rounded-xl bg-slate-800 px-4 py-2.5 font-bold text-white disabled:opacity-40 dark:bg-slate-700">{busy === "record-stop" ? <Loader2 size={17} className="animate-spin" /> : <Square size={17} />} {busy === "record-stop" ? "Đang replay Golden và sinh Output DB…" : recording.status === "STOPPED" ? "Thử sinh testcase lại" : editingScenarioId ? "Lưu sửa đổi và sinh lại testcase" : "Dừng, capture oracle và sinh testcase"}</button><button onClick={cancelActiveRecording} disabled={Boolean(busy)} className="rounded-xl border border-rose-300 px-4 py-2.5 font-bold text-rose-600 disabled:opacity-40 dark:border-rose-900">{editingScenarioId ? "Cancel" : "Cancel"}</button></div>
               </>}
             </div>
