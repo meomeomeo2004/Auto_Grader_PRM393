@@ -89,14 +89,12 @@ $BoManTheoVai = @{
   #   2. vai: 'gv' cho hai muc menu "Tao de" va "Tao Golden" trong SidebarLayout - muc khong khai
   #      vai bi hieu la "ca hai ban deu co".
   nc = @("frontend\app\teacher\behavior-authoring", "frontend\app\teacher\archive",
-         "frontend\app\teacher\exam-view",
-         "frontend\app\teacher\exam-authoring", "frontend\app\teacher\golden-authoring",
-         # Kho tai lieu de: man hinh nay goi /api/exam-setup/{id}/handout/** - toan bo nam trong
-         # ExamSetupController, ma controller do bi bo khoi ban nc ngay duoi day. Menu da an no
-         # bang vai: 'gv' nen khong ai bam vao duoc, nhung go thang URL thi trang van len roi moi
-         # 404 tung request mot. Cung loai voi ca AI ra de: an o menu KHONG phai la bo khoi ban.
-         "frontend\app\teacher\exam-documents",
-         "frontend\components\testcases", "frontend\lib\aiAuthorDrafts.ts",
+         # Man "De bai" (20/9): gop tu ba man cu Tao de + Kho tai lieu de + Xem de. Moi loi goi
+         # cua no di vao ExamSetupController - controller gv-only, bi bo khoi ban nc ngay duoi
+         # day. An o menu bang vai: 'gv' KHONG phai la bo khoi ban: go thang URL thi trang van
+         # len roi moi 404 tung request mot.
+         "frontend\app\teacher\exam-authoring",
+         "frontend\components\testcases",
          "grader\src\test",
          # Controller chi cua giang vien: @Profile(Vai.GIANG_VIEN) nen ban nc khong bao gio nap
          # no. Hai cho nhac ten no - ExamCatalogController va ExamService - deu chi la javadoc,

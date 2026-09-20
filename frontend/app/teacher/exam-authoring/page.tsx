@@ -1,580 +1,1289 @@
 "use client";
 
-// Trang "Tạo đề" — CHỈ soạn đề bằng AI (chủ đề/kiến thức → đề bài → sửa bằng AI/sửa tay → lưu),
-// tách khỏi wizard 4 bước cũ (AiAuthorPanel) theo yêu cầu: không cần tạo Suite/Golden App trước
-// mới soạn được đề. Có thể tạo và lưu nhiều đề — mỗi đề là một mã đề gõ tay, lưu độc lập trong
-// handout/<examId>/de_bai.md (xem ExamService#listAuthoredExamIds, không cần Suite/testcase nào).
-//
-// Hình minh họa giao diện (AI vẽ khung dây theo mục 3 của đề, xem MockupRenderer ở backend) sinh
-// ngay tại đây — không còn trang "Tạo Golden" riêng (đã xoá 17/9/2026).
+/**
+ * MÀN "ĐỀ BÀI" — gộp từ ba màn cũ (20/9/2026): Tạo đề, Kho tài liệu đề, Xem đề.
+ *
+ * Vì sao gộp: cả ba cùng ghi vào `handout/<mã đề>/`, nhưng mỗi màn hiểu "nội dung đề" một kiểu.
+ * Kho tài liệu giữ file Word gốc, còn ô sửa bên dưới nó lại sửa `de_bai.md` — bấm Lưu KHÔNG
+ * đụng gì tới file Word. Upload thì bóc chữ ngầm, nên một đề tự nhiên có hai bản mà không ai
+ * báo. Giảng viên phải tự nhớ mình đang sửa bản nào rồi tải bản nào.
+ *
+ * Thêm nữa, hai màn đọc hai API khác nhau (`authored-list` và `list`) nên thấy hai danh sách
+ * khác nhau — đo ngày 19/9: 4 đề chỉ hiện ở một bên, trong đó có PE_PRM393_FA26 là đề thật
+ * đang dùng, không hề hiện ở màn soạn đề.
+ *
+ * Nay mỗi đề mang đúng MỘT bản chính, và loại đề do HÀNH ĐỘNG quyết định:
+ *   NGOAI — file Word/PDF vừa tải lên, chưa ai sửa. File đó là đề bài; màn này đọc thẳng
+ *           cấu trúc từ nó nên vẫn xem và sửa được ngay, không phải "đưa vào hệ thống" trước.
+ *   TRONG — đã có người sửa và LƯU. `de_bai.md` + hình thành bản chính, .docx là bản xuất ra.
+ * Lưu lần đầu chính là lúc đổi loại, một chiều, không có đường quay lại.
+ *
+ * Bố cục: danh sách (`/teacher/exam-authoring`) → chi tiết (`?de=<mã đề>`).
+ */
 
-import { Suspense, useCallback, useEffect, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { createPortal } from "react-dom";
 import SidebarLayout from "@/components/layout/SidebarLayout";
+import Banner from "@/components/ui/Banner";
 import { API_BASE } from "@/lib/config";
-import { downloadBlob, svgToPng } from "@/lib/mockup-image";
-import {
-  clearAiDraft, DRAFT_NO_EXAM, fetchAiDraftFromServer, pushAiDraftToServer, readAiDraft, writeAiDraft,
-} from "@/lib/aiAuthorDrafts";
+import { downloadBlob, imageFileToSvg, svgToPng } from "@/lib/mockup-image";
 import AiSettingsPanel from "@/components/testcases/AiSettingsPanel";
-import { Field, Step, inputClass, primaryBtn, ghostBtn } from "@/components/testcases/AiWizardWidgets";
+import { Field, inputClass, primaryBtn, ghostBtn } from "@/components/testcases/AiWizardWidgets";
 import {
-  Sparkles, Wand2, FileText, Loader2, Check, Upload, Download, AlertTriangle, ListChecks, FilePlus2,
-  Image as ImageIcon,
+  AlertTriangle, ArrowLeft, Check, Copy, Download, FileText, FileUp, Image as ImageIcon,
+  Loader2, MoreHorizontal, Pencil, Plus, RefreshCw, Search, Settings2, Sparkles, Trash2, Wand2, X,
 } from "lucide-react";
 
-const LAST_EXAM_DRAFT_KEY = "grader_exam_authoring_last_draft";
+type LoaiDe = "NGOAI" | "TRONG";
 
-interface AuthoredExam { exam_id: string; title: string; updated_at: string }
+interface DongDe {
+  examId: string;
+  examName?: string;
+  loaiDe?: LoaiDe;
+  hasDeBai?: boolean;
+  hasFileGoc?: boolean;
+  soHinh?: number;
+  hasTestcase?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 interface Mockup { id: string; title: string; svg: string }
 
-function ExamAuthoringEditor() {
-  const [error, setError] = useState<string | null>(null);
-  const [info, setInfo] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
+/**
+ * Hình do giáo viên TẢI ẢNH lên, không phải AI vẽ — nhận ra qua tiền tố mã.
+ *
+ * <p>AI chỉ mô tả màn hình bằng JSON rồi máy chủ dựng khung dây, nên hình AI bao giờ cũng là
+ * khung dây. Muốn hình đúng thiết kế thật thì tải thẳng ảnh chụp/bản thiết kế lên — ảnh được
+ * bọc trong SVG (xem `imageFileToSvg`) nên đi tiếp bằng đúng đường ống cũ.
+ *
+ * <p>Đánh dấu để "Vẽ lại" không cuốn mất: nút đó thay TOÀN BỘ hình bằng bản AI mới, mà ảnh giáo
+ * viên tự tải thì AI không thể dựng lại được — mất là mất hẳn.
+ */
+const laAnhTaiLen = (m: Mockup) => m.id.startsWith("anh-");
 
-  // Danh sách đề đã soạn — để mở lại/tiếp tục.
-  const [authored, setAuthored] = useState<AuthoredExam[]>([]);
-  const [loadingList, setLoadingList] = useState(false);
+/** So tên màn hình: bỏ dấu, bỏ ký tự lạ. "Màn hình Danh Sách" và "man hinh danh sach" là một. */
+const chuanHoaTen = (s: string) =>
+  s.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/đ/gi, "d")
+    .toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
-  const [examId, setExamId] = useState("");
-  const [draftReady, setDraftReady] = useState(false);
-  const [source, setSource] = useState<"ai" | "upload">("ai");
-  const [importedName, setImportedName] = useState("");
-  const [req, setReq] = useState({
-    topic: "", knowledge: "", screens: "", features: "", entity: "",
-    storage: "SQLite", difficulty: "Trung bình", duration: "90 phút", note: "",
+/**
+ * Tên các màn hình khai ở mục 3 của đề bài (`## 3.1 Màn hình danh sách`, `### 3.2 …`).
+ *
+ * <p>Dùng để hỏi "ảnh này là màn nào?" khi giáo viên tải ảnh lên. Đọc thẳng từ đề chứ không giữ
+ * một danh sách màn riêng: đề là thứ sinh viên đọc và máy chấm bám theo, danh sách nào khác cũng
+ * chỉ là bản sao sớm muộn lệch khỏi nó.
+ */
+const tenManTuDeBai = (md: string): string[] => {
+  const ra: string[] = [];
+  for (const dong of md.split(/\r?\n/)) {
+    // Gỡ vỏ Markdown trước rồi mới soi số mục: AI khi thì "### 3.1 Màn…", khi thì "**3.1 Màn…**",
+    // khi thì viết trần. Bắt cứng một dạng là hôm nào AI đổi cách viết thì danh sách màn rỗng
+    // trơn, mà rỗng thì không báo lỗi gì — chỉ là ô gợi ý biến mất, rất lâu mới có người nhận ra.
+    const sach = dong.trim().replace(/^#{1,6}\s*/, "").replace(/^\*\*|\*\*$/g, "").trim();
+    const ten = /^3\.\d+\.?\s+(.+)$/.exec(sach)?.[1]?.trim();
+    // Chặn độ dài: một đoạn văn lỡ mở đầu bằng "3.1 " thì không thành "tên màn hình" dài ba dòng.
+    if (ten && ten.length <= 80 && !ra.some((x) => chuanHoaTen(x) === chuanHoaTen(ten))) ra.push(ten);
+  }
+  return ra;
+};
+
+const gioVN = (iso?: string) => {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "—" : d.toLocaleString("vi-VN");
+};
+
+const maDeHopLe = (s: string) => /^[A-Za-z0-9_-]{2,50}$/.test(s);
+
+/**
+ * Bỏ các thẻ chỉ dẫn căn lề `<!-- layout:right:40 -->` khỏi ô soạn.
+ *
+ * <p>Chúng do bộ đọc Word sinh ra để giữ căn lề và thụt lề; người soạn không cần thấy, và thấy
+ * thì chỉ tổ gõ nhầm vào. Đây là đánh đổi CÓ Ý: sửa tay xong thì căn lề lấy từ Word không còn,
+ * đoạn văn về canh trái như mọi Markdown khác. Giữ lại thẻ để "cứu" căn lề nghĩa là phải neo
+ * từng thẻ vào đúng đoạn cũ — mà đoạn thì người ta vừa sửa, nên neo kiểu gì cũng có lúc trật,
+ * và trật kiểu đó thì im lặng, không ai thấy cho tới lúc in đề ra giấy.
+ */
+const boTheLayout = (md: string) =>
+  md
+    .split(/\r?\n/)
+    .filter((d) => !/^\s*<!--\s*layout:(left|center|right|justify):\d{1,3}\s*-->\s*$/.test(d))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n");
+
+async function doc(path: string, init?: RequestInit) {
+  const res = await fetch(`${API_BASE}${path}`, init);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error((data as { error?: string })?.error || `HTTP ${res.status}`);
+  return data;
+}
+
+async function gui(path: string, body: unknown) {
+  return doc(path, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
+}
 
-  const [deBai, setDeBai] = useState("");
-  const [summary, setSummary] = useState("");
-  const [revisePrompt, setRevisePrompt] = useState("");
-  const [examAccepted, setExamAccepted] = useState(false);
+// ══════════════════════════════════════════════════════════════════════════════
+//  TRANG
+// ══════════════════════════════════════════════════════════════════════════════
 
-  const [mockups, setMockups] = useState<Mockup[]>([]);
-  const [mockupPrompt, setMockupPrompt] = useState("");
+export default function TrangDeBai() {
+  // SidebarLayout dựng ĐÚNG MỘT LẦN, ở NGOÀI Suspense.
+  //
+  // Trước 20/9 nó nằm cả trong fallback lẫn trong từng nhánh con, nên khi nhánh con hiện ra
+  // trang có HAI <main> và HAI <aside> cùng lúc: đo được vỏ của fallback rộng 64px còn vỏ
+  // thật co về 0px. Đó chính là "giao diện bị vỡ" — chữ dồn cục, chip xuống ba bốn dòng, hai
+  // cột soạn/xem bẹp dí. Không phải lỗi bề rộng hay breakpoint như tôi tưởng lúc đầu.
+  return (
+    <SidebarLayout title="Đề bài" activePath="/teacher/exam-authoring" contentClassName="max-w-[1200px]">
+      <Suspense fallback={<KhungCho />}>
+        <DieuHuong />
+      </Suspense>
+    </SidebarLayout>
+  );
+}
 
-  const loadAuthored = useCallback(async () => {
-    setLoadingList(true);
+function KhungCho() {
+  return <div className="flex items-center justify-center py-20 text-slate-400"><Loader2 size={24} className="animate-spin" /></div>;
+}
+
+function DieuHuong() {
+  const params = useSearchParams();
+  const maDe = params.get("de");
+  // Hai nhánh là hai component riêng chứ không phải hai khối JSX: mỗi nhánh có bộ hook của
+  // mình, gộp lại thì nhánh này phải giữ hook của nhánh kia cho đủ thứ tự.
+  return maDe ? <ChiTietDe maDe={maDe} moiTao={params.get("moi") || ""} /> : <DanhSachDe />;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  DANH SÁCH
+// ══════════════════════════════════════════════════════════════════════════════
+
+function DanhSachDe() {
+  const router = useRouter();
+  const [ds, setDs] = useState<DongDe[]>([]);
+  const [dangTai, setDangTai] = useState(true);
+  const [loi, setLoi] = useState<string | null>(null);
+  const [bao, setBao] = useState<string | null>(null);
+  const [tim, setTim] = useState("");
+  const [moTao, setMoTao] = useState(false);
+  const [menuMo, setMenuMo] = useState<string | null>(null);
+  const [menuViTri, setMenuViTri] = useState({ top: 0, left: 0 });
+  const [dinhXoa, setDinhXoa] = useState<DongDe | null>(null);
+  const [nhanBan, setNhanBan] = useState<DongDe | null>(null);
+
+  const nap = useCallback(async () => {
+    setDangTai(true);
     try {
-      const res = await fetch(`${API_BASE}/exam-setup/authored-list`);
-      const data = await res.json();
-      setAuthored(Array.isArray(data) ? data : []);
-    } catch {
-      setAuthored([]);
+      const d = await doc("/exam-setup/list");
+      setDs(Array.isArray(d) ? (d as DongDe[]).filter((e) => e?.examId) : []);
+      setLoi(null);
+    } catch (e) {
+      setLoi("Không đọc được danh sách đề: " + (e as Error).message);
     } finally {
-      setLoadingList(false);
+      setDangTai(false);
     }
   }, []);
 
-  useEffect(() => { loadAuthored(); }, [loadAuthored]);
+  useEffect(() => { void nap(); }, [nap]);
 
-  const restoreDraft = (state: Record<string, unknown> | undefined) => {
-    if (state?.req) setReq((cur) => ({ ...cur, ...(state.req as object) }));
-  };
-
-  const call = async <T,>(path: string, body: unknown, label: string): Promise<T | null> => {
-    setBusy(label); setError(null); setInfo(null);
-    try {
-      const res = await fetch(`${API_BASE}${path}`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "AI trả về lỗi");
-      return data as T;
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Không gọi được AI");
-      return null;
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const resetForm = () => {
-    setDeBai(""); setSummary(""); setExamAccepted(false);
-    setImportedName(""); setRevisePrompt("");
-    setMockups([]); setMockupPrompt("");
-    setReq({ topic: "", knowledge: "", screens: "", features: "", entity: "",
-      storage: "SQLite", difficulty: "Trung bình", duration: "90 phút", note: "" });
-  };
-
-  const startNew = () => {
-    setExamId("");
-    resetForm();
-    setInfo("Đang soạn đề mới — đặt mã đề rồi bấm \"Sinh đề bài\".");
-  };
-
-  /** Mở lại một đề đã soạn: nạp de_bai.md + (nếu có) bản nháp form đã lưu trên server. */
-  const openExam = async (id: string) => {
-    setError(""); setBusy("open"); setDraftReady(false);
-    try {
-      const res = await fetch(`${API_BASE}/exam-setup/${encodeURIComponent(id)}/handout`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Không mở được đề này.");
-      setExamId(id);
-      setDeBai(String(data.de_bai || ""));
-      setSummary("");
-      setExamAccepted(true);
-      setMockups(Array.isArray(data.mockups) ? data.mockups : []);
-      const serverDraft = await fetchAiDraftFromServer(API_BASE, id);
-      const localDraft = readAiDraft(id);
-      // Mở lại đề ngay sau khi sửa có thể diễn ra trước lượt lưu server 800ms.
-      const draft = localDraft && (!serverDraft || localDraft.updatedAt >= serverDraft.updatedAt)
-        ? localDraft : serverDraft;
-      restoreDraft(draft?.state);
-      setInfo(`Đã mở đề ${id}.`);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Không mở được đề này.");
-    } finally {
-      setBusy(null); setDraftReady(true);
-    }
-  };
-
-  // Mở sẵn 1 đề khi vào trang qua link có ?examId=... (vd từ nút "Clone" ở Kho đề).
-  const searchParams = useSearchParams();
+  // Đóng menu ⋯ khi bấm ra ngoài — menu mở mà cuộn trang thì nó treo lơ lửng.
   useEffect(() => {
-    const id = searchParams.get("examId");
-    if (id) void openExam(id);
-    else {
-      let active = true;
-      let lastId = DRAFT_NO_EXAM;
-      try { lastId = localStorage.getItem(LAST_EXAM_DRAFT_KEY) || DRAFT_NO_EXAM; } catch { /* Trình duyệt có thể khóa lưu cục bộ. */ }
-      void fetchAiDraftFromServer(API_BASE, lastId).then((serverDraft) => {
-        if (!active) return;
-        const localDraft = readAiDraft(lastId);
-        // Người dùng có thể chuyển trang trước 800ms gửi server; bản cục bộ mới hơn phải thắng.
-        const draft = localDraft && (!serverDraft || localDraft.updatedAt >= serverDraft.updatedAt)
-          ? localDraft : serverDraft;
-        if (draft) {
-          setExamId(typeof draft.state.exam_id === "string" ? draft.state.exam_id : lastId === DRAFT_NO_EXAM ? "" : lastId);
-          restoreDraft(draft.state);
-        } else restoreDraft(readAiDraft(DRAFT_NO_EXAM)?.state);
-        setDraftReady(true);
-      });
-      return () => { active = false; };
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (!menuMo) return;
+    const dong = () => setMenuMo(null);
+    window.addEventListener("click", dong);
+    window.addEventListener("scroll", dong, true);
+    window.addEventListener("resize", dong);
+    return () => {
+      window.removeEventListener("click", dong);
+      window.removeEventListener("scroll", dong, true);
+      window.removeEventListener("resize", dong);
+    };
+  }, [menuMo]);
 
-  // Lưu cục bộ ngay khi đổi để chuyển trang không mất mã/nội dung đang soạn;
-  // chỉ gửi server sau 800ms để không tạo request theo từng phím gõ.
-  useEffect(() => {
-    if (!draftReady || busy === "open") return;
-    const id = examId.trim() || DRAFT_NO_EXAM;
-    const state = { req, exam_id: examId };
-    writeAiDraft(id, state);
-    try { localStorage.setItem(LAST_EXAM_DRAFT_KEY, id); } catch { /* Mất lưu cục bộ vẫn có nháp server. */ }
-    const timer = setTimeout(() => { pushAiDraftToServer(API_BASE, id, state); }, 800);
-    return () => clearTimeout(timer);
-  }, [examId, req, draftReady, busy]);
+  const loc = useMemo(() => {
+    const q = tim.trim().toLowerCase();
+    if (!q) return ds;
+    return ds.filter((e) => e.examId.toLowerCase().includes(q)
+      || (e.examName || "").toLowerCase().includes(q));
+  }, [ds, tim]);
 
-  const importExam = async (file: File) => {
-    setBusy("import"); setError(null); setInfo(null);
+  return (
+    <>
+      {loi && <Banner tone="error" onClose={() => setLoi(null)}>{loi}</Banner>}
+      {bao && <Banner tone="ok" onClose={() => setBao(null)}>{bao}</Banner>}
+
+      <div className="mb-5 flex flex-wrap items-center gap-3">
+        <div className="relative min-w-[220px] flex-1">
+          <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <input
+            value={tim}
+            onChange={(e) => setTim(e.target.value)}
+            placeholder="Tìm theo tên hoặc mã đề…"
+            className="w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
+          />
+        </div>
+        <button onClick={() => setMoTao(true)} className={primaryBtn}>
+          <Plus size={16} /> Tạo đề
+        </button>
+      </div>
+
+      <div className="card overflow-visible">
+        <div className="overflow-x-auto">
+        <table className="w-full min-w-[720px] text-center text-sm">
+          <thead>
+            <tr className="border-b border-slate-100 text-[10px] uppercase tracking-wider text-slate-400">
+              <th className="px-5 py-3 text-center">Mã đề</th>
+              <th className="px-5 py-3 text-center">Đề bài</th>
+              <th className="px-5 py-3 text-center">Bản chính</th>
+              <th className="px-5 py-3 text-center">Cập nhật</th>
+              <th className="px-5 py-3 text-center">Thao tác</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-50">
+            {dangTai && <tr><td colSpan={5}><KhungCho /></td></tr>}
+            {!dangTai && loc.length === 0 && (
+              <tr><td colSpan={5} className="px-5 py-12 text-center text-sm text-slate-400">
+                {tim ? "Không có đề nào khớp." : "Chưa có đề nào. Bấm “Tạo đề” để bắt đầu."}
+              </td></tr>
+            )}
+            {loc.map((e) => (
+              <tr key={e.examId} className="hover:bg-slate-50/60">
+                <td className="px-5 py-3 text-center font-mono text-xs text-slate-600">{e.examId}</td>
+                <td className="px-5 py-3 text-center">
+                  <button onClick={() => router.push(`/teacher/exam-authoring?de=${encodeURIComponent(e.examId)}`)}
+                    className="font-semibold text-slate-700 hover:text-indigo-600">
+                    {e.examName && e.examName !== e.examId ? e.examName : "(chưa đặt tên)"}
+                  </button>
+                  <p className="mt-0.5 flex flex-wrap items-center justify-center gap-2 text-xs text-slate-400">
+                    {e.hasTestcase && <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-medium text-emerald-700">có bộ chấm</span>}
+                    {(e.soHinh || 0) > 0 && <span>{e.soHinh} hình</span>}
+                    {e.hasFileGoc && e.loaiDe === "TRONG" && <span>1 tài liệu đính kèm</span>}
+                  </p>
+                </td>
+                <td className="px-5 py-3 text-center"><ChipLoai dong={e} /></td>
+                <td className="px-5 py-3 text-center text-xs text-slate-500">{gioVN(e.updatedAt || e.createdAt)}</td>
+                <td className="px-5 py-3">
+                  <div className="flex items-center justify-center gap-1">
+                    <button onClick={() => router.push(`/teacher/exam-authoring?de=${encodeURIComponent(e.examId)}`)}
+                      className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-600 hover:border-indigo-300 hover:text-indigo-600">
+                      Mở
+                    </button>
+                    <div className="relative">
+                      <button
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          const rect = ev.currentTarget.getBoundingClientRect();
+                          setMenuViTri({
+                            top: rect.bottom + 4 + 132 > window.innerHeight ? Math.max(8, rect.top - 136) : rect.bottom + 4,
+                            left: Math.max(8, rect.right - 208),
+                          });
+                          setMenuMo(menuMo === e.examId ? null : e.examId);
+                        }}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+                        title="Thao tác khác"
+                      >
+                        <MoreHorizontal size={16} />
+                      </button>
+                      {/* Portal giữ menu không bị khung cuộn bảng cắt mất ở các dòng cuối. */}
+                      {menuMo === e.examId && createPortal(
+                        <div onClick={(ev) => ev.stopPropagation()}
+                          style={menuViTri}
+                          className="fixed z-50 w-52 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-xl">
+                          <button onClick={() => { setMenuMo(null); setNhanBan(e); }}
+                            className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50">
+                            <Copy size={14} /> Nhân bản sang mã mới
+                          </button>
+                          <a href={`${API_BASE}/exam-setup/${encodeURIComponent(e.examId)}/handout/original`}
+                            onClick={() => setMenuMo(null)}
+                            className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-slate-50 ${
+                              e.hasFileGoc ? "text-slate-700" : "pointer-events-none text-slate-300"}`}>
+                            <Download size={14} /> Tải file gốc
+                          </a>
+                          <button onClick={() => { setMenuMo(null); setDinhXoa(e); }}
+                            className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-rose-600 hover:bg-rose-50">
+                            <Trash2 size={14} /> Xoá đề
+                          </button>
+                        </div>, document.body
+                      )}
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        </div>
+      </div>
+
+      {moTao && <HopTaoDe
+        onDong={() => setMoTao(false)}
+        onXong={(id, moi) => {
+          router.push(`/teacher/exam-authoring?de=${encodeURIComponent(id)}${moi ? `&moi=${moi}` : ""}`);
+        }}
+        onDaTaiLen={(id) => { setMoTao(false); setBao(`Đã tạo đề ${id} từ file tải lên.`); void nap(); }}
+      />}
+
+      {nhanBan && <HopNhanBan nguon={nhanBan} onDong={() => setNhanBan(null)}
+        onXong={(id) => { setNhanBan(null); setBao(`Đã nhân bản sang ${id}.`); void nap(); }} />}
+
+      {dinhXoa && <HopXoaDe de={dinhXoa} onDong={() => setDinhXoa(null)}
+        onXong={(id) => { setDinhXoa(null); setBao(`Đã xoá đề ${id}.`); void nap(); }} />}
+    </>
+  );
+}
+
+function ChipLoai({ dong }: { dong: DongDe }) {
+  if (dong.loaiDe === "NGOAI") {
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-sky-200 bg-sky-50 px-2.5 py-1 text-xs font-semibold text-sky-700"
+        title="File Word/PDF bạn soạn ngoài là đề bài. Sửa trong Word rồi tải đè.">
+        <FileUp size={12} /> File tải lên
+      </span>
+    );
+  }
+  if (!dong.hasDeBai) {
+    return <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-semibold text-slate-500">
+      <AlertTriangle size={12} /> Chưa có nội dung
+    </span>;
+  }
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700"
+      title="Nội dung nằm trong hệ thống — sửa được tại đây, bản .docx là bản xuất ra.">
+      <FileText size={12} /> Soạn trong hệ thống
+    </span>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  HỘP THOẠI
+// ══════════════════════════════════════════════════════════════════════════════
+
+/** Portal ra body: SidebarLayout có transform nên `position: fixed` bám nhầm khung nội dung. */
+function Hop({ tieuDe, onDong, children, rong }: {
+  tieuDe: string; onDong: () => void; children: React.ReactNode; rong?: string;
+}) {
+  return createPortal((
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/50 p-4 py-10">
+      <div className={`w-full ${rong || "max-w-lg"} rounded-2xl bg-white p-6 shadow-2xl`}>
+        <div className="mb-4 flex items-start justify-between gap-4">
+          <h3 className="text-base font-bold text-slate-800">{tieuDe}</h3>
+          <button onClick={onDong} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600">
+            <X size={18} />
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  ), document.body);
+}
+
+/**
+ * Tạo đề: hỏi mã đề + tên, rồi chọn MỘT trong ba đường vào. Cả ba đổ về cùng màn chi tiết.
+ *
+ * Form soạn đề bằng AI KHÔNG nằm ở đây — nó dài, và nhét vào hộp thoại thì vừa chật vừa mất
+ * chỗ xem lại kết quả. Chọn "Nhờ AI soạn" là sang thẳng màn chi tiết, nơi có cả trang.
+ */
+function HopTaoDe({ onDong, onXong, onDaTaiLen }: {
+  onDong: () => void;
+  onXong: (maDe: string, moi: string) => void;
+  /** Đường TẢI FILE: xong là về thẳng danh sách, không mở màn chi tiết. */
+  onDaTaiLen: (maDe: string) => void;
+}) {
+  const [maDe, setMaDe] = useState("");
+  const [ten, setTen] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [loi, setLoi] = useState<string | null>(null);
+  const oFile = useRef<HTMLInputElement>(null);
+
+  const kiemMa = () => {
+    if (!maDeHopLe(maDe.trim())) { setLoi("Mã đề chỉ gồm chữ, số, gạch dưới và gạch ngang (2–50 ký tự)."); return false; }
+    setLoi(null);
+    return true;
+  };
+
+  const taiLen = async (f: File) => {
+    if (!kiemMa()) return;
+    setBusy(true);
     try {
       const form = new FormData();
-      form.append("file", file);
-      const res = await fetch(`${API_BASE}/ai/exam/import`, { method: "POST", body: form });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Không đọc được file đề.");
-      setDeBai(String(data.de_bai || ""));
-      setSummary("");
-      setExamAccepted(false);
-      setImportedName(String(data.file_name || file.name));
-      const warnings: string[] = Array.isArray(data.warnings) ? data.warnings : [];
-      setInfo(`Đã đọc ${file.name} (${String(data.de_bai || "").length} ký tự).`
-        + (warnings.length ? ` ${warnings.join(" ")}` : " Hãy xem lại đề rồi bấm chấp nhận."));
+      form.append("file", f);
+      const q = ten.trim() ? `?examName=${encodeURIComponent(ten.trim())}` : "";
+      const res = await fetch(
+        `${API_BASE}/exam-setup/${encodeURIComponent(maDe.trim())}/handout/original${q}`,
+        { method: "POST", body: form });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || "Không tải lên được file.");
+      // KHÔNG mở màn chi tiết sau khi tải lên (20/9, theo yêu cầu): file Word vừa tải LÀ đề
+      // bài rồi, chẳng còn bước nào phải làm tiếp. Đẩy người dùng vào màn chi tiết chỉ để họ
+      // nhìn một thẻ mời "đưa vào hệ thống" — thứ họ vừa cố ý KHÔNG chọn.
+      onDaTaiLen(maDe.trim());
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Không đọc được file đề.");
+      setLoi((e as Error).message);
     } finally {
-      setBusy(null);
+      setBusy(false);
     }
   };
 
-  const draftExam = async () => {
-    if (!examId.trim()) { setError("Hãy đặt mã đề trước (vd PE_PRM393_DEMO)."); return; }
-    if (!req.topic.trim()) { setError("Hãy nhập chủ đề / bài toán của đề."); return; }
-    const data = await call<{ de_bai: string; summary: string }>("/ai/exam/draft", req, "draft");
-    if (!data) return;
-    setDeBai(data.de_bai);
-    setSummary(data.summary);
-    setExamAccepted(false);
-    // Vẽ hình minh họa NGAY khi sinh đề — dùng thẳng văn bản vừa nhận, không đọc state `deBai`
-    // (state chưa kịp cập nhật trong cùng lượt gọi này).
-    const mock = await drawMockups(data.de_bai);
-    if (mock) {
-      setInfo(`Đã sinh đề bài kèm ${mock.mockups?.length || 0} hình minh họa — xem lại rồi bấm "Lưu đề".`);
-    }
-  };
+  return (
+    <Hop tieuDe="Tạo đề mới" onDong={onDong}>
+      {loi && <Banner tone="error" onClose={() => setLoi(null)}>{loi}</Banner>}
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="Mã đề *">
+          <input value={maDe} onChange={(e) => setMaDe(e.target.value)} placeholder="PE_PRM393_DEMO" className={inputClass} />
+        </Field>
+        <Field label="Tên đề">
+          <input value={ten} onChange={(e) => setTen(e.target.value)} placeholder="Quản lý chi tiêu cá nhân" className={inputClass} />
+        </Field>
+      </div>
 
-  const reviseExam = async () => {
-    if (!revisePrompt.trim()) { setError("Hãy mô tả bạn muốn AI sửa gì."); return; }
-    const data = await call<{ de_bai: string; summary: string }>(
-      "/ai/exam/revise", { de_bai: deBai, instruction: revisePrompt }, "revise");
-    if (data) {
-      setDeBai(data.de_bai);
-      setSummary(data.summary);
-      setRevisePrompt("");
-      setInfo("AI đã sửa đề. Kiểm tra lại phần thay đổi trước khi lưu.");
-    }
-  };
+      <p className="mb-2 mt-5 text-xs font-bold uppercase tracking-wider text-slate-400">Chọn cách tạo</p>
+      <div className="space-y-2">
+        <button
+          onClick={() => { if (kiemMa()) oFile.current?.click(); }}
+          disabled={busy}
+          className="flex w-full items-start gap-3 rounded-xl border border-slate-200 p-4 text-left transition-colors hover:border-sky-300 hover:bg-sky-50/50 disabled:opacity-50"
+        >
+          <FileUp size={20} className="mt-0.5 shrink-0 text-sky-600" />
+          <span>
+            <span className="block text-sm font-bold text-slate-800">Dùng file có sẵn</span>
+            <span className="block text-xs leading-relaxed text-slate-500">
+              Tải Word/PDF lên và giữ NGUYÊN bản đó làm đề bài — không bóc chữ, không mất bố cục.
+              Sửa thì sửa trong Word rồi tải đè.
+            </span>
+          </span>
+        </button>
+        <input ref={oFile} type="file" accept=".docx,.pdf" className="hidden"
+          onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) void taiLen(f); }} />
 
-  const saveHandout = async () => {
-    if (!examId.trim()) { setError("Hãy đặt mã đề trước khi lưu."); return; }
-    if (!deBai.trim()) { setError("Chưa có nội dung đề bài để lưu."); return; }
-    const exam = examId.trim();
-    setBusy("handout"); setError(null); setInfo(null);
+        <button
+          onClick={() => { if (kiemMa()) onXong(maDe.trim(), "ai"); }}
+          disabled={busy}
+          className="flex w-full items-start gap-3 rounded-xl border border-slate-200 p-4 text-left transition-colors hover:border-indigo-300 hover:bg-indigo-50/50 disabled:opacity-50"
+        >
+          <Sparkles size={20} className="mt-0.5 shrink-0 text-indigo-600" />
+          <span>
+            <span className="block text-sm font-bold text-slate-800">Nhờ AI soạn</span>
+            <span className="block text-xs leading-relaxed text-slate-500">
+              Khai chủ đề và yêu cầu, nhận bản nháp để xem và sửa. Có hình minh hoạ, sửa được bằng AI.
+            </span>
+          </span>
+        </button>
+
+        {/* "Tự gõ" đã bỏ (20/9, theo yêu cầu): mở một trang trắng rồi tự gõ Markdown là đường
+            không ai đi — có AI soạn nháp rồi sửa thì nhanh hơn hẳn. Đề đã tạo vẫn sửa tay
+            được bình thường ở nút Sửa bên màn chi tiết. */}
+      </div>
+      {busy && <p className="mt-3 flex items-center gap-2 text-xs text-slate-500"><Loader2 size={13} className="animate-spin" /> Đang tải lên…</p>}
+    </Hop>
+  );
+}
+
+function HopNhanBan({ nguon, onDong, onXong }: { nguon: DongDe; onDong: () => void; onXong: (id: string) => void }) {
+  const [maMoi, setMaMoi] = useState(`${nguon.examId}_COPY`);
+  const [ten, setTen] = useState(nguon.examName || "");
+  const [busy, setBusy] = useState(false);
+  const [loi, setLoi] = useState<string | null>(null);
+
+  const chay = async () => {
+    if (!maDeHopLe(maMoi.trim())) { setLoi("Mã đề mới không hợp lệ."); return; }
+    setBusy(true); setLoi(null);
     try {
-      const saveRes = await fetch(`${API_BASE}/exam-setup/${encodeURIComponent(exam)}/handout`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      await gui(`/exam-setup/${encodeURIComponent(nguon.examId)}/clone-handout`,
+        { target_exam_id: maMoi.trim(), exam_name: ten.trim() || undefined });
+      onXong(maMoi.trim());
+    } catch (e) {
+      setLoi((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Hop tieuDe={`Nhân bản đề ${nguon.examId}`} onDong={onDong}>
+      {loi && <Banner tone="error" onClose={() => setLoi(null)}>{loi}</Banner>}
+      <p className="mb-4 text-sm leading-relaxed text-slate-500">
+        Chép đề bài, hình minh hoạ và file gốc sang một mã đề mới. Bộ chấm KHÔNG được chép —
+        đề mới bắt đầu từ chỗ chưa có bộ chấm nào.
+      </p>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="Mã đề mới *">
+          <input value={maMoi} onChange={(e) => setMaMoi(e.target.value)} className={inputClass} />
+        </Field>
+        <Field label="Tên đề">
+          <input value={ten} onChange={(e) => setTen(e.target.value)} className={inputClass} />
+        </Field>
+      </div>
+      <div className="mt-5 flex justify-end gap-2">
+        <button onClick={onDong} className={ghostBtn}>Hủy</button>
+        <button onClick={chay} disabled={busy} className={primaryBtn}>
+          {busy ? <Loader2 size={15} className="animate-spin" /> : <Copy size={15} />} Nhân bản
+        </button>
+      </div>
+    </Hop>
+  );
+}
+
+/** Xoá đề: LUÔN bắt gõ lại mã, kể cả đề trống — cùng luật với bên người chấm. */
+/**
+ * Xoá đề: liệt kê đúng những gì sẽ mất, rồi HAI NÚT — Hủy / Xoá.
+ *
+ * <p>Bỏ ô "gõ lại mã đề" (20/9, theo yêu cầu): hộp này đã là một bước riêng có kể rõ hậu quả,
+ * bắt gõ thêm một lần nữa là hai lớp xác nhận cho cùng một thao tác. Bên màn người chấm vẫn
+ * giữ ô gõ vì ở đó xoá bộ là mất luôn BẢNG ĐIỂM đã chấm, không dựng lại được.
+ */
+function HopXoaDe({ de, onDong, onXong }: { de: DongDe; onDong: () => void; onXong: (id: string) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [loi, setLoi] = useState<string | null>(null);
+
+  const chay = async () => {
+    setBusy(true); setLoi(null);
+    try {
+      await doc(`/exam-setup/${encodeURIComponent(de.examId)}`, { method: "DELETE" });
+      onXong(de.examId);
+    } catch (e) {
+      setLoi((e as Error).message);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Hop tieuDe={`Xoá đề ${de.examId}?`} onDong={onDong}>
+      {loi && <Banner tone="error" onClose={() => setLoi(null)}>{loi}</Banner>}
+      <ul className="space-y-1.5 rounded-xl border border-slate-100 bg-slate-50 p-4 text-sm text-slate-600">
+        <li>• Đề bài, hình minh hoạ và file gốc</li>
+        {de.hasTestcase && <li>• <b>Bộ chấm</b> của đề này, kèm mọi bài đã chấm và phiên chấm</li>}
+      </ul>
+      <div className="mt-5 flex justify-end gap-2">
+        <button onClick={onDong} disabled={busy} className={ghostBtn}>Hủy</button>
+        <button onClick={chay} disabled={busy} autoFocus
+          className="flex items-center gap-2 rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-700 disabled:opacity-40">
+          {busy ? <Loader2 size={15} className="animate-spin" /> : <Trash2 size={15} />} Xoá vĩnh viễn
+        </button>
+      </div>
+    </Hop>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  CHI TIẾT MỘT ĐỀ
+// ══════════════════════════════════════════════════════════════════════════════
+
+function ChiTietDe({ maDe, moiTao }: { maDe: string; moiTao: string }) {
+  const router = useRouter();
+  const [dangTai, setDangTai] = useState(true);
+  const [loi, setLoi] = useState<string | null>(null);
+  const [bao, setBao] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const [loaiDe, setLoaiDe] = useState<LoaiDe>("TRONG");
+  const [tenDe, setTenDe] = useState("");
+  const [deBai, setDeBai] = useState("");
+  const [daLuu, setDaLuu] = useState("");
+  const [mockups, setMockups] = useState<Mockup[]>([]);
+  const [hinhDaLuu, setHinhDaLuu] = useState<Mockup[]>([]);
+  const [fileGoc, setFileGoc] = useState<{ exists: boolean; file_name?: string; size_bytes?: number }>({ exists: false });
+  const [sua, setSua] = useState(false);
+  const [html, setHtml] = useState("");
+  const [htmlDaLuu, setHtmlDaLuu] = useState("");
+  const [moCaiDat, setMoCaiDat] = useState(false);
+  const [yeuCauAi, setYeuCauAi] = useState("");
+  const [banAi, setBanAi] = useState<string | null>(null);
+  const [formAi, setFormAi] = useState(moiTao === "ai");
+  // Bản nháp AI CHƯA từng lưu: bấm Hủy ở đây không phải "quay về bản cũ" như mọi lần sửa khác —
+  // không có bản cũ nào cả, huỷ là vứt sạch công AI vừa làm. Nên phải hỏi lại, và hỏi xong thì
+  // đưa người ta về danh sách chứ đừng bỏ lại giữa một màn trắng chỉ có mỗi mã đề.
+  const [nhapAi, setNhapAi] = useState(false);
+  const [hoiHuyAi, setHoiHuyAi] = useState(false);
+  /** Ảnh vừa chọn, đang chờ giáo viên khai nó là màn nào — xem HopDatTenAnh. */
+  const [anhCho, setAnhCho] = useState<File | null>(null);
+  const oFile = useRef<HTMLInputElement>(null);
+  const oAnh = useRef<HTMLInputElement>(null);
+
+  const chuaLuu = deBai !== daLuu || JSON.stringify(mockups) !== JSON.stringify(hinhDaLuu);
+  /** Đang ở form khai yêu cầu cho AI (đề mới tinh, chưa có nội dung nào). */
+  const dangKhaiAi = formAi && !daLuu.trim();
+
+  const nap = useCallback(async () => {
+    setDangTai(true);
+    try {
+      const [xem, ds, goc] = await Promise.all([
+        doc(`/exam-setup/${encodeURIComponent(maDe)}/de-bai/view`).catch(() => ({})),
+        doc("/exam-setup/list").catch(() => []),
+        doc(`/exam-setup/${encodeURIComponent(maDe)}/handout/original/info`).catch(() => ({ exists: false })),
+      ]);
+      const v = xem as { de_bai?: string; html?: string; mockups?: Mockup[] };
+      setDeBai(String(v.de_bai || ""));
+      setDaLuu(String(v.de_bai || ""));
+      setHtml(String(v.html || ""));
+      setHtmlDaLuu(String(v.html || ""));
+      setMockups(Array.isArray(v.mockups) ? v.mockups : []);
+      setHinhDaLuu(Array.isArray(v.mockups) ? v.mockups : []);
+      setFileGoc(goc as { exists: boolean });
+      const dong = (Array.isArray(ds) ? (ds as DongDe[]) : []).find((e) => e.examId === maDe);
+      setLoaiDe((dong?.loaiDe as LoaiDe) || "TRONG");
+      setTenDe(dong?.examName && dong.examName !== maDe ? dong.examName : "");
+      setLoi(null);
+    } catch (e) {
+      setLoi((e as Error).message);
+    } finally {
+      setDangTai(false);
+    }
+  }, [maDe]);
+
+  useEffect(() => { void nap(); }, [nap]);
+
+  // XEM TRƯỚC SỐNG: đang sửa thì dựng lại HTML theo chữ VỪA GÕ, chờ 400ms cho hết nhịp gõ.
+  //
+  // Dựng ở máy chủ bằng đúng `HandoutDocument.toHtml` — cùng bộ sinh ra de_bai.html và bản
+  // .docx — nên cái nhìn thấy lúc soạn là cái sinh viên nhận. Trình duyệt không có thư viện
+  // markdown nào (repo build offline) mà tự viết bộ thứ hai thì sớm muộn hai bên lệch nhau,
+  // đúng loại lệch không ai phát hiện cho tới lúc in đề ra giấy.
+  //
+  // Thiếu hẳn phần này thì bấm "Xem" chỉ thấy bản ĐÃ LƯU: gõ xong tưởng mất chữ.
+  useEffect(() => {
+    if (!sua) return;
+    if (!deBai.trim()) { setHtml(""); return; }
+    const timer = setTimeout(async () => {
+      try {
+        const d = await gui(`/exam-setup/${encodeURIComponent(maDe)}/de-bai/xem-truoc`, {
           de_bai: deBai,
-          mockups: mockups.map((m) => ({ id: m.id, svg: m.svg })),
-        }),
-      });
-      const saved = await saveRes.json().catch(() => ({}));
-      if (!saveRes.ok) throw new Error(saved?.error || "Không lưu được đề bài.");
-      setExamAccepted(true);
-      clearAiDraft(exam);
-      await loadAuthored();
-      setInfo(`Đã lưu đề ${exam}.`);
+          mockups: mockups.map((m) => ({ id: m.id, title: m.title, svg: m.svg })),
+        });
+        setHtml(String((d as { html?: string }).html || ""));
+      } catch { /* mất một nhịp xem trước không đáng làm hỏng phiên soạn */ }
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [deBai, mockups, sua, maDe]);
+
+  /** Vào sửa: nạp bản đang xem vào ô soạn, bỏ thẻ chỉ dẫn căn lề trước khi cho người ta thấy. */
+  const vaoSua = () => {
+    const sach = boTheLayout(deBai);
+    if (sach !== deBai) setDeBai(sach);
+    setSua(true);
+  };
+
+  // Hủy phải trả cả chữ lẫn hình về bản đã lưu, kể cả khi bản nháp đến từ AI.
+  const huySua = () => {
+    setDeBai(daLuu);
+    setMockups(hinhDaLuu);
+    setHtml(htmlDaLuu);
+    setBanAi(null);
+    setBao(null);
+    setLoi(null);
+    setSua(false);
+  };
+
+  /** Bản nháp AI chưa lưu thì hỏi lại trước khi vứt; còn lại là sửa thường, huỷ về bản đã lưu. */
+  const bamHuy = () => {
+    if (nhapAi) setHoiHuyAi(true);
+    else huySua();
+  };
+
+  const luu = async () => {
+    if (!deBai.trim()) { setLoi("Chưa có nội dung đề bài để lưu."); return; }
+    setBusy("luu"); setLoi(null);
+    try {
+      await gui(`/exam-setup/${encodeURIComponent(maDe)}/handout`,
+        { de_bai: deBai, mockups: mockups.map((m) => ({ id: m.id, svg: m.svg })) });
+      setDaLuu(deBai);
+      setBao("Đã lưu đề bài.");
+      await nap();
+      setSua(false);
+      setNhapAi(false);   // đã có bản trên đĩa rồi, từ giờ Hủy là quay về bản đó
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Không lưu được đề bài.");
+      setLoi((e as Error).message);
     } finally {
       setBusy(null);
     }
   };
 
-  // ── Hình minh họa giao diện: AI đọc mục 3 (Hợp đồng giao diện) của đề, vẽ khung dây từng màn
-  // hình (SVG dựng tất định ở backend qua MockupRenderer — AI chỉ mô tả cấu trúc, không tự vẽ
-  // SVG). Tự vẽ ngay khi sinh đề (xem draftExam); lưu kèm đề bài khi bấm "Lưu đề", không lưu
-  // ngay lúc vẽ. `instruction` = lời giáo viên nhờ AI vẽ lại theo ý muốn (đổi bố cục/thành phần).
-  const drawMockups = async (deBaiText: string, instruction?: string) => {
-    const data = await call<{ mockups: Mockup[] }>(
-      "/ai/exam/mockup", { de_bai: deBaiText, instruction: instruction || undefined }, "mockup");
-    if (data) setMockups(Array.isArray(data.mockups) ? data.mockups : []);
-    return data;
-  };
-
-  const reviseMockups = async () => {
-    if (!deBai.trim()) { setError("Chưa có đề bài để vẽ hình minh họa."); return; }
-    const data = await drawMockups(deBai, mockupPrompt);
-    if (data) {
-      const theoYeuCau = mockupPrompt.trim().length > 0;
-      setMockupPrompt("");
-      setInfo(`AI đã vẽ lại ${data.mockups?.length || 0} hình minh họa`
-        + (theoYeuCau ? " theo yêu cầu" : "") + ` — bấm "Lưu đề" để giữ lại.`);
-    }
-  };
-
-  const downloadMockup = async (m: Mockup) => {
-    try {
-      const { png } = await svgToPng(m.svg);
-      const res = await fetch(png);
-      downloadBlob(await res.blob(), `${examId.trim() || "de"}_${m.id}.png`);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Không tải được hình.");
-    }
-  };
-
-  /** Đổi toàn bộ hình minh họa hiện có sang PNG (canvas trong trình duyệt) để nhúng vào .docx/.pdf —
-   *  đúng khuôn {@code {id, png_base64, width, height}} mà ExamService#buildHandoutDocx/Pdf đọc. */
-  const mockupImages = async () => {
+  const anhChoTaiLieu = async () => {
     const out: { id: string; png_base64: string; width: number; height: number }[] = [];
     for (const m of mockups) {
       try {
         const { png, width, height } = await svgToPng(m.svg);
         out.push({ id: m.id, png_base64: png, width, height });
-      } catch { /* 1 hình lỗi không chặn tải cả file */ }
+      } catch { /* một hình lỗi không chặn cả file */ }
     }
     return out;
   };
 
-  const downloadDocx = async () => {
-    if (!examId.trim()) return;
-    const exam = examId.trim();
-    setBusy("docx"); setError(null);
+  const taiTaiLieu = async (dang: "docx" | "pdf") => {
+    setBusy(dang); setLoi(null);
     try {
-      const images = await mockupImages();
-      const docxRes = await fetch(`${API_BASE}/exam-setup/${encodeURIComponent(exam)}/de-bai/docx`, {
+      const images = await anhChoTaiLieu();
+      const res = await fetch(`${API_BASE}/exam-setup/${encodeURIComponent(maDe)}/de-bai/${dang}`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ images }),
       });
-      if (!docxRes.ok) {
-        const data = await docxRes.json().catch(() => ({}));
-        throw new Error(data?.error || "Không tải được bản .docx — hãy lưu đề trước.");
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d?.error || `Không tải được bản .${dang} — hãy lưu đề trước.`);
       }
-      downloadBlob(await docxRes.blob(), `${exam}_de_bai.docx`);
-      setInfo(`Đã tải bản .docx của đề ${exam} (kèm ${images.length} hình minh họa).`);
+      downloadBlob(await res.blob(), `${maDe}_de_bai.${dang}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Không tải được bản .docx.");
+      setLoi((e as Error).message);
     } finally {
       setBusy(null);
     }
   };
 
-  const downloadPdf = async () => {
-    if (!examId.trim()) return;
-    const exam = examId.trim();
-    setBusy("pdf"); setError(null);
+  const nhoAiSua = async () => {
+    if (!yeuCauAi.trim()) { setLoi("Hãy mô tả bạn muốn AI sửa gì."); return; }
+    setBusy("ai"); setLoi(null);
     try {
-      const images = await mockupImages();
-      const pdfRes = await fetch(`${API_BASE}/exam-setup/${encodeURIComponent(exam)}/de-bai/pdf`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ images }),
-      });
-      if (!pdfRes.ok) {
-        const data = await pdfRes.json().catch(() => ({}));
-        throw new Error(data?.error || "Không tải được bản .pdf — hãy lưu đề trước.");
-      }
-      downloadBlob(await pdfRes.blob(), `${exam}_de_bai.pdf`);
-      setInfo(`Đã tải bản .pdf của đề ${exam} (kèm ${images.length} hình minh họa).`);
+      const d = await gui("/ai/exam/revise", { de_bai: deBai, instruction: yeuCauAi });
+      setBanAi(String((d as { de_bai?: string }).de_bai || ""));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Không tải được bản .pdf.");
+      setLoi((e as Error).message);
     } finally {
       setBusy(null);
     }
   };
+
+  /**
+   * Nhờ AI vẽ lại khung dây cho các màn ở mục 3.
+   *
+   * <p>Màn nào giáo viên đã tải ảnh THẬT lên thì AI khỏi vẽ: báo tên màn đó vào lời nhờ để AI bỏ
+   * qua ngay từ đầu (đỡ tiền, đỡ thời gian), và nếu AI vẫn cố vẽ thì ở đây loại nốt. Thiếu bước
+   * này thì đề in ra có HAI hình cho cùng một màn — một khung dây, một ảnh thật — và người đọc
+   * không biết phải tin cái nào.
+   */
+  const veHinh = async (yeuCau?: string) => {
+    setBusy("hinh"); setLoi(null);
+    try {
+      const anh = mockups.filter(laAnhTaiLen);
+      const loiNhac = anh.length === 0 ? "" :
+        `Các màn sau đã có ảnh thật rồi, KHÔNG cần vẽ: ${anh.map((m) => m.title).join("; ")}.`;
+      const d = await gui("/ai/exam/mockup", {
+        de_bai: deBai,
+        instruction: [yeuCau?.trim(), loiNhac].filter(Boolean).join("\n") || undefined,
+      });
+      const ds = (d as { mockups?: Mockup[] }).mockups;
+      // THAY TẠI CHỖ chứ không lọc bỏ rồi nối ảnh vào cuối: thứ tự hình trong đề phải theo thứ tự
+      // màn ở mục 3. Đẩy ảnh xuống cuối là đề in ra thành màn 2, màn 3, rồi mới màn 1.
+      const daDung = new Set<string>();
+      const hop = (Array.isArray(ds) ? ds : []).map((m) => {
+        const thay = anh.find((a) => chuanHoaTen(a.title) === chuanHoaTen(m.title));
+        if (!thay) return m;
+        daDung.add(thay.id);
+        return thay;
+      });
+      // Ảnh không khớp màn nào (giáo viên tự đặt tên khác) vẫn phải còn, nối vào cuối.
+      setMockups([...hop, ...anh.filter((a) => !daDung.has(a.id))]);
+      setSua(true);
+      setBao(`AI đã vẽ lại ${hop.length - daDung.size} hình`
+        + (anh.length ? `, giữ nguyên ${anh.length} ảnh bạn tải lên` : "") + " — bấm Lưu để giữ.");
+    } catch (e) {
+      setLoi((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /**
+   * Tải ẢNH THẬT lên làm hình minh hoạ — ảnh chụp app mẫu hay bản thiết kế của chính giáo viên.
+   *
+   * <p>Đây là đường DUY NHẤT để hình giống hệt thiết kế: AI chỉ mô tả màn hình bằng JSON rồi máy
+   * chủ dựng khung dây từ vốn hình khối có sẵn, nên hình AI mãi mãi là khung dây. Ảnh tải lên đi
+   * thẳng, không qua chỗ thắt đó.
+   *
+   * <p>{@code ten} là tên MÀN HÌNH giáo viên khai, không phải tên file. Hai lý do bắt khai: tên
+   * này in thẳng vào đề bài làm chú thích trên mỗi hình (tên file thật ngoài đời là
+   * "Screenshot_20260920_143210"), và nó là thứ duy nhất cho biết ảnh thay cho màn nào — ảnh
+   * trùng tên với một khung dây thì THAY ĐÚNG CHỖ nó, không nằm thêm một hình nữa.
+   */
+  const themAnh = async (f: File, ten: string) => {
+    setBusy("anh"); setLoi(null);
+    try {
+      const { svg } = await imageFileToSvg(f, ten);
+      const moi: Mockup = { id: `anh-${Date.now().toString(36)}`, title: ten, svg };
+      const chO = mockups.findIndex((m) => chuanHoaTen(m.title) === chuanHoaTen(ten));
+      const ds = [...mockups];
+      if (chO >= 0) ds.splice(chO, 1, moi); else ds.push(moi);
+      setMockups(ds);
+      setSua(true);
+      setBao(chO >= 0
+        ? `Ảnh đã thay hình “${ten}” — bấm Lưu để giữ.`
+        : `Đã thêm ảnh “${ten}” — bấm Lưu để giữ.`);
+    } catch (e) {
+      setLoi((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const xoaHinh = (id: string) => {
+    setMockups(mockups.filter((m) => m.id !== id));
+    setSua(true);
+  };
+
+  if (dangTai) {
+    return <KhungCho />;
+  }
 
   return (
-    <SidebarLayout activePath="/teacher/exam-authoring" title="Tạo đề bằng AI">
-      <div className="space-y-6">
-        {error && (
-          <p className="flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs font-medium leading-relaxed text-rose-700">
-            <AlertTriangle size={14} className="mt-0.5 shrink-0" /> {error}
-          </p>
-        )}
-        {info && (
-          <p className="flex items-start gap-2 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs font-medium leading-relaxed text-emerald-700">
-            <Check size={14} className="mt-0.5 shrink-0" /> {info}
-          </p>
-        )}
-
-        <AiSettingsPanel />
-
-        {/* Danh sách đề đã soạn */}
-        <section className="card p-5">
-          <div className="mb-3 flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <ListChecks size={16} className="text-indigo-500" />
-              <h2 className="text-sm font-bold text-slate-800">Đề đã soạn ({authored.length})</h2>
+    <>
+      {/* Tách tiêu đề và cụm nút để tên đề dài không ép các thao tác trên khung hẹp. */}
+      <div className="mb-5">
+        <button onClick={() => router.push("/teacher/exam-authoring")}
+          className="mb-2 inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-sm font-semibold text-slate-500 hover:bg-slate-100">
+          <ArrowLeft size={16} /> Danh sách
+        </button>
+        <div>
+          <div className="min-w-0">
+            <h2 className="truncate text-lg font-bold text-slate-800">{tenDe || maDe}</h2>
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-400">
+              <span className="font-mono">{maDe}</span>
+              <ChipLoai dong={{ examId: maDe, loaiDe, hasDeBai: !!daLuu.trim() }} />
+              {chuaLuu && <span className="font-semibold text-amber-600">• chưa lưu</span>}
             </div>
-            <button onClick={startNew} className={ghostBtn}>
-              <FilePlus2 size={15} /> Soạn đề mới
-            </button>
           </div>
-          {loadingList ? (
-            <p className="flex items-center gap-2 text-xs text-slate-400"><Loader2 size={14} className="animate-spin" /> Đang tải…</p>
-          ) : (
-            <div className="grid gap-2 sm:grid-cols-2">
-              {authored.map((item) => (
-                <button key={item.exam_id} onClick={() => openExam(item.exam_id)}
-                  className={`rounded-xl border p-3 text-left transition-colors ${
-                    examId === item.exam_id ? "border-indigo-300 bg-indigo-50/60" : "border-slate-200 hover:border-indigo-300 hover:bg-indigo-50/30"}`}>
-                  <p className="truncate font-mono text-xs font-bold text-indigo-600">{item.exam_id}</p>
-                  <p className="mt-0.5 truncate text-xs text-slate-600">{item.title || "(chưa có tiêu đề)"}</p>
-                  <p className="mt-1 text-[10px] text-slate-400">{new Date(item.updated_at).toLocaleString("vi-VN")}</p>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <button onClick={() => setMoCaiDat(true)} title="Cấu hình AI"
+              className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 text-slate-400 hover:text-indigo-600">
+              <Settings2 size={16} />
+            </button>
+            {/* Mọi đề đều xem và sửa được, kể cả đề vừa tải file lên (20/9): nội dung hiển thị
+                bóc thẳng từ file Word, và LƯU lần đầu chính là lúc nó thành "soạn trong hệ
+                thống". Không còn bước "Đưa vào hệ thống" riêng. */}
+            {(
+              <>
+                <button onClick={() => taiTaiLieu("docx")} disabled={!!busy || !daLuu.trim()} className={ghostBtn}>
+                  {busy === "docx" ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Tải Word
                 </button>
-              ))}
+                {sua ? (
+                  <>
+                    <button onClick={bamHuy} disabled={!!busy} className={ghostBtn}>Hủy</button>
+                    <button onClick={luu} disabled={!!busy || !chuaLuu} className={primaryBtn}>
+                      {busy === "luu" ? <Loader2 size={15} className="animate-spin" /> : <Check size={15} />} Lưu
+                    </button>
+                  </>
+                ) : (
+                  <button onClick={vaoSua} disabled={!!busy} className={ghostBtn}>
+                    <Pencil size={15} /> Sửa đề bài
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {loi && <Banner tone="error" onClose={() => setLoi(null)}>{loi}</Banner>}
+      {bao && <Banner tone="ok" onClose={() => setBao(null)}>{bao}</Banner>}
+
+      {dangKhaiAi ? (
+        <FormAiSoanDe maDe={maDe} onXong={(md, hinh) => {
+          setDeBai(md); setMockups(hinh); setFormAi(false); setSua(true); setNhapAi(true);
+          setBao("AI đã soạn xong bản nháp — xem lại rồi bấm Lưu.");
+        }} onLoi={setLoi} />
+      ) : (
+        <>
+          {sua ? (
+              <textarea
+                aria-label="Nội dung đề bài"
+                value={deBai}
+                onChange={(e) => setDeBai(e.target.value)}
+                disabled={!!busy}
+                spellCheck={false}
+                placeholder="# Đề bài&#10;&#10;Soạn bằng Markdown…"
+                className="h-[70vh] w-full resize-none rounded-xl border border-slate-200 bg-white p-4 font-mono text-[13px] leading-relaxed outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
+              />
+          ) : (
+            <div className="h-[70vh] min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white">
+              {html ? (
+                // HTML là tài liệu đầy đủ có CSS body/table; phải cô lập để không bó cả ứng dụng.
+                <iframe
+                  title={`Xem trước đề bài ${maDe}`}
+                  srcDoc={html}
+                  sandbox=""
+                  className="block h-full w-full border-0"
+                />
+              ) : (
+                <p className="p-10 text-center text-sm text-slate-400">
+                  Chưa có nội dung. Bấm “Sửa đề bài” để soạn hoặc nhờ AI chỉnh sửa bên dưới.
+                </p>
+              )}
             </div>
+          )}
+
+        <section className="card mt-4 p-5" aria-label="AI hỗ trợ chỉnh sửa">
+          <h3 className="mb-3 text-sm font-bold text-slate-700">Nhờ AI chỉnh sửa đề bài</h3>
+          {banAi === null ? (
+            <>
+              <Field label="Bạn muốn sửa gì?">
+                <textarea value={yeuCauAi} onChange={(e) => setYeuCauAi(e.target.value)} rows={4}
+                  placeholder="vd: thêm một chức năng lọc theo tháng, và ghi rõ định dạng ngày là yyyy-MM-dd"
+                  className={inputClass} />
+              </Field>
+              <div className="mt-4 flex justify-end gap-2">
+                <button onClick={nhoAiSua} disabled={!!busy} className={primaryBtn}>
+                  {busy === "ai" ? <Loader2 size={15} className="animate-spin" /> : <Wand2 size={15} />} Nhờ AI sửa
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              {/* AI KHÔNG ghi thẳng vào đề: đưa bản sửa ra xem trước rồi mới quyết. Ghi thẳng
+                  thì một câu mô tả mơ hồ có thể cuốn mất cả phần giảng viên đã gọt kỹ. */}
+              <p className="mb-2 text-xs font-semibold text-slate-500">Bản AI đề xuất — xem rồi quyết:</p>
+              <textarea value={banAi} onChange={(e) => setBanAi(e.target.value)} rows={18}
+                className="w-full rounded-lg border border-slate-200 p-3 font-mono text-[12px] leading-relaxed outline-none focus:border-indigo-400" />
+              <div className="mt-4 flex justify-end gap-2">
+                <button onClick={() => setBanAi(null)} className={ghostBtn}>Bỏ qua</button>
+                <button onClick={() => { setDeBai(banAi); setBanAi(null); setYeuCauAi(""); setSua(true); }}
+                  className={primaryBtn}><Check size={15} /> Áp dụng</button>
+              </div>
+            </>
           )}
         </section>
 
-        {/* Bước 1: mô tả yêu cầu */}
-        <Step index={1} icon={Wand2} title={source === "ai" ? "Mô tả yêu cầu đề" : "Tải đề có sẵn lên"} done={!!deBai}>
-          <div className="mb-4">
-            <Field label="Mã đề">
-              <input value={examId} onChange={(e) => setExamId(e.target.value.toUpperCase().replace(/[^A-Z0-9_-]/g, "_"))}
-                placeholder="VD: PE_PRM393_QLCT" className={`${inputClass} font-mono`} />
-            </Field>
+          <KhoiHinh mockups={mockups} busy={busy} maDe={maDe} onVe={veHinh}
+            onTaiAnh={() => oAnh.current?.click()} onXoaHinh={xoaHinh} onLoi={setLoi} />
+        </>
+      )}
+
+      {/* Khối file gốc: với đề NGOAI đây CHÍNH LÀ đề bài, với đề TRONG nó là tài liệu đính
+          kèm. Cùng một khối, đổi lời theo loại — xem KhoiDinhKem.
+
+          KHÔNG hiện suốt quãng đề sinh bằng AI còn là bản nháp (20/9, theo yêu cầu): từ lúc khai
+          yêu cầu cho tới khi bấm Lưu, đề CHƯA TỒN TẠI trên đĩa — mời người ta đính kèm tài liệu
+          vào một cái chưa có là vô nghĩa, mà bấm vào thì lại tạo thư mục đề nửa vời trong khi bản
+          nháp vẫn chưa lưu. Lưu xong là khối này hiện lại bình thường. */}
+      {!dangKhaiAi && !nhapAi && (
+        <KhoiDinhKem maDe={maDe} fileGoc={fileGoc} laBanChinh={loaiDe === "NGOAI"}
+          onTaiLen={() => oFile.current?.click()}
+          onXoa={async () => {
+            try {
+              await doc(`/exam-setup/${encodeURIComponent(maDe)}/handout/original`, { method: "DELETE" });
+              await nap();
+            } catch (e) { setLoi((e as Error).message); }
+          }} />
+      )}
+
+      <input ref={oAnh} type="file" accept="image/*" className="hidden"
+        onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) setAnhCho(f); }} />
+
+      {anhCho && (
+        <HopDatTenAnh
+          file={anhCho}
+          manCoSan={[...tenManTuDeBai(deBai), ...mockups.map((m) => m.title)]}
+          onDong={() => setAnhCho(null)}
+          onXong={(ten) => { setAnhCho(null); void themAnh(anhCho, ten); }}
+        />
+      )}
+
+      <input ref={oFile} type="file" accept=".docx,.pdf" className="hidden"
+        onChange={async (e) => {
+          const f = e.target.files?.[0];
+          e.target.value = "";
+          if (!f) return;
+          setBusy("tailen"); setLoi(null);
+          try {
+            const form = new FormData();
+            form.append("file", f);
+            const res = await fetch(`${API_BASE}/exam-setup/${encodeURIComponent(maDe)}/handout/original`,
+              { method: "POST", body: form });
+            const d = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(d?.error || "Không tải lên được file.");
+            await nap();
+            setBao(`Đã tải lên ${f.name}.`);
+          } catch (err) {
+            setLoi((err as Error).message);
+          } finally {
+            setBusy(null);
+          }
+        }} />
+
+      {moCaiDat && (
+        <Hop tieuDe="Cấu hình AI" onDong={() => setMoCaiDat(false)} rong="max-w-2xl">
+          <AiSettingsPanel />
+        </Hop>
+      )}
+
+      {hoiHuyAi && (
+        <Hop tieuDe="Hủy bỏ đề vừa sinh?" onDong={() => setHoiHuyAi(false)}>
+          <p className="text-sm leading-relaxed text-slate-600">
+            Bạn chắc chắn muốn hủy bỏ đề sinh bằng AI này chứ? Bản nháp <b>chưa được lưu</b> nên
+            cả phần đề bài lẫn hình minh hoạ sẽ mất hẳn, không lấy lại được.
+          </p>
+          <div className="mt-5 flex justify-end gap-2">
+            <button onClick={() => setHoiHuyAi(false)} className={ghostBtn}>Hủy</button>
+            <button onClick={() => router.push("/teacher/exam-authoring")} autoFocus
+              className="flex items-center gap-2 rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-700">
+              <Trash2 size={15} /> Tiếp tục
+            </button>
           </div>
-          <div className="mb-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
-            {([
-              { id: "ai" as const, icon: Sparkles, title: "Tạo đề bằng AI"},
-              { id: "upload" as const, icon: Upload, title: "Tải đề có sẵn lên", desc: "PDF, Word (.docx) hoặc .txt" },
-            ]).map((choice) => (
-              <button key={choice.id} type="button" onClick={() => setSource(choice.id)}
-                className={`flex items-start gap-2.5 rounded-xl border p-3 text-left transition-colors ${
-                  source === choice.id ? "border-indigo-300 bg-indigo-50/70 ring-1 ring-indigo-200" : "border-slate-200 bg-white hover:border-slate-300"}`}>
-                <choice.icon size={16} className={`mt-0.5 shrink-0 ${source === choice.id ? "text-indigo-600" : "text-slate-400"}`} />
-                <span className="min-w-0">
-                  <span className="block text-sm font-bold text-slate-700">{choice.title}</span>
-                  <span className="block text-[11px] leading-relaxed text-slate-500">{choice.desc}</span>
-                </span>
-              </button>
-            ))}
-          </div>
-
-          {source === "upload" ? (
-            <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-5 text-center">
-              <input id="ai-exam-file" type="file" className="hidden" accept=".pdf,.docx,.txt,.md,.markdown"
-                onChange={(e) => { const file = e.target.files?.[0]; e.target.value = ""; if (file) importExam(file); }} />
-              <label htmlFor="ai-exam-file"
-                className={`${primaryBtn} mx-auto w-fit cursor-pointer ${busy ? "pointer-events-none opacity-60" : ""}`}>
-                {busy === "import" ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />}
-                Chọn file đề
-              </label>
-              <p className="mt-2.5 text-[11px] leading-relaxed text-slate-500">
-                Nhận .docx, .pdf, .txt, .md. PDF bản scan (chỉ có ảnh) không bóc được chữ — hãy dùng .docx.
-              </p>
-              {importedName && <p className="mt-2 font-mono text-[11px] text-emerald-600">Đã đọc: {importedName}</p>}
-            </div>
-          ) : (
-            <>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <Field label="Chủ đề / bài toán *">
-                  <input value={req.topic} onChange={(e) => setReq({ ...req, topic: e.target.value })}
-                    placeholder="VD: Quản lý sinh viên (thêm/sửa/xóa)" className={inputClass} />
-                </Field>
-                <Field label="Kiến thức cần kiểm tra">
-                  <input value={req.knowledge} onChange={(e) => setReq({ ...req, knowledge: e.target.value })}
-                    placeholder="SQLite, validate form, responsive" className={inputClass} />
-                </Field>
-                <Field label="Các màn hình">
-                  <input value={req.screens} onChange={(e) => setReq({ ...req, screens: e.target.value })}
-                    placeholder="Danh sách + Chi tiết" className={inputClass} />
-                </Field>
-                <Field label="Thực thể / dữ liệu">
-                  <input value={req.entity} onChange={(e) => setReq({ ...req, entity: e.target.value })}
-                    placeholder="Student: id, fullName, email, avatar" className={inputClass} />
-                </Field>
-                <Field label="Chức năng bắt buộc">
-                  <input value={req.features} onChange={(e) => setReq({ ...req, features: e.target.value })}
-                    placeholder="Thêm, sửa, xóa có xác nhận, điều hướng sang chi tiết" className={inputClass} />
-                </Field>
-                <Field label="Lưu trữ dữ liệu">
-                  <input value={req.storage} onChange={(e) => setReq({ ...req, storage: e.target.value })}
-                    placeholder="SQLite / File / SharedPreferences" className={inputClass} />
-                </Field>
-                <div className="grid grid-cols-2 gap-3">
-                  <Field label="Độ khó">
-                    <select value={req.difficulty} onChange={(e) => setReq({ ...req, difficulty: e.target.value })} className={inputClass}>
-                      <option>Dễ</option><option>Trung bình</option><option>Khó</option>
-                    </select>
-                  </Field>
-                  <Field label="Thời lượng">
-                    <input value={req.duration} onChange={(e) => setReq({ ...req, duration: e.target.value })} className={inputClass} />
-                  </Field>
-                </div>
-                <div className="sm:col-span-2">
-                  <Field label="Yêu cầu thêm">
-                    <textarea value={req.note} onChange={(e) => setReq({ ...req, note: e.target.value })} rows={2}
-                      placeholder="VD: có màn responsive trên tablet" className={inputClass} />
-                  </Field>
-                </div>
-              </div>
-              <button onClick={draftExam} disabled={busy !== null} className={`${primaryBtn} mt-3`}>
-                {busy === "draft" ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />} Sinh đề bài
-              </button>
-            </>
-          )}
-        </Step>
-
-        {/* Bước 2: xem lại, sửa bằng AI hoặc sửa tay, lưu */}
-        {!!deBai && (
-          <Step index={2} icon={FileText} title="Xem lại, sửa &amp; lưu đề bài" done={examAccepted}>
-            {summary && <p className="mb-2 rounded-xl bg-slate-50 p-3 text-xs leading-relaxed text-slate-600">{summary}</p>}
-            <textarea
-              value={deBai}
-              onChange={(e) => { setDeBai(e.target.value); setExamAccepted(false); }}
-              rows={20}
-              className="custom-scrollbar w-full rounded-xl border border-slate-200 bg-white p-3 font-mono text-xs leading-relaxed text-slate-800 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
-            />
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <input
-                value={revisePrompt}
-                onChange={(e) => setRevisePrompt(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); reviseExam(); } }}
-                placeholder="Nhắc AI sửa: thêm màn hình chi tiết, bỏ yêu cầu SQLite…"
-                className={`${inputClass} min-w-[240px] flex-1`}
-              />
-              <button onClick={reviseExam} disabled={busy !== null} className={ghostBtn}>
-                {busy === "revise" ? <Loader2 size={15} className="animate-spin" /> : <Wand2 size={15} />} Nhờ AI sửa
-              </button>
-            </div>
-
-            {/* Hình minh họa: AI tự vẽ ngay khi "Sinh đề bài" (xem draftExam) — không còn nút vẽ
-                tay riêng. Xem lại/tải/nhờ AI vẽ lại theo ý muốn ở ĐÂY, ƯNG Ý rồi mới xuống dưới bấm
-                "Lưu đề"/tải file — file tải về nhúng kèm đúng những hình đang thấy ở đây. */}
-            <div className="mt-4 border-t border-dashed border-slate-200 pt-4">
-              <div className="mb-2 flex items-center gap-2">
-                <ImageIcon size={15} className="text-indigo-500" />
-                <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                  Hình minh họa giao diện {mockups.length > 0 && `(${mockups.length})`}
-                </p>
-              </div>
-
-              {busy === "mockup" && (
-                <p className="mb-3 flex items-center gap-2 text-xs text-slate-500">
-                  <Loader2 size={14} className="animate-spin" /> AI đang vẽ hình minh họa…
-                </p>
-              )}
-
-              {mockups.length > 0 && (
-                <div className="mb-3 grid gap-3 sm:grid-cols-2">
-                  {mockups.map((m) => (
-                    <div key={m.id} className="rounded-xl border border-slate-200 p-3">
-                      <div className="mb-2 flex items-center justify-between gap-2">
-                        <p className="truncate text-xs font-bold text-slate-600">{m.title || m.id}</p>
-                        <button onClick={() => downloadMockup(m)} disabled={busy !== null}
-                          className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-[11px] font-semibold text-slate-500 hover:border-indigo-300 hover:text-indigo-600 disabled:opacity-50">
-                          <Download size={12} /> Tải hình
-                        </button>
-                      </div>
-                      {/* SVG do MockupRenderer sinh ở backend, không phải chữ người dùng dán vào.
-                          width/height gốc của nó là SỐ THẬT (để xuất .docx/.pdf/PNG đúng kích
-                          thước — xem MockupRenderer#render), nên ở đây ép co giãn vừa khung bằng
-                          CSS (luôn đè được thuộc tính width/height trên chính thẻ svg). */}
-                      <div className="overflow-hidden rounded-lg border border-slate-100 bg-white [&>svg]:h-auto [&>svg]:w-full"
-                        dangerouslySetInnerHTML={{ __html: m.svg }} />
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <div className="flex flex-wrap items-center gap-2">
-                <input
-                  value={mockupPrompt}
-                  onChange={(e) => setMockupPrompt(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); reviseMockups(); } }}
-                  placeholder="Nhờ AI vẽ lại hình: đổi bố cục dạng thẻ, bỏ thanh tiêu đề…"
-                  className={`${inputClass} min-w-[240px] flex-1`}
-                />
-                <button onClick={reviseMockups} disabled={busy !== null} className={ghostBtn}>
-                  {busy === "mockup" ? <Loader2 size={15} className="animate-spin" /> : <Wand2 size={15} />}
-                  {mockups.length ? "Vẽ lại theo yêu cầu" : "Vẽ hình minh họa"}
-                </button>
-              </div>
-            </div>
-
-            {/* Ưng ý đề + hình rồi mới lưu/tải — file .docx/.pdf tải về nhúng kèm đúng các hình ở trên. */}
-            <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-slate-200 pt-4">
-              <button onClick={saveHandout} disabled={busy !== null || !examId.trim()} className={primaryBtn}>
-                {busy === "handout" ? <Loader2 size={15} className="animate-spin" /> : <Check size={15} />} Lưu đề
-              </button>
-              <button onClick={downloadDocx} disabled={busy !== null || !examAccepted} className={ghostBtn}
-                title={examAccepted ? undefined : "Lưu đề trước đã"}>
-                {busy === "docx" ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Tải .docx (kèm hình)
-              </button>
-              <button onClick={downloadPdf} disabled={busy !== null || !examAccepted} className={ghostBtn}
-                title={examAccepted ? undefined : "Lưu đề trước đã"}>
-                {busy === "pdf" ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Tải .pdf (kèm hình)
-              </button>
-            </div>
-          </Step>
-        )}
-      </div>
-    </SidebarLayout>
+        </Hop>
+      )}
+    </>
   );
 }
 
-export default function ExamAuthoringPage() {
+/**
+ * Hỏi ảnh vừa chọn minh hoạ MÀN NÀO, trước khi nhận nó vào danh sách hình.
+ *
+ * <p>Bắt khai chứ không lẳng lặng lấy tên file, vì tên này đi xa hơn màn hình soạn đề: nó in
+ * thẳng vào đề bài làm chú thích phía trên mỗi hình. Tên file thật ngoài đời là
+ * "Screenshot_20260920_143210" hay "z5123456789_abc" — in cái đó lên đề phát cho sinh viên thì
+ * chẳng ai hiểu hình đang nói về màn nào.
+ *
+ * <p>Và nó còn là thứ DUY NHẤT nối ảnh với một màn ở mục 3: trùng tên thì ảnh thay đúng chỗ khung
+ * dây của màn đó, đồng thời lần "Vẽ lại" sau AI được báo để khỏi vẽ lại màn ấy nữa.
+ *
+ * <p>Gợi ý sẵn các màn đọc từ mục 3 của đề — bấm một cái là xong, khỏi gõ và khỏi gõ sai chính tả
+ * so với đề. Không có màn nào hợp thì gõ tay, ô chữ điền sẵn tên file cho khỏi trắng trơn.
+ */
+function HopDatTenAnh({ file, manCoSan, onDong, onXong }: {
+  file: File; manCoSan: string[]; onDong: () => void; onXong: (ten: string) => void;
+}) {
+  const [ten, setTen] = useState(file.name.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ").trim());
+  const man = useMemo(() => {
+    const ra: string[] = [];
+    for (const m of manCoSan) {
+      const t = m.trim();
+      if (t && !ra.some((x) => chuanHoaTen(x) === chuanHoaTen(t))) ra.push(t);
+    }
+    return ra;
+  }, [manCoSan]);
+  const trung = man.find((m) => chuanHoaTen(m) === chuanHoaTen(ten));
+
   return (
-    <Suspense fallback={
-      <SidebarLayout activePath="/teacher/exam-authoring" title="Tạo đề bằng AI">
-        <div className="flex min-h-[50vh] items-center justify-center text-slate-400">
-          <Loader2 className="animate-spin" size={28} />
+    <Hop tieuDe="Ảnh này minh hoạ màn nào?" onDong={onDong}>
+      <p className="mb-4 text-xs leading-relaxed text-slate-500">
+        Tên bạn khai ở đây <b>in vào đề bài</b>, ngay phía trên hình. Chọn đúng tên màn ở mục 3 thì
+        ảnh sẽ <b>thay</b> khung dây AI vẽ cho màn đó, và lần “Vẽ lại” sau AI sẽ bỏ qua màn này.
+      </p>
+      {man.length > 0 && (
+        <div className="mb-4 flex flex-wrap gap-2">
+          {man.map((m) => (
+            <button key={m} onClick={() => setTen(m)}
+              className={`rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors ${
+                chuanHoaTen(m) === chuanHoaTen(ten)
+                  ? "border-indigo-300 bg-indigo-50 text-indigo-700"
+                  : "border-slate-200 text-slate-600 hover:border-indigo-200 hover:bg-indigo-50/40"}`}>
+              {m}
+            </button>
+          ))}
         </div>
-      </SidebarLayout>
-    }>
-      <ExamAuthoringEditor />
-    </Suspense>
+      )}
+      <Field label="Tên màn hình *">
+        <input value={ten} onChange={(e) => setTen(e.target.value)} autoFocus
+          placeholder="vd: Màn hình danh sách sách" className={inputClass}
+          onKeyDown={(e) => { if (e.key === "Enter" && ten.trim()) onXong(ten.trim()); }} />
+      </Field>
+      <p className="mt-2 text-xs text-slate-400">
+        Tệp: <span className="font-mono">{file.name}</span> · {(file.size / 1024).toFixed(0)} KB
+        {trung && <span className="ml-2 font-semibold text-amber-600">• sẽ thay hình “{trung}” đang có</span>}
+      </p>
+      <div className="mt-5 flex justify-end gap-2">
+        <button onClick={onDong} className={ghostBtn}>Hủy</button>
+        <button onClick={() => onXong(ten.trim())} disabled={!ten.trim()} className={primaryBtn}>
+          <Check size={15} /> Thêm ảnh
+        </button>
+      </div>
+    </Hop>
+  );
+}
+
+/**
+ * Khối hình minh hoạ: AI vẽ khung dây, HOẶC giáo viên tải thẳng ảnh thiết kế của mình lên.
+ *
+ * <p>Hai đường tồn tại song song có lý do: AI chỉ mô tả màn hình bằng JSON rồi máy chủ dựng hình
+ * từ vốn hình khối có sẵn, nên hình AI bao giờ cũng là khung dây — muốn hình giống hệt bản thiết
+ * kế thì không có cách nào khác ngoài đưa chính ảnh đó vào.
+ */
+function KhoiHinh({ mockups, busy, maDe, onVe, onTaiAnh, onXoaHinh, onLoi }: {
+  mockups: Mockup[]; busy: string | null; maDe: string;
+  onVe: (yeuCau?: string) => void; onTaiAnh: () => void; onXoaHinh: (id: string) => void;
+  onLoi: (s: string) => void;
+}) {
+  const [yeuCau, setYeuCau] = useState("");
+  return (
+    <div className="card mt-4 p-5">
+      <div className="flex flex-wrap items-center gap-3">
+        <p className="flex items-center gap-2 text-sm font-bold text-slate-700">
+          <ImageIcon size={16} className="text-indigo-500" /> Hình minh hoạ giao diện ({mockups.length})
+        </p>
+        <div className="flex-1" />
+        <input value={yeuCau} onChange={(e) => setYeuCau(e.target.value)}
+          placeholder="Muốn AI vẽ lại thế nào? (để trống = vẽ theo đề)"
+          className="min-w-[240px] flex-1 rounded-lg border border-slate-200 px-3 py-1.5 text-sm outline-none focus:border-indigo-400" />
+        <button onClick={onTaiAnh} disabled={!!busy} className={ghostBtn} title="Dùng ảnh chụp hoặc bản thiết kế của bạn">
+          {busy === "anh" ? <Loader2 size={15} className="animate-spin" /> : <FileUp size={15} />} Tải ảnh lên
+        </button>
+        <button onClick={() => { onVe(yeuCau); setYeuCau(""); }} disabled={!!busy} className={ghostBtn}>
+          {busy === "hinh" ? <Loader2 size={15} className="animate-spin" /> : <Wand2 size={15} />} Vẽ lại
+        </button>
+      </div>
+      {mockups.length > 0 && (
+        // Thẻ CỐ ĐỊNH bề ngang, không phải lưới co giãn. Lưới cũ cho SVG rộng bằng cột, mà hình
+        // mang dáng máy (cao gấp 2,2 lần bề ngang) nên cột rộng bao nhiêu hình cao gấp đôi bấy
+        // nhiêu — khung hẹp thì một màn cao hơn 2000px, vuốt mãi không hết. Nay mỗi hình đúng
+        // 309px bề ngang = cỡ khung xem thử ở màn Bộ chấm Golden (412 dp × 3/4, xem MUC_THU_NHO
+        // bên behavior-authoring), để hai màn nhìn cùng một cỡ và mắt quen được với nó.
+        <div className="mt-4 flex flex-wrap gap-4">
+          {mockups.map((m) => (
+            <div key={m.id} className="w-[325px] max-w-full rounded-xl border border-slate-200 p-2">
+              <div className="overflow-hidden rounded-lg bg-slate-50 [&_svg]:h-auto [&_svg]:w-full"
+                dangerouslySetInnerHTML={{ __html: m.svg }} />
+              <div className="mt-2 flex items-center justify-between gap-1">
+                <span className="truncate text-xs font-medium text-slate-500" title={m.title}>
+                  {laAnhTaiLen(m) && <span className="mr-1 text-indigo-400">ảnh</span>}{m.title}
+                </span>
+                <div className="flex shrink-0 items-center">
+                  <button
+                    onClick={async () => {
+                      try {
+                        const { png } = await svgToPng(m.svg);
+                        downloadBlob(await (await fetch(png)).blob(), `${maDe}_${m.id}.png`);
+                      } catch (e) { onLoi((e as Error).message); }
+                    }}
+                    className="rounded p-1 text-slate-400 hover:text-indigo-600" title="Tải PNG">
+                    <Download size={13} />
+                  </button>
+                  <button onClick={() => onXoaHinh(m.id)}
+                    className="rounded p-1 text-slate-400 hover:text-rose-600" title="Gỡ hình này">
+                    <X size={13} />
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Khối file Word/PDF gốc. MỘT khối cho cả hai loại đề, chỉ đổi lời:
+ *   - đề chưa ai sửa → file này CHÍNH LÀ đề bài
+ *   - đề đã sửa trong hệ thống → nó lùi về tài liệu đính kèm
+ * Tách làm hai khối thì sớm muộn hai bên lệch nhau về nút bấm và cách gọi API.
+ */
+function KhoiDinhKem({ maDe, fileGoc, laBanChinh, onTaiLen, onXoa }: {
+  maDe: string; fileGoc: { exists: boolean; file_name?: string; size_bytes?: number };
+  laBanChinh: boolean; onTaiLen: () => void; onXoa: () => void;
+}) {
+  const [mo, setMo] = useState(laBanChinh);
+  return (
+    <div className="card mt-4 p-4">
+      <button onClick={() => setMo(!mo)} className="flex w-full items-center gap-2 text-left text-sm font-bold text-slate-600">
+        <FileUp size={15} className="text-slate-400" /> {laBanChinh ? "File đề bài gốc" : "Tài liệu đính kèm"}
+        <span className="font-normal text-slate-400">{fileGoc.exists ? "(1)" : "(chưa có)"}</span>
+        <div className="flex-1" />
+        <span className="text-xs font-normal text-slate-400">{mo ? "Thu gọn" : "Mở"}</span>
+      </button>
+      {mo && (
+        <div className="mt-3 border-t border-slate-100 pt-3">
+          <p className="mb-3 text-xs leading-relaxed text-slate-500">
+            {laBanChinh ? (
+              <>File này <b>đang là đề bài</b> của đề. Nội dung bên trên đọc thẳng từ nó, giữ
+              nguyên bảng, đánh số và căn lề. Sửa trong Word rồi tải đè thì bản mới thay ngay.
+              Còn bấm “Sửa đề bài” và lưu là đề chuyển sang <b>soạn trong hệ thống</b>, file này
+              lùi về tài liệu đính kèm.</>
+            ) : (
+              <>File tham khảo, bản nguồn Word/PDF. <b>Không phải đề bài</b> — đề bài của đề này
+              nằm trong hệ thống. Sinh viên không nhận file ở đây.</>
+            )}
+          </p>
+          {fileGoc.exists ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-sm text-slate-600">{fileGoc.file_name}</span>
+              <div className="flex-1" />
+              <a href={`${API_BASE}/exam-setup/${encodeURIComponent(maDe)}/handout/original`} className={ghostBtn}>
+                <Download size={14} /> Tải về
+              </a>
+              <button onClick={onTaiLen} className={ghostBtn}><RefreshCw size={14} /> Thay</button>
+              <button onClick={onXoa} className="rounded-lg px-3 py-2 text-sm font-semibold text-rose-600 hover:bg-rose-50">
+                <Trash2 size={14} />
+              </button>
+            </div>
+          ) : (
+            <button onClick={onTaiLen} className={ghostBtn}><FileUp size={14} /> Đính kèm file</button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Form soạn đề bằng AI — chỉ hiện với đề mới, chưa có nội dung nào. */
+function FormAiSoanDe({ maDe, onXong, onLoi }: {
+  maDe: string; onXong: (md: string, hinh: Mockup[]) => void; onLoi: (s: string) => void;
+}) {
+  const [req, setReq] = useState({
+    topic: "", knowledge: "", screens: "", features: "", entity: "",
+    storage: "SQLite", difficulty: "Trung bình", duration: "90 phút", note: "",
+  });
+  const [busy, setBusy] = useState(false);
+  const dat = (k: keyof typeof req) => (e: { target: { value: string } }) => setReq({ ...req, [k]: e.target.value });
+
+  const soan = async () => {
+    if (!req.topic.trim()) { onLoi("Hãy nhập chủ đề / bài toán của đề."); return; }
+    setBusy(true);
+    try {
+      const d = await gui("/ai/exam/draft", req) as { de_bai?: string };
+      const md = String(d.de_bai || "");
+      // Vẽ hình ngay bằng văn bản VỪA nhận, không đọc state (chưa kịp cập nhật trong lượt này).
+      let hinh: Mockup[] = [];
+      try {
+        const h = await gui("/ai/exam/mockup", { de_bai: md }) as { mockups?: Mockup[] };
+        hinh = Array.isArray(h.mockups) ? h.mockups : [];
+      } catch { /* không vẽ được hình thì vẫn có đề, vẽ lại sau được */ }
+      onXong(md, hinh);
+    } catch (e) {
+      onLoi((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card p-6">
+      <p className="mb-4 flex items-center gap-2 text-sm font-bold text-slate-700">
+        <Sparkles size={16} className="text-indigo-500" /> Nhờ AI soạn đề {maDe}
+      </p>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="sm:col-span-2">
+          <Field label="Chủ đề / bài toán *">
+            <input value={req.topic} onChange={dat("topic")} placeholder="Quản lý chi tiêu cá nhân" className={inputClass} />
+          </Field>
+        </div>
+        <Field label="Kiến thức cần kiểm tra">
+          <input value={req.knowledge} onChange={dat("knowledge")} placeholder="ListView, Form, SQLite" className={inputClass} />
+        </Field>
+        <Field label="Các màn hình">
+          <input value={req.screens} onChange={dat("screens")} placeholder="Danh sách, Thêm/Sửa" className={inputClass} />
+        </Field>
+        <Field label="Chức năng bắt buộc">
+          <input value={req.features} onChange={dat("features")} placeholder="Thêm, Sửa, Xoá, Lọc" className={inputClass} />
+        </Field>
+        <Field label="Thực thể / dữ liệu">
+          <input value={req.entity} onChange={dat("entity")} placeholder="Khoản chi: tiêu đề, số tiền, ngày" className={inputClass} />
+        </Field>
+        <Field label="Lưu trữ dữ liệu">
+          <input value={req.storage} onChange={dat("storage")} className={inputClass} />
+        </Field>
+        <Field label="Độ khó">
+          <input value={req.difficulty} onChange={dat("difficulty")} className={inputClass} />
+        </Field>
+        <Field label="Thời lượng">
+          <input value={req.duration} onChange={dat("duration")} className={inputClass} />
+        </Field>
+        <Field label="Yêu cầu thêm">
+          <input value={req.note} onChange={dat("note")} className={inputClass} />
+        </Field>
+      </div>
+      <button onClick={soan} disabled={busy} className={`${primaryBtn} mt-5`}>
+        {busy ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
+        {busy ? "Đang soạn đề và vẽ hình…" : "Sinh đề bài"}
+      </button>
+    </div>
   );
 }

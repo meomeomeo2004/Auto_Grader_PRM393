@@ -53,7 +53,7 @@ export const MAX_MOCKUP_BYTES = 4 * 1024 * 1024;
  * dán nội dung vào: trình duyệt vẽ SVG bên trong &lt;image&gt; ở chế độ tĩnh (không chạy script,
  * không tải tài nguyên ngoài), nên file lạ không thể nhét mã vào bản đề phát cho sinh viên.
  */
-export function imageFileToSvg(file: File): Promise<{ svg: string; width: number; height: number }> {
+export function imageFileToSvg(file: File, nhanHinh?: string): Promise<{ svg: string; width: number; height: number }> {
   return new Promise((resolve, reject) => {
     if (file.size > MAX_MOCKUP_BYTES) {
       reject(new Error(`Ảnh nặng ${(file.size / 1024 / 1024).toFixed(1)} MB, vượt mức 4 MB. `
@@ -68,9 +68,16 @@ export function imageFileToSvg(file: File): Promise<{ svg: string; width: number
       probe.onload = () => {
         const width = Math.round(probe.naturalWidth || probe.width || 900);
         const height = Math.round(probe.naturalHeight || probe.height || 600);
+        // Tên màn hình thành aria-label: đó là cách tên hình đi THEO file SVG. Lúc lưu chỉ gửi
+        // {id, svg} nên tên không còn đường nào khác để về, mà tên này in ra đề bài (thẻ h3 trên
+        // mỗi hình) — thiếu nó thì chú thích trên ảnh thành "anh mu9j97jy".
+        const nhan = String(nhanHinh || file.name.replace(/\.[^.]+$/, ""))
+          .replace(/[&<>"']/g, (c) =>
+            ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
         resolve({
           svg: `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"`
-            + ` viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">`
+            + ` viewBox="0 0 ${width} ${height}" width="${width}" height="${height}"`
+            + ` role="img" aria-label="${nhan}">`
             + `<rect width="100%" height="100%" fill="#ffffff"/>`
             + `<image href="${dataUri}" xlink:href="${dataUri}" x="0" y="0"`
             + ` width="${width}" height="${height}"/></svg>`,

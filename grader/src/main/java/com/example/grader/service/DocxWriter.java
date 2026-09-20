@@ -27,6 +27,11 @@ public final class DocxWriter {
     private static final int EMU_PER_PX = 9525;
     /** Bề rộng vùng in của khổ A4 lề 2cm, tính theo pixel: ảnh rộng hơn sẽ bị thu nhỏ vừa trang. */
     private static final int PAGE_WIDTH_PX = 640;
+    /** Trần CHIỀU CAO của một ảnh minh hoạ (≈13,7cm khi in). Hình minh hoạ giao diện mang dáng
+     *  màn điện thoại — cao gấp đôi bề ngang — nên chỉ thu theo bề ngang là chưa đủ: một ảnh vừa
+     *  khít bề ngang trang giấy sẽ cao 1300px, vượt cả chiều cao vùng in, đẩy mọi thứ sau nó
+     *  sang trang và tự nó cũng bị cắt. Thu theo chiều nào CHẬT hơn thì ảnh luôn nằm gọn. */
+    private static final int PAGE_HEIGHT_PX = 520;
     /** Bề rộng vùng in tính theo twips (1/20 point): pgSz 11906 trừ lề trái/phải 1134×2 — dùng để
      *  chia đều cột bảng, không thì bảng Định danh tràn lề hoặc bó hẹp một bên. */
     private static final int PAGE_WIDTH_TWIPS = 11906 - 1134 * 2;
@@ -45,6 +50,20 @@ public final class DocxWriter {
 
     public DocxWriter paragraph(String text) {
         body.add("<w:p><w:pPr><w:spacing w:after=\"120\"/></w:pPr>" + runsFromInline(text, false, 22) + "</w:p>");
+        return this;
+    }
+
+    /** Căn đoạn giống bản xem trước; chỉ nhận các giá trị đã được bộ phân tích giới hạn. */
+    public DocxWriter layoutLast(String align, int indent) {
+        if (body.isEmpty() || ((align == null || align.isEmpty()) && indent == 0)) return this;
+        String alignment = "justify".equals(align) ? "both" : align;
+        String props = List.of("left", "center", "right", "both").contains(alignment)
+                ? "<w:jc w:val=\"" + alignment + "\"/>" : "";
+        if (indent > 0) props += "<w:ind w:left=\"" + Math.min(240, indent) * 15 + "\"/>";
+        int last = body.size() - 1;
+        String block = body.get(last);
+        if (indent > 0) block = block.replaceAll("<w:ind[^>]*/>", "");
+        body.set(last, block.replace("<w:pPr>", "<w:pPr>" + props));
         return this;
     }
 
@@ -106,12 +125,13 @@ public final class DocxWriter {
         return this;
     }
 
-    /** Thêm ảnh PNG. Ảnh rộng quá khổ giấy được thu nhỏ theo tỉ lệ. */
+    /** Thêm ảnh PNG. Ảnh quá khổ giấy (rộng HOẶC cao) được thu nhỏ theo tỉ lệ, không bao giờ phóng to. */
     public DocxWriter image(byte[] png, int widthPx, int heightPx) {
         if (png == null || png.length == 0 || widthPx <= 0 || heightPx <= 0) return this;
         images.add(png);
         int index = images.size();
-        double scale = widthPx > PAGE_WIDTH_PX ? (double) PAGE_WIDTH_PX / widthPx : 1.0;
+        double scale = Math.min(1.0, Math.min((double) PAGE_WIDTH_PX / widthPx,
+                                              (double) PAGE_HEIGHT_PX / heightPx));
         long cx = Math.round(widthPx * scale) * (long) EMU_PER_PX;
         long cy = Math.round(heightPx * scale) * (long) EMU_PER_PX;
         body.add("<w:p><w:pPr><w:spacing w:after=\"160\"/></w:pPr><w:r><w:drawing>"
@@ -221,7 +241,9 @@ public final class DocxWriter {
         run.append("<w:sz w:val=\"").append(halfPoints).append("\"/>")
            .append("<w:szCs w:val=\"").append(halfPoints).append("\"/></w:rPr>")
            // xml:space giữ nguyên khoảng trắng đầu/cuối (thụt lề trong code, marker gạch đầu dòng).
-           .append("<w:t xml:space=\"preserve\">").append(esc(text)).append("</w:t></w:r>");
+           .append("<w:t xml:space=\"preserve\">")
+           .append(esc(text).replace("\n", "</w:t><w:br/><w:t xml:space=\"preserve\">"))
+           .append("</w:t></w:r>");
         return run.toString();
     }
 

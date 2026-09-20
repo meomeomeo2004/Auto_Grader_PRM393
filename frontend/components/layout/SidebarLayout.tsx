@@ -7,7 +7,7 @@ import {
   FileCode2, CheckSquare, Bell, FileArchive,
   GraduationCap, History, PanelLeftClose,
   Clock, CheckCircle2, AlertCircle, Package, Pause,
-  Bot, ChevronDown, Sparkles, FileText,
+  Bot, ChevronDown, FileText,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { API_BASE } from '@/lib/config';
@@ -60,8 +60,10 @@ const TOAN_BO_NAV: NavEntry[] = [
   { name: 'Thư viện chấm', path: '/teacher/libraries', icon: Package },
   // Soạn đề bằng AI là việc của giảng viên. Hai mục này về từ nhánh AI, viết trước khi tách
   // vai nên không khai `vai` — mà mục không khai vai bị hiểu là "cả hai bản đều có".
-  { name: 'Tạo đề', path: '/teacher/exam-authoring', icon: Sparkles, vai: 'gv' },
-  { name: 'Kho tài liệu đề', path: '/teacher/exam-documents', icon: FileText, vai: 'gv' },
+  // "Tạo đề" + "Kho tài liệu đề" + "Xem đề" gộp thành MỘT mục (20/9): ba màn cũ cùng ghi vào
+  // handout/<mã đề>/ nhưng mỗi màn hiểu "nội dung đề" một kiểu, và hai màn đầu còn đọc hai API
+  // danh sách khác nhau nên thấy hai tập đề khác nhau.
+  { name: 'Đề bài', path: '/teacher/exam-authoring', icon: FileText, vai: 'gv' },
   // Vào thẳng trang Kho — mọi thao tác (tạo/sửa/xóa/chấm lại) đều là nút trong trang đó.
   { name: 'Bộ chấm Golden', path: '/teacher/archive', icon: FileCode2, vai: 'gv' },
 ];

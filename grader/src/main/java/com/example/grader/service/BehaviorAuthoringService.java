@@ -174,7 +174,6 @@ public class BehaviorAuthoringService {
         suite.setSchemaVersion(SCHEMA_VERSION);
         suite.setPublicContractJson(normalizeObject(body.get("public_contract"), defaultPublicContract()));
         suite.setDatabaseContractJson(normalizeObject(body.get("database_contract"), defaultDatabaseContract()));
-        kiemGoiChoPhep(body.get("runtime_config"));
         suite.setRuntimeConfigJson(normalizeObject(body.get("runtime_config"), defaultRuntimeConfig()));
         suites.save(suite);
         return suiteView(suite, true);
@@ -255,7 +254,6 @@ public class BehaviorAuthoringService {
             suite.setDatabaseContractJson(normalizeObject(body.get("database_contract"), Map.of()));
         }
         if (body.containsKey("runtime_config")) {
-            kiemGoiChoPhep(body.get("runtime_config"));
             suite.setRuntimeConfigJson(normalizeObject(body.get("runtime_config"), Map.of()));
         }
         if (invalidatesReplay) {
@@ -1732,17 +1730,18 @@ public class BehaviorAuthoringService {
     }
 
     /**
-     * allowed_packages chỉ gate dependency phía bài sinh viên trước khi compile (SubmissionPackagePolicy),
-     * không ảnh hưởng hành vi Golden Solution hay oracle đã capture. Đổi riêng field này không cần
-     * record/capture lại; chỉ các key runtime khác (driver, timeout, api_base_url...) mới invalidate.
+     * Đổi cấu hình runtime (driver, timeout, api_base_url…) thì oracle đã capture không còn tin
+     * được, phải record/capture lại.
+     *
+     * <p>Trước đây runtime_config còn giữ một danh sách package riêng và field đó được loại khỏi
+     * phép so vì nó không đổi hành vi Golden. Danh sách ấy đã bỏ (19/9) — cổng chặn bài sinh viên
+     * đọc contract.json, mà contract.json sinh thẳng từ dependencies của Golden.
      */
     private boolean runtimeConfigChangeInvalidatesReplay(BehaviorSuite suite, Map<String, Object> body) {
         if (!body.containsKey("runtime_config")) return false;
         Object raw = body.get("runtime_config");
         Map<String, Object> incoming = raw instanceof String s ? readObject(s) : map(raw);
         Map<String, Object> current = readObject(suite.getRuntimeConfigJson());
-        current.remove("allowed_packages");
-        incoming.remove("allowed_packages");
         return !current.equals(incoming);
     }
 
@@ -1792,37 +1791,7 @@ public class BehaviorAuthoringService {
                 "screenshot_evidence", true,
                 "automation_driver", "flutter_test",
                 "browser", "flutter_tester",
-                "api_base_url", "http://mock-api:8080",
-                "allowed_packages", List.of(
-                        "flutter", "flutter_test", "path", "sqflite", "sqflite_common_ffi"));
-    }
-
-    /**
-     * Chặn khai package mà ẢNH CHẤM không có.
-     *
-     * <p>Danh sách này chỉ THU HẸP được, không mở rộng được: thêm một tên vào đây không cài gì
-     * cả, thư viện phải có sẵn trong ảnh nền (trang "Thư viện chấm" rồi build lại ảnh). Không
-     * chặn ở đây thì giảng viên yên tâm cho phép một gói không tồn tại, sinh viên làm theo, và
-     * cả lô bài chết ở khâu biên dịch chứ không phải ở khâu kiểm gói — lúc đó mới biết thì muộn.
-     *
-     * <p>Đọc không được danh sách của ảnh (Docker tắt, chưa build) thì BỎ QUA phép kiểm. Không
-     * biết thì đừng chặn ai.
-     */
-    private void kiemGoiChoPhep(Object runtimeConfig) {
-        List<Object> khai = objectList(map(runtimeConfig).get("allowed_packages"));
-        if (khai.isEmpty()) return;
-        Set<String> coThat = exams.goiCoTrongAnhCham();
-        if (coThat.isEmpty()) return;
-        List<String> thieu = khai.stream()
-                .map(item -> String.valueOf(item).trim())
-                .filter(ten -> !ten.isBlank() && !coThat.contains(ten))
-                .distinct()
-                .toList();
-        if (thieu.isEmpty()) return;
-        throw new IllegalArgumentException(
-                "Ảnh chấm không có package: " + String.join(", ", thieu)
-                + ". Danh sách này chỉ thu hẹp được chứ không cài thêm được gì — muốn dùng thì"
-                + " thêm ở trang \"Thư viện chấm\" rồi build lại ảnh nền, xong mới khai ở đây.");
+                "api_base_url", "http://mock-api:8080");
     }
 
     private Map<String, Object> defaultViewport() {

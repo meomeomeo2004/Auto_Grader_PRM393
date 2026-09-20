@@ -7,7 +7,7 @@ import Banner from "@/components/ui/Banner";
 import { API_BASE } from "@/lib/config";
 import {
   FileArchive, UploadCloud, Loader2, Trash2, AlertTriangle, CheckCircle2,
-  ShieldAlert, Inbox,
+  ShieldAlert, Inbox, Plus,
 } from "lucide-react";
 
 /**
@@ -25,23 +25,37 @@ interface BoTestcase {
   examId: string;
   examName?: string;
   teacherNote?: string;
-  starterCheck?: string;      // EXEMPT | OK | PENDING | STALE
   gradable?: boolean;
   hasTestcase?: boolean;
+  /** Gói đề đòi mà ảnh chấm HIỆN TẠI không có. Tính lại mỗi lần mở danh sách. */
+  thieuGoi?: string[];
+  thieuGoiSpecs?: { name: string; version: string }[];
   resultCount?: number;
   createdAt?: string;
 }
 
-interface GoiThieu { thieu?: string[] }
-
 interface KetQuaNap {
   exam_id?: string;
   exam_name?: string;
-  cham_duoc?: boolean;
   base_image_cua_goi?: string;
   base_image_may_nay?: string;
-  goi_thieu?: GoiThieu;
 }
+
+/** Một lần nạp bị từ chối. Giữ cả danh sách gói thiếu để còn dẫn thẳng sang Thư viện chấm. */
+interface LoiNap {
+  message: string;
+  specs?: { name: string; version: string }[];
+}
+
+/**
+ * Kết quả lần nạp gần nhất được GIỮ QUA ĐIỀU HƯỚNG, chỉ mất khi người dùng bấm dấu ×.
+ *
+ * <p>Trước đây nó là state thường: đổi sang màn khác rồi quay lại là sạch trơn. Mà lời báo
+ * "gói này chưa nhận được, thiếu thư viện X" lại đúng là thứ người ta phải rời màn đi xử lý —
+ * quay về thì không còn gì nhắc, tưởng xong rồi. Dùng sessionStorage chứ không localStorage:
+ * đóng trình duyệt là hết, không lôi lời báo của tuần trước ra doạ.
+ */
+const KHOA_PHIEN = "nc.nhap-goi.v1";
 
 const gioVN = (iso?: string) => {
   if (!iso) return "—";
@@ -49,15 +63,25 @@ const gioVN = (iso?: string) => {
   return Number.isNaN(d.getTime()) ? "—" : d.toLocaleString("vi-VN");
 };
 
-/** Diễn giải dấu kiểm đồng bộ khung phát mà gói mang theo. */
+/**
+ * Diễn giải trạng thái của một bộ đã nhận.
+ *
+ * <p>Nạp được không có nghĩa là chấm được MÃI MÃI: ảnh chấm đổi sau đó thì bộ cũ hỏng theo.
+ * Đó là lý do duy nhất còn lại để một bộ đã nhận mang trạng thái khác "Chấm được" — và đúng
+ * là lý do người dùng không tự nhìn ra được, nên phải nói thẳng thiếu gói nào.
+ */
 function nhanTrangThai(b: BoTestcase) {
   if (!b.hasTestcase)
     return { tone: "rose", text: "Thiếu file testcase", moTa: "Gói nhận vào không đủ file — nhận lại gói khác." };
+  if (b.thieuGoi && b.thieuGoi.length > 0)
+    return {
+      tone: "rose",
+      text: "Thiếu thư viện",
+      moTa: `Thư viện chấm không có: ${b.thieuGoi.join(", ")}.`,
+    };
   if (b.gradable)
     return { tone: "emerald", text: "Chấm được", moTa: "" };
-  if (b.starterCheck === "STALE")
-    return { tone: "amber", text: "Dấu kiểm hết hạn", moTa: "Giảng viên đã sửa Golden sau lần kiểm — xin gói mới." };
-  return { tone: "amber", text: "Chưa có dấu kiểm", moTa: "Gói chưa qua kiểm đồng bộ khung phát — xin giảng viên kiểm rồi gửi lại." };
+  return { tone: "amber", text: "Chưa chấm được", moTa: "Bộ chưa đủ dữ kiện để chấm." };
 }
 
 const TONE_CHIP: Record<string, string> = {
@@ -72,8 +96,29 @@ export default function QuanLyBoTestcasePage() {
   const [loiTai, setLoiTai] = useState<string | null>(null);
 
   const [napping, setNapping] = useState(false);
-  const [ketQuaNap, setKetQuaNap] = useState<KetQuaNap | null>(null);
-  const [loiNap, setLoiNap] = useState<string | null>(null);
+  const [ketQuaNap, datKetQuaNap] = useState<KetQuaNap | null>(null);
+  const [loiNap, datLoiNap] = useState<LoiNap | null>(null);
+
+  // Đọc lại lời báo của lần nạp trước NGAY khi vào màn. Chạy một lần, sau khi đã dựng xong
+  // cây React — đụng sessionStorage lúc render đầu là lệch server/client, Next kêu hydration.
+  useEffect(() => {
+    try {
+      const luu = sessionStorage.getItem(KHOA_PHIEN);
+      if (!luu) return;
+      const d = JSON.parse(luu) as { loi?: LoiNap; ketQua?: KetQuaNap };
+      if (d.loi) datLoiNap(d.loi);
+      if (d.ketQua) datKetQuaNap(d.ketQua);
+    } catch { /* phiên cũ hỏng hay bị sửa tay: bỏ, không đáng làm hỏng cả màn */ }
+  }, []);
+
+  const ghiPhien = (loi: LoiNap | null, ketQua: KetQuaNap | null) => {
+    try {
+      if (!loi && !ketQua) sessionStorage.removeItem(KHOA_PHIEN);
+      else sessionStorage.setItem(KHOA_PHIEN, JSON.stringify({ loi, ketQua }));
+    } catch { /* chế độ riêng tư chặn ghi: mất tính bền, còn lại vẫn chạy */ }
+  };
+  const setLoiNap = (v: LoiNap | null) => { datLoiNap(v); ghiPhien(v, v ? null : ketQuaNap); };
+  const setKetQuaNap = (v: KetQuaNap | null) => { datKetQuaNap(v); ghiPhien(v ? null : loiNap, v); };
 
   // Bộ đang chờ xác nhận xóa. Xóa là không hoàn lại được, nên phải qua một bước riêng có kể
   // đúng những gì sẽ mất — không dùng window.confirm vì nó không kể được từng dòng.
@@ -108,20 +153,36 @@ export default function QuanLyBoTestcasePage() {
       form.append("file", file);
       const res = await fetch(`${API_BASE}/exam-setup/nhap-goi`, { method: "POST", body: form });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      if (!res.ok) {
+        // Thiếu thư viện thì backend từ chối CẢ GÓI (không có bộ nào được dựng) và gửi kèm
+        // tên + ràng buộc phiên bản — mang thẳng sang Thư viện chấm, vì lúc này chưa có bản
+        // ghi đề nào nên màn bên đó không tự tra ra được danh sách này.
+        const specs = Array.isArray(data.missing_package_specs)
+          ? (data.missing_package_specs as unknown[]).flatMap((item) => {
+              if (!item || typeof item !== "object") return [];
+              const s = item as Record<string, unknown>;
+              return typeof s.name === "string" && s.name
+                ? [{ name: s.name, version: typeof s.version === "string" ? s.version : "" }]
+                : [];
+            })
+          : undefined;
+        setLoiNap({ message: data.error || `HTTP ${res.status}`, specs: specs?.length ? specs : undefined });
+        return;
+      }
       setKetQuaNap(data);
       await nap();
     } catch (e) {
-      setLoiNap((e as Error).message);
+      setLoiNap({ message: (e as Error).message });
     } finally {
       setNapping(false);
     }
   };
 
-  // Bộ đã có bài chấm thì bắt gõ lại mã bộ mới cho xóa: một cú bấm nhầm ở đây là mất cả bảng
-  // điểm của một đợt chấm, mà không có bản sao nào để dựng lại.
-  const canGoMa = (b: BoTestcase | null) => !!b && (b.resultCount || 0) > 0;
-  const xoaDuoc = !dinhXoa ? false : (!canGoMa(dinhXoa) || goXacNhan.trim() === dinhXoa.examId);
+  // LUÔN bắt gõ lại mã, kể cả bộ chưa có bài chấm nào (19/9). Trước đây bộ "trống" xóa bằng
+  // một cú bấm, nhưng trống là xét theo BẢNG ĐIỂM — bộ vẫn mang engine, hợp đồng, ảnh mẫu và
+  // database ẩn của cả đề, mà bên người chấm không dựng lại được: phải xin gói bàn giao mới.
+  const canGoMa = (b: BoTestcase | null) => !!b;
+  const xoaDuoc = !dinhXoa ? false : goXacNhan.trim() === dinhXoa.examId;
 
   const xoa = async () => {
     if (!dinhXoa || !xoaDuoc) return;
@@ -146,18 +207,14 @@ export default function QuanLyBoTestcasePage() {
     }
   };
 
+  // Thiếu thư viện KHÔNG còn nằm ở đây: nó đã thành lý do từ chối cả gói, không phải ghi chú
+  // trên một bộ đã nhận. Còn dấu kiểm đồng bộ khung phát thì đã bỏ hẳn 19/9 — khung phát nay
+  // sinh từ chính Golden lúc xuất gói nên không có dấu nào để mang theo.
   const canhBaoNap = ketQuaNap
-    ? [
-        !ketQuaNap.cham_duoc
-          ? "Gói này chưa mang dấu kiểm đồng bộ khung phát nên chưa chấm được. Báo giảng viên kiểm lại rồi gửi gói mới — bên này không tự kiểm được."
-          : null,
-        ketQuaNap.base_image_cua_goi && ketQuaNap.base_image_cua_goi !== ketQuaNap.base_image_may_nay
-          ? `Ảnh chấm lệch: gói làm trên ${ketQuaNap.base_image_cua_goi}, máy này đang dùng ${ketQuaNap.base_image_may_nay}. Cùng một bài có thể ra hai kết quả khác nhau.`
-          : null,
-        ketQuaNap.goi_thieu?.thieu?.length
-          ? `Ảnh chấm thiếu thư viện: ${ketQuaNap.goi_thieu.thieu.join(", ")}. Sang màn Thư viện chấm bấm vào đúng tên đó để thêm rồi dựng lại ảnh.`
-          : null,
-      ].filter(Boolean) as string[]
+    && ketQuaNap.base_image_cua_goi
+    && ketQuaNap.base_image_cua_goi !== ketQuaNap.base_image_may_nay
+    ? [`Ảnh chấm lệch: gói làm trên ${ketQuaNap.base_image_cua_goi}, máy này đang dùng `
+       + `${ketQuaNap.base_image_may_nay}. Cùng một bài có thể ra hai kết quả khác nhau.`]
     : [];
 
   return (
@@ -200,8 +257,16 @@ export default function QuanLyBoTestcasePage() {
 
           {loiNap && (
             <Banner tone="error" onClose={() => setLoiNap(null)}>
-              <p className="font-bold">Không nạp được gói</p>
-              <p className="mt-1">{loiNap}</p>
+              <p className="font-bold">Không nạp được gói — chưa có bộ nào được thêm</p>
+              <p className="mt-1">{loiNap.message}</p>
+              {loiNap.specs && loiNap.specs.length > 0 && (
+                <a
+                  className="mt-2 inline-block font-semibold underline underline-offset-2"
+                  href={`/teacher/libraries?package_specs=${encodeURIComponent(JSON.stringify(loiNap.specs))}`}
+                >
+                  Mở Thư viện chấm để thêm {loiNap.specs.map((s) => s.name).join(", ")}
+                </a>
+              )}
             </Banner>
           )}
 
@@ -264,11 +329,11 @@ export default function QuanLyBoTestcasePage() {
             <table className="w-full min-w-[680px] text-sm">
               <thead>
                 <tr className="border-b border-slate-100 bg-slate-50/40 text-center text-xs font-bold uppercase tracking-wider text-slate-500">
-                  <th className="w-[35%] px-6 py-3 text-center">Mã bộ</th>
-                  <th className="w-[20%] px-6 py-3 text-center">Trạng thái</th>
-                  <th className="w-[20%] px-6 py-3 text-center">Bài đã chấm</th>
+                  <th className="w-[25%] px-6 py-3 text-center">Mã bộ</th>
+                  <th className="w-[30%] px-6 py-3 text-center">Trạng thái</th>
+                  <th className="w-[15%] px-6 py-3 text-center">Bài đã chấm</th>
                   <th className="w-[25%] px-6 py-3 text-center">Thời gian Upload</th>
-                  <th className="w-[10%] px-6 py-3 text-center"></th>
+                  <th className="w-[15%] px-6 py-3 text-center">Chức năng</th>
                 </tr>
               </thead>
               <tbody>
@@ -300,15 +365,30 @@ export default function QuanLyBoTestcasePage() {
                         {b.resultCount ?? 0}
                       </td>
                       <td className="px-6 py-4 text-center text-xs text-slate-500">{gioVN(b.createdAt)}</td>
-                      <td className="px-6 py-4 text-center">
-                        <button
-                          type="button"
-                          onClick={() => { setDinhXoa(b); setGoXacNhan(""); setLoiXoa(null); }}
-                          title={`Xóa bộ ${b.examId}`}
-                          className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 text-slate-400 transition-colors hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
-                        >
-                          <Trash2 size={15} />
-                        </button>
+                      <td className="px-6 py-4">
+                        <div className="flex items-center justify-center gap-2">
+                          {/* Đường sửa nằm NGAY CẠNH chỗ báo hỏng. Bên người chấm không có ô
+                              thêm package tay, nên nếu không dẫn từ đây thì họ biết thiếu mà
+                              không biết thêm ở đâu. Mang theo cả ràng buộc phiên bản vì version
+                              nay là bắt buộc — bắt họ tự đoán là đẩy vào đúng chỗ sai. */}
+                          {b.thieuGoiSpecs && b.thieuGoiSpecs.length > 0 && (
+                            <a
+                              href={`/teacher/libraries?package_specs=${encodeURIComponent(JSON.stringify(b.thieuGoiSpecs))}`}
+                              title={`Thêm ${b.thieuGoiSpecs.map((s) => s.name).join(", ")} vào ảnh chấm`}
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-xs font-bold text-amber-800 transition-colors hover:bg-amber-100"
+                            >
+                              <Plus size={13} /> Bổ sung package
+                            </a>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => { setDinhXoa(b); setGoXacNhan(""); setLoiXoa(null); }}
+                            title={`Xóa bộ ${b.examId}`}
+                            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 text-slate-400 transition-colors hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );

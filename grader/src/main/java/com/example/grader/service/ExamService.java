@@ -9,10 +9,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.charset.StandardCharsets;
@@ -30,6 +32,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Stream;
@@ -93,9 +96,20 @@ public class ExamService {
 
     @Autowired
     private ExamRepository examRepository;
+    /**
+     * Bóc chữ từ .docx/.pdf — dùng cho lối NGOAI → TRONG. Cùng engine với /ai/exam/import.
+     *
+     * <p>{@code required = false} CÓ CHỦ ĐÍCH: bean này mang {@code @Profile(gv)}, còn lớp này
+     * thì cả hai vai đều nạp. Tiêm bắt buộc là bản người chấm chết ngay lúc khởi động với một
+     * lỗi wiring chẳng liên quan gì tới việc họ làm. Bên đó null là đúng — soạn đề không phải
+     * việc của họ, và mọi lối vào đây đều nằm sau controller chỉ có ở bản giảng viên.
+     */
+    @Autowired(required = false)
+    private ExamDocumentReader documentReader;
     @Autowired
-    @org.springframework.context.annotation.Lazy
-    private StarterSyncService starterSyncService;
+    private com.example.grader.repository.BehaviorSuiteRepository suiteRepository;
+    @Autowired
+    private com.example.grader.repository.BehaviorArtifactRepository artifactRepository;
     @Autowired
     private com.example.grader.repository.ExamResultRepository resultRepository;
     @Autowired
@@ -165,12 +179,7 @@ public class ExamService {
             // bằng đường nhập gói bàn giao, nên createdAt chính là lúc nhận gói.
             m.put("createdAt", e.getCreatedAt());
             m.put("updatedAt", e.getUpdatedAt());
-            // Trang thai kiem dong bo khung phat: EXEMPT/OK thi cham duoc, PENDING/STALE thi
-            // man hinh phai bao ro thay vi de giao vien bam cham roi moi nhan loi.
-            String dongBo = starterSyncService.trangThai(e.getExamId());
-            m.put("starterCheck", dongBo);
-            m.put("gradable", StarterSyncService.MIEN_TRU.equals(dongBo)
-                    || StarterSyncService.DAT.equals(dongBo));
+            // gradable duoc tinh o vong cuoi, khi da biet ca hai nguon de (DB va dia).
             // Mở được màn builder khi có cấu hình, HOẶC matrix còn template_id để dựng lại cấu hình.
             // Testcase viết tay không có template_id → sửa bằng trình sửa file thay vì builder.
             m.put("editable", false);
@@ -186,16 +195,25 @@ public class ExamService {
             if (vaiGiangVien && Files.isDirectory(root)) {
                 try (Stream<Path> s = Files.list(root)) {
                     for (Path d : s.filter(Files::isDirectory).toList()) {
-                        if (!Files.exists(d.resolve("testcase").resolve("skills_matrix.json"))) continue;
+                        boolean coTestcase = Files.exists(d.resolve("testcase").resolve("skills_matrix.json"));
+                        // Thư mục handout CŨNG tính là một đề. Trước 20/9 vòng này chỉ nhặt đề
+                        // có testcase, nên đề mới soạn đề bài (chưa có bộ chấm) không lọt vào
+                        // /list — đó là lý do màn "Tạo đề" và "Kho tài liệu đề" thấy hai danh
+                        // sách khác nhau, và đề thật PE_PRM393_FA26 không hiện ở màn soạn đề.
+                        boolean coHandout = Files.isDirectory(d.resolve("handout"));
+                        if (!coTestcase && !coHandout) continue;
                         String id = d.getFileName().toString();
                         Map<String, Object> existing = byId.get(id);
-                        if (existing != null) { existing.put("hasTestcase", true); continue; }
+                        if (existing != null) {
+                            if (coTestcase) existing.put("hasTestcase", true);
+                            continue;
+                        }
                         Map<String, Object> m = new LinkedHashMap<>();
                         m.put("examId", id);
                         m.put("examName", id);
                         m.put("status", "ON_DISK");
-                        m.put("testcaseStatus", "PUBLISHED");
-                        m.put("hasTestcase", true);
+                        m.put("testcaseStatus", coTestcase ? "PUBLISHED" : "DRAFT");
+                        m.put("hasTestcase", coTestcase);
                         // Chỉ có thư mục trên đĩa: vẫn sửa được — hệ thống tự đăng ký bản ghi
                         // ngay lần thao tác đầu tiên (xem ensureExamRecord).
                         m.put("editable", false);
@@ -209,15 +227,37 @@ public class ExamService {
             log.warn("Quét thư mục exams lỗi: {}", e.getMessage());
         }
 
+        // Đọc package của ảnh chấm MỘT LẦN cho cả danh sách. Gọi trong vòng lặp thì lúc Docker
+        // tắt, cache không bao giờ đầy nên mỗi đề lại sinh một tiến trình `docker` mới — mở
+        // trang một cái là N lần chờ.
+        Set<String> goiCuaAnh = goiCoTrongAnhCham();
+
         // Bổ sung số bài đã nộp + có sẵn đề bài/starter để tải hay không (cho trang Kho đề)
         for (Map<String, Object> m : byId.values()) {
             String id = String.valueOf(m.get("examId"));
             try { m.put("resultCount", resultRepository.findSubmitStudentIds(id).size()); }
             catch (Exception e) { m.put("resultCount", 0); }
+
+            // CHẤM ĐƯỢC HAY KHÔNG LÀ TÍNH SỐNG, không phải dấu đóng lúc nhận gói. Cửa chặn ở
+            // khâu nạp chỉ là ảnh chụp một thời điểm; ảnh chấm đổi được sau đó — chính màn Thư
+            // viện chấm có nút gỡ gói rồi dựng lại ảnh. Gỡ một gói mà bộ chấm cũ đang cần thì
+            // bộ ấy lặng lẽ hỏng, và trước 19/9 cờ này đóng cứng true nên không đâu nói ra.
+            List<Map<String, String>> thieu = Boolean.TRUE.equals(m.get("hasTestcase"))
+                    ? thieuGoiKemPhienBan(id, goiCuaAnh) : List.of();
+            m.put("thieuGoi", thieu.stream().map(g -> g.get("name")).toList());
+            // Kèm ràng buộc để nút "Bổ sung package" dẫn thẳng sang Thư viện chấm với ô version
+            // điền sẵn — version nay là BẮT BUỘC, bắt người dùng tự đoán là đẩy họ vào chỗ sai.
+            m.put("thieuGoiSpecs", thieu);
+            m.put("gradable", Boolean.TRUE.equals(m.get("hasTestcase")) && thieu.isEmpty());
             Path h = handoutDirOf(id);
             m.put("hasDeBai", Files.exists(h.resolve("de_bai.md")));
             m.put("hasStarter", Files.isDirectory(h.resolve("starter")));
             m.put("hasSolution", Files.isDirectory(h.resolve("solution")));
+            // Màn "Đề bài" đọc ba thứ này để vẽ một dòng mà không phải gọi thêm N request:
+            // trước 20/9 nó hỏi từng đề một cái /handout/original/info, N đề là N+1 lượt gọi.
+            m.put("loaiDe", loaiDe(id));
+            m.put("hasFileGoc", findOriginalHandoutFile(id) != null);
+            m.put("soHinh", demHinhMinhHoa(h));
         }
 
         List<Map<String, Object>> out = new ArrayList<>(byId.values());
@@ -451,7 +491,6 @@ public class ExamService {
         clone.setExamName(examName.trim());
         clone.setTeacherNote(teacherNote == null ? "" : teacherNote.trim());
         clone.setTestcasePath(targetDir.toAbsolutePath().normalize().toString());
-        clone.setAllowedPackages(source.getAllowedPackages());
         clone.setStatus(ExamStatus.BUILDING);          // sandbox dựng lại khi bấm Lưu
         // Bản sao là NHÁP cho tới khi người dùng bấm Lưu trong trình sửa file — giống hệt
         // luồng clone của bộ dựng bằng builder, để hai loại bộ không hành xử khác nhau.
@@ -509,7 +548,6 @@ public class ExamService {
                 ? (source != null ? source.getExamName() : targetId)
                 : examName.trim());
         clone.setTeacherNote(source != null && source.getTeacherNote() != null ? source.getTeacherNote() : "");
-        clone.setAllowedPackages(source != null ? source.getAllowedPackages() : null);
         clone.setTestcaseConfigJson(source != null ? source.getTestcaseConfigJson() : null);
         clone.setStatus(ExamStatus.BUILDING);
         clone.setCreatedBy(actor);
@@ -727,11 +765,77 @@ public class ExamService {
         Path target = dir.resolve("original." + ext);
         Files.write(target, bytes);
 
+        // Đề CHƯA có nội dung trong hệ thống thì file này LÀ đề bài (loại NGOAI). KHÔNG bóc chữ
+        // ngầm như trước 20/9: bóc ngầm là cách đề tự nhiên có hai bản, giảng viên sửa một bản
+        // rồi tải bản kia mà không ai báo. Muốn đưa vào hệ thống thì bấm một nút có tên hẳn hoi.
+        //
+        // Đề ĐÃ soạn trong hệ thống thì file này chỉ là tài liệu đính kèm, loại giữ nguyên TRONG.
+        String daCo = readDeBai(examId);
+        if (daCo == null || daCo.isBlank()) ghiLoaiDe(examId, DE_NGOAI);
+
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("exam_id", examId);
         out.put("file_name", "original." + ext);
         out.put("size_bytes", Files.size(target));
+        out.put("loai_de", loaiDe(examId));
         return out;
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    //  LOẠI ĐỀ — trục của màn "Đề bài" (20/9/2026)
+    //
+    //  Trước đây một đề có thể vừa có file Word gốc VỪA có de_bai.md, vì upload tự bóc chữ
+    //  ngầm. Giảng viên không biết mình đang sửa bản nào và tải về bản nào; lưu ở màn Kho tài
+    //  liệu thì ghi de_bai.md mà KHÔNG đụng file Word — hai bản trôi khỏi nhau trong im lặng.
+    //
+    //  Nay mỗi đề mang đúng MỘT bản chính:
+    //    NGOAI — file Word/PDF vừa tải lên, CHƯA ai sửa trong hệ thống. File đó là đề bài;
+    //            xem thì đọc thẳng cấu trúc từ nó, giữ nguyên bảng, đánh số và căn lề.
+    //    TRONG — đã có người sửa và LƯU trong hệ thống. de_bai.md (+ hình) thành bản chính,
+    //            .docx là bản XUẤT RA.
+    //
+    //  ĐỔI LOẠI THEO HÀNH ĐỘNG, không theo một nút khai báo (20/9): tải lên là NGOAI, LƯU
+    //  lần đầu là TRONG. Trước đó phải bấm "Đưa vào hệ thống" mới xem/sửa được — bắt người
+    //  dùng khai một điều mà thao tác của họ đã nói rồi.
+    //
+    //  Vẫn MỘT CHIỀU: sửa trong hệ thống rồi thì file Word cũ lùi về tài liệu đính kèm, không
+    //  có đường quay lại. Đồng bộ hai chiều Word ↔ text là chỗ mọi hệ thống kiểu này chết.
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    public static final String DE_NGOAI = "NGOAI";
+    public static final String DE_TRONG = "TRONG";
+
+    /** Dấu loại đề, nằm cạnh chính nội dung nó mô tả nên clone/xoá thư mục là theo cùng. */
+    private static final String TEP_LOAI = "loai_de.txt";
+
+    /**
+     * Loại của một đề.
+     *
+     * <p>Không có dấu (đề có từ trước 20/9) thì SUY RA: chỉ có file gốc mà chưa có de_bai.md là
+     * NGOAI, còn lại là TRONG. Suy ra chứ không ghi đè — đề cũ có cả hai thứ thì mặc định coi
+     * như soạn trong hệ thống, vì đó là bản mà mọi chức năng hiện hành đang chạy trên đó.
+     */
+    public String loaiDe(String examId) {
+        safeId(examId, "đề");
+        Path dir = handoutDirOf(examId);
+        try {
+            Path dau = dir.resolve(TEP_LOAI);
+            if (Files.isRegularFile(dau)) {
+                String v = Files.readString(dau, StandardCharsets.UTF_8).trim();
+                if (DE_NGOAI.equals(v) || DE_TRONG.equals(v)) return v;
+            }
+        } catch (Exception e) {
+            log.warn("Không đọc được dấu loại đề của {}: {}", examId, e.getMessage());
+        }
+        boolean coFileGoc = findOriginalHandoutFile(examId) != null;
+        boolean coDeBai = Files.isRegularFile(dir.resolve("de_bai.md"));
+        return coFileGoc && !coDeBai ? DE_NGOAI : DE_TRONG;
+    }
+
+    private void ghiLoaiDe(String examId, String loai) throws IOException {
+        Path dir = handoutDirOf(examId);
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve(TEP_LOAI), loai, StandardCharsets.UTF_8);
     }
 
     /** Thông tin file đề bài gốc đã upload của 1 đề, nếu có. */
@@ -772,6 +876,17 @@ public class ExamService {
         safeId(examId, "đề");
         Path dir = handoutDirOf(examId);
         if (Files.isDirectory(dir)) deleteExistingOriginalHandoutFiles(dir);
+    }
+
+    /** Đếm hình minh hoạ mà không đọc ruột từng file — danh sách chỉ cần con số. */
+    private int demHinhMinhHoa(Path handout) {
+        Path dir = handout.resolve("mockup");
+        if (!Files.isDirectory(dir)) return 0;
+        try (Stream<Path> files = Files.list(dir)) {
+            return (int) files.filter(p -> p.getFileName().toString().endsWith(".svg")).count();
+        } catch (Exception e) {
+            return 0;
+        }
     }
 
     private Path findOriginalHandoutFile(String examId) {
@@ -864,6 +979,9 @@ public class ExamService {
         if (deBai != null && !deBai.isBlank()) {
             Files.writeString(handout.resolve("de_bai.md"), deBai, StandardCharsets.UTF_8);
             written.add("de_bai.md");
+            // Đã có người sửa và lưu → bản trong hệ thống thành bản chính. Đây là chỗ DUY NHẤT
+            // đổi loại sang TRONG: mọi đường lưu đề bài (sửa tay, AI soạn, bóc chữ) đều qua đây.
+            ghiLoaiDe(examId, DE_TRONG);
         }
 
         // Bản GỘP: đề bài + hình minh họa trong MỘT file tự chứa, để phát cho sinh viên hay in
@@ -874,6 +992,17 @@ public class ExamService {
 
         log.info("📄 Đã lưu đề bài + {} hình minh họa cho đề {}", written.size(), examId);
         return written;
+    }
+
+    /**
+     * Tên hiện ở {@code <h1>} của bản xem trước / bản xuất ra; null khi đề chưa có bản ghi.
+     *
+     * <p>Tách riêng để đường XEM TRƯỚC (chưa lưu) và đường XUẤT RA (đã lưu) lấy chung một
+     * nguồn tên — hai bên tự tra riêng là sớm muộn một bên in mã đề còn bên kia in tên đề.
+     */
+    public String tenDeHienThi(String examId) {
+        safeId(examId, "đề");
+        return examRepository.findByExamId(examId).map(Exam::getExamName).orElse(null);
     }
 
     /** Ghép đề bài (.md) và toàn bộ hình (.svg) đang có trên đĩa thành một trang HTML tự chứa. */
@@ -898,11 +1027,39 @@ public class ExamService {
                     .sorted(Comparator.comparing(p -> p.getFileName().toString())).toList()) {
                 String id = f.getFileName().toString().replaceFirst("\\.svg$", "");
                 String svg = Files.readString(f, StandardCharsets.UTF_8);
-                // Tiêu đề hình đã được vẽ trong SVG; ở đây chỉ cần một tên đọc được.
-                out.add(new HandoutDocument.Mockup(id, id.replace('-', ' '), svg));
+                out.add(new HandoutDocument.Mockup(id, tenHinh(svg, id), svg));
             }
         }
         return out;
+    }
+
+    /** Nhãn nằm ngay trong thẻ {@code <svg>} đầu tiên. */
+    private static final Pattern NHAN_HINH = Pattern.compile("<svg\\b[^>]*\\baria-label=\"([^\"]*)\"");
+
+    /**
+     * Tên hiển thị của một hình minh hoạ, lấy từ {@code aria-label} ngay trong SVG.
+     *
+     * <p>Lúc lưu, frontend chỉ gửi {@code {id, svg}} nên tên bị rơi mất; trước đây chỗ này chế ra
+     * tên từ mã file, và đó là tên IN RA ĐỀ (thẻ h3 phía trên mỗi hình, xem
+     * {@link HandoutDocument#toHtml}). Kết quả: đề phát cho sinh viên có chú thích kiểu
+     * "man danh sach" — mất dấu, gạch nối thành khoảng trắng — còn ảnh giáo viên tự tải lên thì
+     * thành "anh mu9j97jy".
+     *
+     * <p>Chữa bằng cách để tên đi THEO FILE chứ không nằm ở một bảng tên riêng: cả hai đường sinh
+     * SVG (MockupRenderer và imageFileToSvg bên frontend) đều ghi {@code aria-label}, nên file SVG
+     * vẫn tự chứa — copy đi đâu cũng còn tên, không có nguồn sự thật thứ hai để lệch nhau.
+     */
+    private static String tenHinh(String svg, String id) {
+        String mac = id.replace('-', ' ');
+        Matcher m = NHAN_HINH.matcher(svg);
+        if (!m.find()) return mac;
+        // Gỡ mã hoá XML, &amp; để SAU CÙNG — làm trước thì "&amp;lt;" bị gỡ hai lần thành "<".
+        String ten = m.group(1)
+                .replace("&lt;", "<").replace("&gt;", ">")
+                .replace("&quot;", "\"").replace("&#39;", "'")
+                .replace("&amp;", "&")
+                .trim();
+        return ten.isEmpty() ? mac : ten;
     }
 
     /**
@@ -931,11 +1088,12 @@ public class ExamService {
                 case "h1", "h2" -> { docx.heading(block.text(), 2); ordered = 0; }
                 case "h3" -> { docx.heading(block.text(), 3); ordered = 0; }
                 case "li" -> { docx.bullet(block.text(), false, 0); ordered = 0; }
-                case "ol" -> docx.bullet(block.text(), true, ++ordered);
+                case "ol" -> docx.bullet(block.text(), true, block.number());
                 case "code" -> { docx.code(block.text()); ordered = 0; }
                 case "table" -> { docx.table(HandoutDocument.splitTableRows(block.text())); ordered = 0; }
                 default -> { docx.paragraph(block.text()); ordered = 0; }
             }
+            if (!"table".equals(block.type())) docx.layoutLast(block.align(), block.indent());
         }
 
         Map<String, byte[]> screenshots = readGoldenScreenshots(examId);
@@ -991,7 +1149,7 @@ public class ExamService {
                     case "h1", "h2" -> { pdf.heading(block.text(), 2); ordered = 0; }
                     case "h3" -> { pdf.heading(block.text(), 3); ordered = 0; }
                     case "li" -> { pdf.bullet(block.text(), false, 0); ordered = 0; }
-                    case "ol" -> pdf.bullet(block.text(), true, ++ordered);
+                    case "ol" -> pdf.bullet(block.text(), true, block.number());
                     case "code" -> { pdf.code(block.text()); ordered = 0; }
                     case "table" -> { pdf.table(HandoutDocument.splitTableRows(block.text())); ordered = 0; }
                     default -> { pdf.paragraph(block.text()); ordered = 0; }
@@ -1160,7 +1318,31 @@ public class ExamService {
     public String readDeBai(String examId) throws Exception {
         safeId(examId, "đề");
         Path f = handoutDirOf(examId).resolve("de_bai.md");
-        return Files.exists(f) ? Files.readString(f, StandardCharsets.UTF_8) : null;
+        if (!Files.exists(f)) {
+            // Đề vừa tải file lên, CHƯA ai sửa: vẫn phải xem và sửa được ngay. Bóc cấu trúc từ
+            // file Word để hiển thị, KHÔNG ghi xuống đĩa — chưa ai sửa thì chưa có bản trong hệ
+            // thống, và ghi ra là tự tay tạo bản thứ hai, đúng thứ cả thiết kế này tránh.
+            Path goc = handoutDirOf(examId).resolve("original.docx");
+            if (documentReader != null && Files.isRegularFile(goc)) {
+                try {
+                    return String.valueOf(documentReader.read("original.docx", Files.readAllBytes(goc)).get("text"));
+                } catch (IllegalArgumentException e) {
+                    log.warn("Không bóc được nội dung Word của {}: {}", examId, e.getMessage());
+                }
+            }
+            return null;
+        }
+        String stored = Files.readString(f, StandardCharsets.UTF_8);
+        // Không ghi đĩa khi đọc; bản xuất và màn xem cùng nhận cấu trúc nếu đề cũ chưa hề sửa.
+        Path original = handoutDirOf(examId).resolve("original.docx");
+        if (documentReader != null && Files.isRegularFile(original)) {
+            try {
+                return documentReader.restoreUneditedWord(stored, Files.readAllBytes(original));
+            } catch (IllegalArgumentException e) {
+                log.warn("Không phục hồi cấu trúc Word của {}: {}", examId, e.getMessage());
+            }
+        }
+        return stored;
     }
 
     /**
@@ -1714,82 +1896,75 @@ public class ExamService {
 
     private Path basePubspec() { return locateTemplateDir().resolve("pubspec.base.yaml"); }
 
-    /** Lựa chọn thuộc đề, không thuộc bộ Golden và không thu hẹp thư viện của engine. */
-    public List<String> getExamAllowedPackages(String examId) throws Exception {
-        safeId(examId, "đề");
-        String saved = examRepository.findByExamId(examId).map(Exam::getAllowedPackages).orElse(null);
-        if (saved == null || saved.isBlank()) return List.copyOf(baseDependencies().keySet());
-        JsonNode packages = mapper.readTree(saved);
-        if (packages == null || !packages.isArray())
-            throw new IllegalStateException("Danh sách package đã lưu của đề không hợp lệ.");
-        List<String> selected = new ArrayList<>();
-        for (JsonNode p : packages) {
-            if (!p.isTextual()) throw new IllegalStateException("Tên package đã lưu không hợp lệ.");
-            selected.add(p.asText());
-        }
-        return normalizeExamPackages(selected);
-    }
-
-    public List<String> saveExamAllowedPackages(String examId, List<?> packages) throws Exception {
-        safeId(examId, "đề");
-        List<String> normalized = normalizeExamPackages(packages);
-        Map<String, Object> base = baseDependencies();
-        List<String> missing = normalized.stream().filter(p -> !base.containsKey(p)).toList();
-        if (!missing.isEmpty()) throw new IllegalArgumentException("Nguồn khung phát chưa khai package: "
-                + String.join(", ", missing) + ". Mở Thư viện chấm để thêm gói trước khi chọn.");
-        Set<String> inImage = goiCoTrongAnhCham();
-        List<String> absent = normalized.stream().filter(p -> !p.equals("flutter") && !inImage.contains(p)).toList();
-        if (!inImage.isEmpty() && !absent.isEmpty())
-            throw new IllegalArgumentException("Ảnh chấm chưa có package: " + String.join(", ", absent)
-                    + ". Mở Thư viện chấm để bổ sung.");
-        boolean changed = !new LinkedHashSet<>(getExamAllowedPackages(examId)).equals(new LinkedHashSet<>(normalized));
-        Exam exam = ensureExamStub(examId, null);
-        exam.setAllowedPackages(mapper.writeValueAsString(normalized));
-        if (changed) {
-            // Đổi khung phát thì con dấu kiểm cũ không còn chứng minh Golden khớp khung mới.
-            exam.setStarterCheckRequired(true);
-            exam.setStarterCheckedGoldenSha(null);
-            exam.setStarterCheckedAt(null);
-        }
-        examRepository.save(exam);
-        return normalized;
-    }
-
-    private List<String> normalizeExamPackages(List<?> packages) {
-        if (packages == null) throw new IllegalArgumentException("Phải khai allowed_packages dạng danh sách.");
-        Set<String> out = new LinkedHashSet<>();
-        out.add("flutter");
-        for (Object raw : packages) {
-            if (!(raw instanceof String p) || !p.trim().matches("[a-z][a-z0-9_]*"))
-                throw new IllegalArgumentException("Tên package không hợp lệ: " + raw);
-            out.add(p.trim());
-        }
-        return List.copyOf(out);
-    }
-
+    /**
+     * Dependencies khai trong {@code pubspec.base.yaml} — NGUỒN CỦA ẢNH CHẤM.
+     *
+     * <p>KHÔNG dùng để dựng khung phát nữa (khung lấy từ Golden); chỗ này chỉ phục vụ màn
+     * Thư viện chấm, nơi cần biết gói nào đang khai thẳng trong ảnh để bày ra cho giảng viên.
+     */
     private Map<String, Object> baseDependencies() throws Exception {
         return PubspecDependencies.parse(Files.readString(basePubspec(), StandardCharsets.UTF_8));
     }
 
-    /** Giữ nguyên giá trị khai báo phiên bản và nguồn; chỉ lọc tên trong dependencies. */
-    public Map<String, Object> starterDependencies(String examId) throws Exception {
-        Map<String, Object> deps = baseDependencies();
-        List<String> selected = getExamAllowedPackages(examId);
-        List<String> missing = selected.stream().filter(p -> !deps.containsKey(p)).toList();
-        if (!missing.isEmpty()) throw new IllegalStateException("Nguồn khung phát thiếu package đã chọn: " + String.join(", ", missing));
-        Map<String, Object> filtered = new LinkedHashMap<>();
-        deps.forEach((name, declaration) -> { if (selected.contains(name)) filtered.put(name, declaration); });
-        return filtered;
+    /** ZIP Golden đang active của đề; rỗng khi đề chưa gắn bộ chấm nào có Golden. */
+    private java.util.Optional<Path> goldenZipCuaDe(String examId) {
+        safeId(examId, "đề");
+        for (var suite : suiteRepository.findByExamIdOrderByUpdatedAtDesc(examId)) {
+            var golden = artifactRepository
+                    .findFirstBySuiteIdAndArtifactTypeAndActiveTrueOrderByVersionDesc(
+                            suite.getId(), com.example.grader.entity.BehaviorArtifactType.GOLDEN_SOLUTION);
+            if (golden.isPresent()) return golden.map(a -> Path.of(a.getStoragePath()));
+        }
+        return java.util.Optional.empty();
     }
 
+    private Path goldenBatBuoc(String examId) {
+        return goldenZipCuaDe(examId).orElseThrow(() -> new IllegalStateException(
+                "Đề " + examId + " chưa có Golden đang dùng nên chưa dựng được khung phát."
+                        + " Nạp Golden và publish bộ chấm trước."));
+    }
+
+    /**
+     * Package của khung phát = ĐÚNG khối dependencies của Golden.
+     *
+     * <p>Trước đây lọc pubspec.base.yaml theo một danh sách chọn riêng của đề. Bỏ cách đó
+     * (19/9): khung và Golden phải khai y hệt nhau thì bài sinh viên mới chạy trên cùng bộ thư
+     * viện với bài giải mẫu, mà cách chắc chắn nhất để hai bên giống nhau là lấy chung một nguồn.
+     */
+    public Map<String, Object> starterDependencies(String examId) throws Exception {
+        return PubspecDependencies.readZip(goldenBatBuoc(examId));
+    }
+
+    /** dev_dependencies của khung = của Golden; nhờ đó analysis_options của Golden dùng được. */
+    public Map<String, Object> starterDevDependencies(String examId) throws Exception {
+        return PubspecDependencies.readZipDev(goldenBatBuoc(examId));
+    }
+
+    /**
+     * {@code pubspec.yaml} (và {@code pubspec.lock} nếu đọc được ảnh) cho khung phát.
+     *
+     * <p>Lấy nguyên tài liệu pubspec của Golden rồi sửa đúng ba chỗ: ép {@code name} về
+     * {@code exam_project} (ảnh chấm cache package graph theo tên đó, và import nội bộ được viết
+     * lại thành {@code package:exam_project/}), thay {@code description} bằng chữ trung tính để
+     * không lộ đây là bài giải, và bỏ khai báo {@code assets} vì khung không có thư mục assets —
+     * giữ lại thì build báo thiếu thư mục.
+     */
     public List<Map<String, String>> starterProjectFiles(String examId) throws Exception {
-        Map<String, Object> filtered = starterDependencies(examId);
+        Path golden = goldenBatBuoc(examId);
         org.yaml.snakeyaml.Yaml yaml = new org.yaml.snakeyaml.Yaml();
-        Map<String, Object> document = yaml.load(Files.readString(basePubspec(), StandardCharsets.UTF_8));
-        document.put("dependencies", filtered);
+        Map<String, Object> document = yaml.load(PubspecDependencies.docTrongZip(golden));
+        document.put("name", "exam_project");
+        document.put("description", "Khung khoi dau cho bai thi");
+        Object phanFlutter = document.get("flutter");
+        if (phanFlutter instanceof Map<?, ?> khoi) {
+            Map<String, Object> sach = new LinkedHashMap<>();
+            khoi.forEach((k, v) -> { if (!"assets".equals(String.valueOf(k))) sach.put(String.valueOf(k), v); });
+            document.put("flutter", sach);
+        }
         List<Map<String, String>> out = new ArrayList<>();
         out.add(Map.of("name", "pubspec.yaml", "content",
-                "# Khai sẵn theo môi trường chấm. Không thêm package; import thêm là 0 điểm.\n" + yaml.dump(document)));
+                "# Khai sẵn theo môi trường chấm. Không thêm package; import thêm là 0 điểm.\n"
+                        + yaml.dump(document)));
         String lock = readLockFromBaseImage();
         if (lock != null && !lock.isBlank()) out.add(Map.of("name", "pubspec.lock", "content", lock));
         return out;
@@ -1826,6 +2001,145 @@ public class ExamService {
             out.add(Map.of("name", "pubspec.lock", "content", lock));
         }
         return out;
+    }
+
+    /** Hai file CHO SẴN: chép NGUYÊN BYTE từ Golden sang khung, không sinh lại. */
+    private static final List<String> FILE_CHO_SAN = List.of("database_helper.dart", "dinh_danh.dart");
+
+    /**
+     * FILE MẪU {@code dinh_danh.dart} — tài nguyên TĨNH, không suy ra gì từ đề.
+     *
+     * <p>Máy không biết đề có những thành phần nào, và đặt tên định danh là quyết định của người
+     * ra đề, nên đây chỉ là cái vỏ: luật gắn ở phần chú thích đầu file, cộng bốn thành viên ví dụ
+     * ghi rõ "xoá đi". Giáo viên sửa rồi bỏ vào {@code lib/} của Golden.
+     *
+     * <p>Vì sao phải có: {@code zipKhungPhat} bắt buộc Golden có {@code lib/**}{@code /dinh_danh.dart},
+     * nhưng trước nay không chỗ nào chỉ cách viết file đó — người lần đầu dựng Golden phải tự đoán
+     * cả cú pháp lẫn chỗ gắn. Chú thích trong file chỉ đọc được SAU KHI đã tự viết ra nó.
+     *
+     * <p>Chú thích trong file cố ý KHÔNG dấu tiếng Việt, theo đúng {@code dinh_danh.dart} và
+     * {@link KhungMainDart#HOME_KHUNG} đang phát cho sinh viên: file này đi tới máy của người khác,
+     * mở bằng trình soạn thảo nào không biết trước.
+     */
+    public byte[] dinhDanhMau() throws Exception {
+        try (java.io.InputStream in = new ClassPathResource("golden-template/dinh_danh.dart").getInputStream()) {
+            return in.readAllBytes();
+        }
+    }
+
+    /**
+     * ZIP KHUNG PHÁT cho sinh viên, dựng từ chính Golden đang dùng.
+     *
+     * <p>Sinh cùng lúc với gói bàn giao (xem {@code BanGiaoService}) nên hai bên chắc chắn ra từ
+     * một bản Golden — không còn cửa sổ nào để khung và bộ chấm trôi khỏi nhau.
+     *
+     * <p>Gồm: vỏ dự án Flutter, {@code pubspec.yaml} lấy từ Golden, {@code lib/main.dart} dựng
+     * bằng {@link KhungMainDart} (mang theo tham số MaterialApp của Golden, thay mỗi {@code home:}),
+     * và hai file cho sẵn chép nguyên byte. KHÔNG có {@code test/} và KHÔNG có phần {@code lib/}
+     * còn lại của Golden — đó là lời giải.
+     */
+    public byte[] zipKhungPhat(String examId) throws Exception {
+        Path golden = goldenBatBuoc(examId);
+        Map<String, byte[]> tep = new LinkedHashMap<>();
+
+        for (Map<String, String> f : flutterScaffoldFiles()) {
+            String ten = f.get("name");
+            // Cache build của Gradle lọt vào vỏ dự án; phát cho sinh viên chỉ tổ nặng và gây lẫn.
+            if (ten.startsWith("android/.gradle/")) continue;
+            tep.put(ten, java.util.Base64.getDecoder().decode(f.get("content")));
+        }
+        for (Map<String, String> f : starterProjectFiles(examId)) {
+            tep.put(f.get("name"), f.get("content").getBytes(StandardCharsets.UTF_8));
+        }
+
+        try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(golden.toFile())) {
+            String goc = gocDuAnTrongZip(zip);
+            byte[] mainGolden = docTrongZip(zip, goc + "lib/main.dart");
+            if (mainGolden == null) {
+                throw new IllegalStateException("Golden thiếu lib/main.dart nên không dựng được khung phát.");
+            }
+            tep.put("lib/main.dart", KhungMainDart
+                    .sinh(new String(mainGolden, StandardCharsets.UTF_8))
+                    .getBytes(StandardCharsets.UTF_8));
+
+            for (String ten : FILE_CHO_SAN) {
+                byte[] noiDung = timTrongLib(zip, goc, ten);
+                if (noiDung == null) {
+                    throw new IllegalStateException("Golden thiếu file cho sẵn lib/**/" + ten
+                            + " nên khung phát sẽ không khớp hợp đồng. Bổ sung vào Golden rồi xuất lại.");
+                }
+                tep.put("lib/" + ten, noiDung);
+            }
+        }
+        return zipNhiPhan(tep);
+    }
+
+    /**
+     * Vân tay của ĐÚNG NHỮNG GÌ bộ sinh khung đọc từ Golden — không phải của cả Golden.
+     *
+     * <p>Sửa {@code home_screen.dart} hay chụp lại oracle đều ra bản Golden mới, nhưng khung không
+     * hề lệch; lấy cả Golden làm mốc thì cảnh báo kêu oan rồi mất thiêng. Đo trên 5 bản Golden
+     * thật: 5 lần nạp, khung chỉ phải làm lại 1 lần.
+     */
+    public String vanTayKhungPhat(String examId) throws Exception {
+        Path golden = goldenBatBuoc(examId);
+        StringBuilder mon = new StringBuilder();
+        for (Map<String, String> f : starterProjectFiles(examId)) {
+            if (f.get("name").equals("pubspec.yaml")) mon.append(f.get("content"));
+        }
+        try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(golden.toFile())) {
+            String goc = gocDuAnTrongZip(zip);
+            byte[] main = docTrongZip(zip, goc + "lib/main.dart");
+            mon.append(main == null ? "" : KhungMainDart.sinh(new String(main, StandardCharsets.UTF_8)));
+            for (String ten : FILE_CHO_SAN) {
+                byte[] noi = timTrongLib(zip, goc, ten);
+                mon.append(noi == null ? "" : new String(noi, StandardCharsets.UTF_8));
+            }
+        }
+        java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+        byte[] bam = md.digest(mon.toString().getBytes(StandardCharsets.UTF_8));
+        StringBuilder hex = new StringBuilder();
+        for (byte b : bam) hex.append(String.format("%02x", b));
+        return hex.toString();
+    }
+
+    /** Thư mục gốc dự án trong ZIP Golden (chuỗi rỗng khi lib/ nằm ngay gốc). */
+    private String gocDuAnTrongZip(java.util.zip.ZipFile zip) {
+        return zip.stream().filter(e -> !e.isDirectory())
+                .map(e -> e.getName().replace('\\', '/'))
+                .filter(n -> n.equals("lib/main.dart") || n.endsWith("/lib/main.dart"))
+                .map(n -> n.substring(0, n.length() - "lib/main.dart".length()))
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("Golden ZIP không có lib/main.dart."));
+    }
+
+    private byte[] docTrongZip(java.util.zip.ZipFile zip, String ten) throws Exception {
+        var entry = zip.getEntry(ten);
+        if (entry == null || entry.isDirectory()) return null;
+        try (var in = zip.getInputStream(entry)) { return in.readAllBytes(); }
+    }
+
+    /** File cho sẵn có thể nằm bất kỳ đâu dưới lib/ của Golden (ví dụ lib/data/database_helper.dart). */
+    private byte[] timTrongLib(java.util.zip.ZipFile zip, String goc, String tenFile) throws Exception {
+        String duoi = "/" + tenFile;
+        var tim = zip.stream().filter(e -> !e.isDirectory())
+                .map(e -> e.getName().replace('\\', '/'))
+                .filter(n -> n.startsWith(goc + "lib/") && n.endsWith(duoi))
+                .sorted()
+                .findFirst();
+        return tim.isPresent() ? docTrongZip(zip, tim.get()) : null;
+    }
+
+    private byte[] zipNhiPhan(Map<String, byte[]> tep) throws Exception {
+        var bos = new java.io.ByteArrayOutputStream();
+        try (var zip = new java.util.zip.ZipOutputStream(bos, StandardCharsets.UTF_8)) {
+            for (var e : tep.entrySet()) {
+                zip.putNextEntry(new java.util.zip.ZipEntry(e.getKey()));
+                zip.write(e.getValue());
+                zip.closeEntry();
+            }
+        }
+        return bos.toByteArray();
     }
 
     /**
@@ -1934,27 +2248,114 @@ public class ExamService {
      */
     public Map<String, Object> goiConThieuCuaDe(String examId) {
         Map<String, Object> ra = new LinkedHashMap<>();
-        List<String> deCan = new ArrayList<>();
+        Map<String, String> deCan = new LinkedHashMap<>();
         try {
             Path contract = testcaseDirOf(examId).resolve("contract.json");
-            if (Files.exists(contract)) {
-                JsonNode khai = mapper.readTree(Files.readString(contract, StandardCharsets.UTF_8))
-                        .get("allowed_packages");
-                if (khai != null && khai.isArray()) {
-                    khai.forEach(n -> {
-                        String ten = n.asText("").trim();
-                        if (!ten.isEmpty() && !deCan.contains(ten)) deCan.add(ten);
-                    });
-                }
-            }
+            if (Files.exists(contract)) deCan.putAll(goiDeCanTrongHopDong(Files.readString(contract, StandardCharsets.UTF_8)));
         } catch (Exception e) {
             log.warn("Không đọc được contract.json của {}: {}", examId, e.getMessage());
         }
         Set<String> coSan = goiCoTrongAnhCham();
+        List<String> thieu = thieuTrongTapCoSan(deCan.keySet(), coSan);
+        Map<String, String> phienBan = new LinkedHashMap<>();
+        thieu.forEach(ten -> phienBan.put(ten, deCan.getOrDefault(ten, "")));
         ra.put("doc_duoc_anh", !coSan.isEmpty());
-        ra.put("de_can", deCan);
-        ra.put("thieu", coSan.isEmpty() ? List.of()
-                : deCan.stream().filter(ten -> !coSan.contains(ten)).sorted().toList());
+        ra.put("de_can", new ArrayList<>(deCan.keySet()));
+        ra.put("thieu", thieu);
+        // Ràng buộc phiên bản của đúng những gói đang thiếu, để bên người chấm thêm vào ảnh
+        // chấm bằng CÙNG một ràng buộc với Golden chứ không để pub tự chọn bản mới nhất.
+        ra.put("thieu_phien_ban", phienBan);
+        return ra;
+    }
+
+    /**
+     * Gói đề đòi mà ảnh chấm chưa có — dùng tập gói của ảnh ĐÃ ĐỌC SẴN, để cả một danh sách
+     * đề chỉ trả tiền đọc ảnh đúng một lần.
+     */
+    public List<String> thieuGoiCuaDe(String examId, Set<String> goiCuaAnh) {
+        return thieuTrongTapCoSan(goiDeCanCuaDe(examId).keySet(), goiCuaAnh);
+    }
+
+    /** Như trên nhưng kèm ràng buộc phiên bản — màn hình cần nó để điền sẵn ô version. */
+    public List<Map<String, String>> thieuGoiKemPhienBan(String examId, Set<String> goiCuaAnh) {
+        Map<String, String> deCan = goiDeCanCuaDe(examId);
+        return thieuTrongTapCoSan(deCan.keySet(), goiCuaAnh).stream()
+                .map(ten -> Map.of("name", ten, "version", deCan.getOrDefault(ten, "")))
+                .toList();
+    }
+
+    /**
+     * Ràng buộc phiên bản đọc THẲNG TỪ GOLDEN của đề — đường lui khi hợp đồng chưa có
+     * {@code allowed_package_specs}.
+     *
+     * <p>Khoá đó chỉ có từ 19/9, nên mọi bộ chấm publish trước đó chỉ ghi TÊN gói. Không có
+     * đường lui này thì bên giảng viên phải publish lại bộ chấm mới thấy được version — mà
+     * version nay là bắt buộc, nên họ sẽ phải tự đoán, đúng thứ luật bắt buộc sinh ra để chặn.
+     *
+     * <p>Rỗng ở bản NGƯỜI CHẤM: bên đó không có artifact Golden. Họ lấy version qua hợp đồng
+     * trong gói bàn giao, và gói xuất từ 19/9 trở đi đã được bù sẵn khoá này.
+     */
+    private Map<String, String> rangBuocTuGolden(String examId) {
+        try {
+            Map<String, String> ra = new LinkedHashMap<>();
+            starterDependencies(examId).forEach((ten, v) -> ra.put(ten, v instanceof String s ? s : ""));
+            return ra;
+        } catch (Exception e) {
+            return Map.of();
+        }
+    }
+
+    /** Gói đề đòi, đọc từ contract.json của đề. Rỗng khi đề chưa có testcase hay hợp đồng hỏng. */
+    public Map<String, String> goiDeCanCuaDe(String examId) {
+        try {
+            // testcaseDirOf trả null khi đề chưa có thư mục testcase nào — đừng để nó thành NPE
+            // rồi rơi vào nhánh catch bên dưới: ca này là BÌNH THƯỜNG, không đáng ghi log lỗi.
+            Path dir = testcaseDirOf(examId);
+            if (dir == null) return Map.of();
+            Path contract = dir.resolve("contract.json");
+            if (!Files.exists(contract)) return Map.of();
+            return goiDeCanTrongHopDong(Files.readString(contract, StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            // Hợp đồng hỏng không được biến thành "thiếu mọi thứ" rồi chặn oan cả bộ đề; khâu
+            // kiểm lúc publish/nạp mới là chỗ chịu trách nhiệm chặn JSON sai.
+            log.warn("Không đọc được contract.json của {}: {}", examId, e.getMessage());
+            return Map.of();
+        }
+    }
+
+    /**
+     * Tập rỗng nghĩa là KHÔNG ĐỌC ĐƯỢC ẢNH, không phải "ảnh chẳng có gì". Docker tắt mà quy về
+     * thiếu hết thì mọi bộ đề đều bị chặn oan, nên ca đó trả về không thiếu gì.
+     */
+    private static List<String> thieuTrongTapCoSan(Set<String> deCan, Set<String> coSan) {
+        if (coSan.isEmpty()) return List.of();
+        return deCan.stream().filter(ten -> !coSan.contains(ten)).sorted().toList();
+    }
+
+    /**
+     * Tên package đề đòi, kèm ràng buộc phiên bản nếu hợp đồng có ghi.
+     *
+     * <p>Hai khoá vì hai đời hợp đồng: {@code allowed_packages} (mảng tên, có từ đầu và đường
+     * chấm vẫn đọc) và {@code allowed_package_specs} (bản đồ tên→ràng buộc, thêm 19/9). Bộ chấm
+     * xuất bản trước ngày đó chỉ có khoá thứ nhất — khi ấy ràng buộc để rỗng, không phải lỗi.
+     */
+    static Map<String, String> goiDeCanTrongHopDong(String noiDungContract) throws java.io.IOException {
+        Map<String, String> ra = new LinkedHashMap<>();
+        JsonNode goc = new ObjectMapper().readTree(noiDungContract);
+        JsonNode ten = goc.get("allowed_packages");
+        if (ten != null && ten.isArray()) {
+            ten.forEach(n -> {
+                String s = n.asText("").trim();
+                if (!s.isEmpty()) ra.putIfAbsent(s, "");
+            });
+        }
+        JsonNode spec = goc.get("allowed_package_specs");
+        if (spec != null && spec.isObject()) {
+            spec.fields().forEachRemaining(e -> {
+                String s = e.getKey().trim();
+                if (!s.isEmpty()) ra.put(s, e.getValue().asText("").trim());
+            });
+        }
         return ra;
     }
 
@@ -1966,29 +2367,42 @@ public class ExamService {
      */
     public Map<String, Object> goiConThieuTatCa() {
         Set<String> coSan = goiCoTrongAnhCham();
-        Map<String, List<String>> theoGoi = new LinkedHashMap<>();
-        if (!coSan.isEmpty()) {
-            for (Map<String, Object> de : listExams()) {
-                String examId = String.valueOf(de.get("examId"));
-                Object thieu = goiConThieuCuaDe(examId).get("thieu");
-                if (!(thieu instanceof List<?> ds)) continue;
-                for (Object ten : ds) {
-                    theoGoi.computeIfAbsent(String.valueOf(ten), k -> new ArrayList<>()).add(examId);
-                }
+
+        // Một vòng duy nhất, trả lời HAI câu hỏi khác nhau:
+        //   dangDung — "gói này đang có bộ chấm nào đòi" (KHÔNG lọc theo ảnh): dùng để cảnh báo
+        //              trước khi xoá, nên phải kể cả gói ảnh đang có.
+        //   thieu    — "gói đề đòi mà ảnh chưa có": dùng để mở đường thêm.
+        Map<String, List<String>> dangDung = new TreeMap<>();
+        Map<String, List<String>> theoGoi = new TreeMap<>();
+        Map<String, String> phienBan = new LinkedHashMap<>();
+        for (Map<String, Object> de : listExams()) {
+            String examId = String.valueOf(de.get("examId"));
+            for (Map.Entry<String, String> goi : goiDeCanCuaDe(examId).entrySet()) {
+                dangDung.computeIfAbsent(goi.getKey(), k -> new ArrayList<>()).add(examId);
+                if (coSan.isEmpty() || coSan.contains(goi.getKey())) continue;
+                theoGoi.computeIfAbsent(goi.getKey(), k -> new ArrayList<>()).add(examId);
+                // Hai đề cùng đòi một gói ở hai ràng buộc khác nhau: giữ cái GẶP TRƯỚC và
+                // để nguyên, đừng tự hoà giải. Người chấm nhìn ô version rồi tự quyết còn
+                // hơn hệ thống chọn thay một bản không đề nào yêu cầu.
+                String rangBuoc = goi.getValue().isEmpty()
+                        ? rangBuocTuGolden(examId).getOrDefault(goi.getKey(), "")
+                        : goi.getValue();
+                if (!rangBuoc.isEmpty()) phienBan.putIfAbsent(goi.getKey(), rangBuoc);
             }
         }
+
         List<Map<String, Object>> thieu = new ArrayList<>();
-        theoGoi.entrySet().stream()
-                .sorted(Map.Entry.comparingByKey())
-                .forEach(e -> {
-                    Map<String, Object> dong = new LinkedHashMap<>();
-                    dong.put("ten", e.getKey());
-                    dong.put("cac_de", e.getValue());
-                    thieu.add(dong);
-                });
+        theoGoi.forEach((ten, cacDe) -> {
+            Map<String, Object> dong = new LinkedHashMap<>();
+            dong.put("ten", ten);
+            dong.put("cac_de", cacDe);
+            dong.put("version", phienBan.getOrDefault(ten, ""));
+            thieu.add(dong);
+        });
         Map<String, Object> ra = new LinkedHashMap<>();
         ra.put("doc_duoc_anh", !coSan.isEmpty());
         ra.put("thieu", thieu);
+        ra.put("dang_dung", dangDung);
         return ra;
     }
 
@@ -2110,6 +2524,23 @@ public class ExamService {
      * ảnh mới) — chạy nền. Lỗi resolve/pub get → HOÀN TÁC pubspec, ảnh nền giữ nguyên.
      */
     public Map<String, Object> applyPackages(List<Map<String, Object>> desired) {
+        // Version đi từ request tới YAML; chặn trước khi đổi trạng thái/build để một URL bị sửa tay
+        // không thể chèn thêm dòng vào pubspec.base.yaml.
+        for (Map<String, Object> item : desired) {
+            // Lấy giá trị ĐÃ BÓC NHÁY: YAML lưu ràng buộc trong nháy ('>=2.4.2+1 <2.4.3') nên
+            // chuỗi hai nháy rỗng "''" trông có nội dung mà thực chất là trống.
+            String version = validatePackageVersion(
+                    item.get("version") == null ? "" : item.get("version").toString());
+            // VERSION LÀ BẮT BUỘC (19/9). Bỏ trống thì pub tự chọn bản mới nhất, mà ảnh chấm lại
+            // là nơi bài sinh viên chạy — lệch bản với Golden là giao diện xê dịch rồi trượt
+            // hàng loạt tiêu chí vị trí. Ca thật trên máy này: ảnh có go_router ^17.5.0 trong khi
+            // Golden khai ^14.7.1, lệch ba major, không ai nhận ra cho tới lúc điểm sai.
+            if (version.isEmpty())
+                throw new IllegalArgumentException("Thiếu version cho package \""
+                        + (item.get("name") == null ? "?" : item.get("name"))
+                        + "\". Phải ghi rõ ràng buộc phiên bản, ví dụ ^5.7.0 — để trống là pub tự"
+                        + " lấy bản mới nhất, lệch với Golden mà không ai biết.");
+        }
         synchronized (envLock) {
             if (envBuilding) throw new IllegalStateException("Đang build môi trường, vui lòng đợi build xong.");
             envBuilding = true;
@@ -2225,13 +2656,32 @@ public class ExamService {
                 throw new IllegalArgumentException("Tên package không hợp lệ: '" + name + "' (chỉ a-z, 0-9, _).");
             if (order.contains(name)) continue;
             order.add(name);
-            String ver = p.get("version") == null ? "" : p.get("version").toString().trim();
+            String ver = validatePackageVersion(p.get("version") == null ? "" : p.get("version").toString());
             if (ver.isEmpty() || ver.equals("(flutter sdk)")) toResolve.add(name); else given.put(name, ver);
         }
         Map<String, String> resolved = toResolve.isEmpty() ? Map.of() : runPubAddResolve(toResolve);
         List<String[]> out = new ArrayList<>();
         for (String name : order) out.add(new String[]{ name, given.getOrDefault(name, resolved.getOrDefault(name, "any")) });
         return out;
+    }
+
+    /** Chỉ nhận scalar một dòng thuộc bảng ký tự của version constraint Dart/Pub. */
+    static String validatePackageVersion(String raw) {
+        String version = raw == null ? "" : raw.trim();
+        if (version.length() >= 2
+                && ((version.startsWith("\"") && version.endsWith("\""))
+                || (version.startsWith("'") && version.endsWith("'")))) {
+            version = version.substring(1, version.length() - 1).trim();
+        }
+        if (!version.isEmpty() && !version.matches("[0-9A-Za-z.^<>=+* _-]+")) {
+            throw new IllegalArgumentException("Version package không hợp lệ: chỉ nhập ràng buộc một dòng, ví dụ ^5.7.0.");
+        }
+        return version;
+    }
+
+    /** Luôn quote version vì ràng buộc bắt đầu bằng {@code >}/{@code <} là cú pháp khối của YAML. */
+    static String formatDependencyLine(String name, String version) {
+        return "  " + name + ": '" + validatePackageVersion(version) + "'";
     }
 
     /** Chạy `flutter pub add` trong container để lấy version tương thích (đồng thời validate package tồn tại). */
@@ -2282,7 +2732,7 @@ public class ExamService {
                 out.add("  # Quản lý qua trang \"Thư viện chấm\". 'flutter' là lõi (không xóa).");
                 out.add("  flutter:");
                 out.add("    sdk: flutter");
-                for (String[] d : deps) out.add("  " + d[0] + ": " + d[1]);
+                for (String[] d : deps) out.add(formatDependencyLine(d[0], d[1]));
                 out.add("");
                 // bỏ qua khối dependencies cũ tới section kế (dòng ở cột 0) hoặc hết file
                 i++;

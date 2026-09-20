@@ -10,6 +10,11 @@ export interface SelectMenuOption {
   sublabel?: string;
   /** Chip vuông bên trái mỗi dòng (vd 2 ký tự đầu của mã đề) — bỏ trống thì không vẽ. */
   badge?: string;
+  /**
+   * Dòng vẫn HIỆN nhưng không chọn được. Dùng cho thứ người dùng cần THẤY là nó tồn tại và
+   * vì sao chưa dùng được — lọc khỏi danh sách thì họ đi tìm "cái của tôi đâu rồi".
+   */
+  disabled?: boolean;
 }
 
 interface Props {
@@ -94,12 +99,21 @@ export default function SelectMenu({
 
   const choose = (o: SelectMenuOption) => { onChange(o.value); setOpen(false); };
 
+  /** Mũi tên NHẢY QUA dòng bị tắt; hết dòng chọn được thì đứng yên chứ không kẹt vào nó. */
+  const timChonDuoc = (tu: number, buoc: 1 | -1) => {
+    for (let i = tu; i >= 0 && i < options.length; i += buoc) {
+      if (!options[i].disabled) return i;
+    }
+    return hi;
+  };
+
   const onKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "ArrowDown") { e.preventDefault(); setOpen(true); setHighlight(Math.min(hi + 1, options.length - 1)); }
-    else if (e.key === "ArrowUp") { e.preventDefault(); setOpen(true); setHighlight(Math.max(hi - 1, 0)); }
+    if (e.key === "ArrowDown") { e.preventDefault(); setOpen(true); setHighlight(timChonDuoc(hi + 1, 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setOpen(true); setHighlight(timChonDuoc(hi - 1, -1)); }
     else if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
-      if (open && options[hi]) choose(options[hi]); else setOpen(true);
+      // Bàn phím phải chặn y hệt chuột: tắt bằng CSS mà Enter vẫn chọn được là cửa hậu.
+      if (open && options[hi] && !options[hi].disabled) choose(options[hi]); else setOpen(true);
     } else if (e.key === "Escape") { setOpen(false); }
   };
 
@@ -144,19 +158,25 @@ export default function SelectMenu({
               return (
                 <button
                   type="button" key={o.value} data-idx={i} role="option" aria-selected={isSel}
-                  onMouseEnter={() => setHighlight(i)} onClick={() => choose(o)}
-                  className={`flex w-full items-center gap-3 px-3 py-2 text-left transition-colors ${isHi ? "bg-slate-100" : "hover:bg-slate-50"}`}
+                  disabled={o.disabled} aria-disabled={o.disabled}
+                  onMouseEnter={() => { if (!o.disabled) setHighlight(i); }}
+                  onClick={() => { if (!o.disabled) choose(o); }}
+                  className={`flex w-full items-center gap-3 px-3 py-2 text-left transition-colors ${
+                    o.disabled ? "cursor-not-allowed opacity-50" : isHi ? "bg-slate-100" : "hover:bg-slate-50"
+                  }`}
                 >
                   {o.badge && (
-                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-indigo-50 font-mono text-[11px] font-bold text-indigo-600">
+                    <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md font-mono text-[11px] font-bold ${
+                      o.disabled ? "bg-slate-100 text-slate-400" : "bg-indigo-50 text-indigo-600"
+                    }`}>
                       {o.badge}
                     </span>
                   )}
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-semibold text-slate-700">{o.label}</span>
-                    {o.sublabel && <span className="block truncate text-xs text-slate-400">{o.sublabel}</span>}
+                    <span className={`block truncate text-sm font-semibold ${o.disabled ? "text-slate-400" : "text-slate-700"}`}>{o.label}</span>
+                    {o.sublabel && <span className={`block truncate text-xs ${o.disabled ? "text-rose-500" : "text-slate-400"}`}>{o.sublabel}</span>}
                   </span>
-                  {isSel && <Check size={15} className="shrink-0 text-indigo-500" />}
+                  {isSel && !o.disabled && <Check size={15} className="shrink-0 text-indigo-500" />}
                 </button>
               );
             })

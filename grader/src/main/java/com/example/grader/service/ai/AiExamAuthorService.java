@@ -34,19 +34,12 @@ import java.util.Map;
 public class AiExamAuthorService {
 
     @Autowired private LlmService llm;
-    @Autowired private ExamService exams;
 
     // ── Bước 1: đề bài ───────────────────────────────────────────
 
-    public Map<String, Object> draftExam(Map<String, Object> req, String databaseName,
-                                          List<String> allowedPackages) {
-        // Giữ lời gọi cũ, nhưng lựa chọn khung phát không còn là ngữ cảnh ra đề của AI.
-        return draftExam(req, databaseName);
-    }
-
     public Map<String, Object> draftExam(Map<String, Object> req, String databaseName) {
         JsonNode res = llm.chatJson(List.of(
-                LlmMessage.system(AiPrompts.draftSystem(databaseName, imagePackages())),
+                LlmMessage.system(AiPrompts.draftSystem(databaseName)),
                 LlmMessage.user(AiPrompts.draftUser(req == null ? Map.of() : req))));
         return examResult(res);
     }
@@ -57,13 +50,9 @@ public class AiExamAuthorService {
         if (instruction == null || instruction.isBlank())
             throw new IllegalArgumentException("Hãy nhập yêu cầu chỉnh sửa cho AI.");
         JsonNode res = llm.chatJson(List.of(
-                LlmMessage.system(AiPrompts.reviseSystem() + AiPrompts.packageReference(imagePackages())),
+                LlmMessage.system(AiPrompts.reviseSystem()),
                 LlmMessage.user(AiPrompts.reviseUser(deBai, instruction))));
         return examResult(res);
-    }
-
-    public Map<String, Object> reviseExam(String deBai, String instruction, List<String> allowedPackages) {
-        return reviseExam(deBai, instruction);
     }
 
     private Map<String, Object> examResult(JsonNode res) {
@@ -76,16 +65,12 @@ public class AiExamAuthorService {
         return out;
     }
 
-    private List<String> imagePackages() {
-        return exams.goiCoTrongAnhCham().stream().sorted().toList();
-    }
-
     // ── Bước 2 (MỚI): hình minh họa giao diện ─────────────────────
 
     /**
      * AI đọc mục "3. Hợp đồng giao diện" của đề bài, mô tả MỖI màn hình bằng JSON có cấu trúc
-     * (tiêu đề + danh sách thành phần: app_bar/heading/text/input/button/list_item/card/image/
-     * checkbox/divider) — KHÔNG tự vẽ SVG, vì LLM sinh XML tự do dễ ra thẻ hỏng/không cân đối.
+     * (tiêu đề + danh sách thành phần, xem {@link com.example.grader.service.MockupRenderer.Element})
+     * — KHÔNG tự vẽ SVG, vì LLM sinh XML tự do dễ ra thẻ hỏng/không cân đối.
      * {@link com.example.grader.service.MockupRenderer} vẽ SVG THẬT từ JSON đó, tất định, luôn
      * hợp lệ về cú pháp.
      */
@@ -103,10 +88,18 @@ public class AiExamAuthorService {
             String title = text(screen.path("title"), id);
             List<com.example.grader.service.MockupRenderer.Element> elements = new ArrayList<>();
             for (JsonNode el : screen.path("elements")) {
+                String kieu = text(el.path("type"), "text");
                 String label = text(el.path("label"), "");
-                if (label.isBlank()) continue;
+                // "divider" là thành phần DUY NHẤT có nghĩa khi không có chữ. Mọi loại khác mà
+                // trống nhãn thì vẽ ra một ô rỗng vô nghĩa — bỏ luôn cho đỡ rác màn hình.
+                if (label.isBlank() && !"divider".equals(kieu)) continue;
+                List<String> actions = new ArrayList<>();
+                for (JsonNode a : el.path("actions")) {
+                    String ten = text(a, "");
+                    if (!ten.isBlank()) actions.add(ten);
+                }
                 elements.add(new com.example.grader.service.MockupRenderer.Element(
-                        text(el.path("type"), "text"), label));
+                        kieu, label, text(el.path("sub"), ""), text(el.path("right"), ""), actions));
             }
             if (elements.isEmpty()) continue;
             String svg = com.example.grader.service.MockupRenderer.render(title, elements);

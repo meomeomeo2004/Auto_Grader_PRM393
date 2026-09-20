@@ -53,9 +53,22 @@ public class Exam {
     @Column(name = "status", length = 20)
     private ExamStatus status;
 
-    @Lob
-    @Column(name = "allowed_packages")
-    private String allowedPackages;
+    // BỐN CỘT ĐÃ BỎ (19/9), cùng lúc với màn Kiểm đồng bộ khung phát:
+    //   allowed_packages · starter_check_required · starter_checked_golden_sha · starter_checked_at
+    // Cả bốn đều nullable nên cột mồ côi nằm lại trong DB không cần migration, và cũng không
+    // ai ghi nữa. Package của khung nay lấy thẳng từ Golden; "khung khớp Golden" đúng theo cấu
+    // tạo nên không còn dấu kiểm nào để lưu.
+
+    /**
+     * Vân tay của BỐN THỨ mà bộ sinh khung đọc từ Golden, ghi lại ở LẦN XUẤT GÓI gần nhất:
+     * dependencies + dev_dependencies, database_helper.dart, dinh_danh.dart, tham số MaterialApp.
+     *
+     * <p>Không dùng số version của artifact Golden làm mốc: đo trên 5 bản Golden thật thì 5 lần
+     * nạp chỉ có 1 lần khung thật sự lệch. Lấy version mà kêu thì 3/4 lần là kêu oan, rồi đến
+     * lần thật người dùng cũng bỏ qua.
+     */
+    @Column(name = "khung_van_tay", length = 64)
+    private String khungVanTay;
 
     @Column(name = "created_by", length = 100)
     private String createdBy;
@@ -101,23 +114,8 @@ public class Exam {
     @Column(name = "testcase_published_at")
     private Instant testcasePublishedAt;
 
-    /**
-     * Đề publish từ khi có khâu "kiểm đồng bộ khung phát" thì phải qua khâu đó mới chấm được.
-     * Bộ đề cũ giữ giá trị null/false nên được miễn trừ, không đột ngột biến mất khỏi phần chấm.
-     */
-    @Column(name = "starter_check_required")
-    private Boolean starterCheckRequired;
 
-    /**
-     * sha256 của Golden Solution tại lượt kiểm đồng bộ ĐẠT gần nhất. Sửa Golden rồi publish lại
-     * thì giá trị này lệch, kết quả cũ hết hiệu lực và đề quay về trạng thái chờ kiểm — nếu
-     * không, lần kiểm đầu tiên thành con dấu vĩnh viễn.
-     */
-    @Column(name = "starter_checked_golden_sha", length = 80)
-    private String starterCheckedGoldenSha;
 
-    @Column(name = "starter_checked_at")
-    private Instant starterCheckedAt;
 
     @PrePersist
     protected void onCreate() {

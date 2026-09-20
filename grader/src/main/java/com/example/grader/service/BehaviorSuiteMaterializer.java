@@ -95,11 +95,6 @@ public class BehaviorSuiteMaterializer {
             exam.setTestcasePath(target.toAbsolutePath().toString());
             exam.setStatus(ExamStatus.READY);
             exam.setTestcaseStatus("PUBLISHED");
-            // Từ khâu "kiểm đồng bộ khung phát": mỗi lần publish là một bản Golden mới, nên
-            // kết quả kiểm cũ hết hiệu lực. Đề chỉ hiện lại ở phần chấm sau khi kiểm lại đạt.
-            exam.setStarterCheckRequired(true);
-            exam.setStarterCheckedGoldenSha(null);
-            exam.setStarterCheckedAt(null);
             exam.setTestcaseVersion((exam.getTestcaseVersion() == null ? 0 : exam.getTestcaseVersion()) + 1);
             exam.setTestcasePublishedAt(Instant.now());
             exams.save(exam);
@@ -585,7 +580,21 @@ public class BehaviorSuiteMaterializer {
         contract.put("database_contract", plan.get("database_contract"));
         // Policy của bài nộp chỉ sinh từ chính Golden; cấu hình runtime cũ không còn là nguồn.
         BehaviorArtifact golden = artifacts.active(suiteId, BehaviorArtifactType.GOLDEN_SOLUTION);
-        contract.put("allowed_packages", new ArrayList<>(PubspecDependencies.readZip(Path.of(golden.getStoragePath())).keySet()));
+        Map<String, Object> goi = PubspecDependencies.readZip(Path.of(golden.getStoragePath()));
+        contract.put("allowed_packages", new ArrayList<>(goi.keySet()));
+        // RÀNG BUỘC PHIÊN BẢN đi kèm, ở khoá RIÊNG chứ không nhét vào mảng trên: đường chấm
+        // (`SubmissionPackagePolicy`) đọc `allowed_packages` bằng `asText()` nên đổi phần tử
+        // thành object là mọi tên hoá rỗng và bài nào cũng bị coi là import ngoài luật.
+        //
+        // Bên người chấm cần con số này: họ thiếu package thì phải thêm vào ảnh chấm, mà thêm
+        // không có ràng buộc là để pub tự chọn bản mới nhất — khác bản Golden đã ghi hình thì
+        // giao diện lệch đi một chút cũng đủ trượt hàng loạt tiêu chí vị trí.
+        // Chỉ giữ ràng buộc dạng CHUỖI. Khai kiểu git/path là một khối lồng, không phải thứ
+        // điền được vào ô version của pub — để rỗng cho người chấm tự xử còn hơn đưa họ một
+        // giá trị không dán vào đâu được.
+        Map<String, String> rangBuoc = new LinkedHashMap<>();
+        goi.forEach((ten, v) -> rangBuoc.put(ten, v instanceof String s ? s : ""));
+        contract.put("allowed_package_specs", rangBuoc);
         return contract;
     }
 

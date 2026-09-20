@@ -19,6 +19,7 @@ import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
@@ -35,10 +36,10 @@ import java.util.zip.ZipOutputStream;
  * đời, đọc lại lúc nào cũng được. Danh sách package KHÔNG chép vào tờ khai: contract.json trong
  * gói đã khai rồi, hai chỗ cùng nói một điều là sớm muộn cũng lệch nhau.
  *
- * <p>Điểm cần nhớ nhất: DẤU KIỂM ĐỒNG BỘ KHUNG PHÁT. Bên người chấm không có bảng Golden nên
- * không thể tự kiểm lại — cổng chặn ở đường chấm bài sẽ khóa mọi đề nếu không có đường truyền
- * dấu này sang. Vì thế dấu được ghi vào tờ khai lúc xuất, và {@link StarterSyncService} đọc tờ
- * khai khi máy không có dữ liệu Golden.
+ * <p>Cùng lúc với gói này, bản giảng viên tải luôn KHUNG PHÁT dựng từ chính Golden đang xuất
+ * (xem {@code ExamService#zipKhungPhat}). Hai thứ ra từ một bản Golden trong một thao tác nên
+ * không còn cửa sổ nào để chúng trôi khỏi nhau — đó là lý do màn "Kiểm đồng bộ khung phát" cũ
+ * đã bỏ: nó so khung với Golden, mà khung nay chính là đầu ra của Golden.
  */
 @Service
 public class BanGiaoService {
@@ -55,17 +56,14 @@ public class BanGiaoService {
 
     private final ExamRepository examRepository;
     private final ExamService examService;
-    private final StarterSyncService starterSyncService;
     private final String baseImage;
 
     // Nhận qua hàm dựng để test được mà không cần cả Spring lẫn Docker.
     public BanGiaoService(ExamRepository examRepository,
                           ExamService examService,
-                          StarterSyncService starterSyncService,
                           @Value("${grader.base-image:grading-base:latest}") String baseImage) {
         this.examRepository = examRepository;
         this.examService = examService;
-        this.starterSyncService = starterSyncService;
         this.baseImage = baseImage;
     }
 
@@ -74,24 +72,19 @@ public class BanGiaoService {
     /**
      * Nén bộ chấm của một đề thành gói bàn giao.
      *
-     * <p>Chặn ngay tại đây nếu đề chưa qua kiểm đồng bộ khung phát. Đây là nơi DUY NHẤT còn đủ
-     * dữ kiện để phán: bên người chấm không có Golden nên sang tới đó thì chỉ biết tin vào tờ
-     * khai. Chặn ở đây cũng là chặn đúng người — người sửa được là giảng viên.
+     * <p>Đóng dấu vân tay khung phát vào bản ghi đề: lần xuất sau còn biết Golden đã đổi ở đúng
+     * những chỗ khung lấy về hay chưa, để nhắc giảng viên phát lại khung cho sinh viên.
      */
     public byte[] xuatGoi(String examId) throws Exception {
         Exam exam = examRepository.findByExamId(examId)
                 .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy bộ chấm: " + examId));
 
-        String trangThaiKiem = starterSyncService.trangThai(examId);
-        if (!starterSyncService.chamDuoc(examId)) {
-            throw new IllegalStateException(
-                    "Đề này chưa qua kiểm đồng bộ khung phát (" + trangThaiKiem + ") nên chưa giao được."
-                            + " Nạp gói khung phát cho sinh viên để đối chiếu với Golden, đạt rồi hãy xuất."
-                            + " Xuất lúc này thì bên người chấm cũng không chấm được.");
-        }
+        String vanTay = examService.vanTayKhungPhat(examId);
+        exam.setKhungVanTay(vanTay);
+        examRepository.save(exam);
 
         Path testcase = thuMucTestcase(exam);
-        Map<String, Object> meta = dungToKhai(exam, trangThaiKiem, testcase);
+        Map<String, Object> meta = dungToKhai(exam, vanTay, testcase);
 
         ByteArrayOutputStream ra = new ByteArrayOutputStream();
         try (ZipOutputStream zip = new ZipOutputStream(ra, StandardCharsets.UTF_8)) {
@@ -102,6 +95,13 @@ public class BanGiaoService {
                     // Tờ khai của lần xuất TRƯỚC (nếu bộ này từng được nạp từ gói khác) phải bỏ đi,
                     // nếu không gói mới sẽ mang hai tờ khai và bên kia đọc nhầm tờ cũ.
                     if (ten.equals(TEN_META)) continue;
+                    if (ten.equals("contract.json")) {
+                        zip.putNextEntry(new ZipEntry(ten));
+                        zip.write(hopDongKemPhienBan(examId, Files.readString(p, StandardCharsets.UTF_8))
+                                .getBytes(StandardCharsets.UTF_8));
+                        zip.closeEntry();
+                        continue;
+                    }
                     zip.putNextEntry(new ZipEntry(ten));
                     Files.copy(p, zip);
                     zip.closeEntry();
@@ -113,6 +113,37 @@ public class BanGiaoService {
         }
         log.info("Xuất gói bàn giao {} ({} byte)", examId, ra.size());
         return ra.toByteArray();
+    }
+
+    /**
+     * Bù {@code allowed_package_specs} vào hợp đồng nếu nó còn thiếu, lấy từ dependencies của
+     * Golden đang dùng.
+     *
+     * <p>Vì sao phải bù ở đây: khoá này chỉ có từ 19/9, còn bộ chấm publish trước đó chỉ ghi
+     * TÊN gói. Bên người chấm thiếu gói thì phải thêm vào ảnh, mà version nay là bắt buộc —
+     * không có ràng buộc thì họ phải tự đoán, mà đoán sai chính là thứ luật bắt buộc kia sinh
+     * ra để chặn. Bù lúc xuất thì bộ cũ dùng được ngay, không bắt giảng viên publish lại.
+     *
+     * <p>Chỉ sửa BẢN TRONG GÓI, không ghi đè contract.json trên đĩa: thư mục testcase đã xuất
+     * bản là bản gốc, lần publish sau sẽ tự sinh lại đầy đủ.
+     */
+    private String hopDongKemPhienBan(String examId, String goc) {
+        try {
+            Map<String, Object> hopDong = mapper.readValue(goc, LinkedHashMap.class);
+            Object daCo = hopDong.get("allowed_package_specs");
+            if (daCo instanceof Map<?, ?> m && !m.isEmpty()) return goc;
+            Map<String, Object> deps = examService.starterDependencies(examId);
+            if (deps.isEmpty()) return goc;
+            Map<String, String> spec = new LinkedHashMap<>();
+            deps.forEach((ten, v) -> spec.put(ten, v instanceof String s ? s : ""));
+            hopDong.put("allowed_package_specs", spec);
+            return mapper.writerWithDefaultPrettyPrinter().writeValueAsString(hopDong);
+        } catch (Exception e) {
+            // Không đọc được Golden (bộ cũ, artifact đã dọn) thì giao hợp đồng nguyên trạng —
+            // thiếu version còn hơn hỏng cả gói bàn giao.
+            log.warn("Không bù được ràng buộc phiên bản vào contract.json của {}: {}", examId, e.toString());
+            return goc;
+        }
     }
 
     /** Tên file gợi ý cho trình duyệt khi tải gói về. */
@@ -132,13 +163,7 @@ public class BanGiaoService {
         return p;
     }
 
-    private Map<String, Object> dungToKhai(Exam exam, String trangThaiKiem, Path testcase) {
-        Map<String, Object> dauKiem = new LinkedHashMap<>();
-        dauKiem.put("state", trangThaiKiem);
-        dauKiem.put("golden_sha", exam.getStarterCheckedGoldenSha());
-        dauKiem.put("checked_at", exam.getStarterCheckedAt() == null
-                ? null : exam.getStarterCheckedAt().toString());
-
+    private Map<String, Object> dungToKhai(Exam exam, String vanTayKhung, Path testcase) {
         Map<String, Object> meta = new LinkedHashMap<>();
         meta.put("schema_version", 1);
         meta.put("exam_id", exam.getExamId());
@@ -150,7 +175,9 @@ public class BanGiaoService {
         // Vân tay của engine chấm nằm trong gói — để khi điểm hai bên lệch nhau còn biết có phải
         // do khác engine hay không, thay vì đoán.
         meta.put("engine_sha256", vanTayEngine(testcase));
-        meta.put("starter_check", dauKiem);
+        // Vân tay của khung phát đi kèm lần xuất này — bên người chấm không dùng để chặn gì,
+        // nhưng khi hai bên nghi ngờ nhau thì đây là con số đối chiếu được.
+        meta.put("khung_van_tay", vanTayKhung);
         meta.put("exported_at", Instant.now().toString());
         return meta;
     }
@@ -174,9 +201,19 @@ public class BanGiaoService {
     // ==================== NẠP (bản người chấm) ====================
 
     /**
-     * Nạp gói bàn giao: dựng lại đề y như bên giảng viên rồi chép dấu kiểm đồng bộ sang.
+     * Nạp gói bàn giao: dựng lại đề y như bên giảng viên.
      *
-     * @return tóm tắt để giao diện nói được đã nhận đề nào và còn thiếu package gì.
+     * <p>CHẶN TRƯỚC KHI DỰNG nếu ảnh chấm trên máy này thiếu package mà hợp đồng đòi. Trước
+     * 19/9 chỗ này chỉ cảnh báo rồi vẫn dựng: bộ chấm hiện ngay trong danh sách, chọn đi chấm
+     * được, mà mọi bài sẽ không biên dịch nổi — còn lời cảnh báo thì mất ngay khi đổi màn. Một
+     * bộ không chấm được thì đừng để nó tồn tại trông như chấm được.
+     *
+     * <p>Đọc hợp đồng THẲNG TRONG ZIP chứ không dựng rồi kiểm rồi xoá: dựng lên là đã ghi bản
+     * ghi đề và đổ file ra đĩa, xoá ngược lại luôn có đường hụt.
+     *
+     * @return tóm tắt để giao diện nói được đã nhận đề nào.
+     * @throws PackageAvailabilityException ảnh chấm thiếu package — kèm tên và ràng buộc phiên
+     *         bản để màn Thư viện chấm mở sẵn đúng những gói đó.
      */
     public synchronized Map<String, Object> nhapGoi(byte[] zipBytes) throws Exception {
         if (zipBytes == null || zipBytes.length == 0)
@@ -193,6 +230,8 @@ public class BanGiaoService {
         if (examId.isBlank())
             throw new IllegalArgumentException("Tờ khai trong gói không ghi mã đề.");
 
+        chanNeuAnhChamThieuGoi(zipBytes);
+
         // Dùng lại đúng đường nạp testcase cũ: giải nén, kiểm tra đủ file, chuẩn hóa tên test,
         // ghi bản ghi đề và chuẩn bị sandbox. Không viết lại khâu nào.
         examService.setupExamFromZipBytes(examId, chuoi(meta.get("exam_name")),
@@ -200,53 +239,61 @@ public class BanGiaoService {
 
         Exam exam = examRepository.findByExamId(examId)
                 .orElseThrow(() -> new IllegalStateException("Nạp xong nhưng không thấy bản ghi đề " + examId));
-        chepDauKiem(exam, meta);
-        examRepository.save(exam);
 
         Map<String, Object> ra = new LinkedHashMap<>();
         ra.put("exam_id", examId);
         ra.put("exam_name", exam.getExamName());
         ra.put("base_image_cua_goi", meta.get("base_image"));
         ra.put("base_image_may_nay", baseImage);
-        ra.put("starter_check", meta.get("starter_check"));
-        ra.put("cham_duoc", starterSyncService.chamDuoc(examId));
-        ra.put("goi_thieu", examService.goiConThieuCuaDe(examId));
+        ra.put("khung_van_tay", meta.get("khung_van_tay"));
         return ra;
     }
 
     /**
-     * Chép dấu kiểm đồng bộ từ tờ khai sang bản ghi đề.
+     * Ảnh chấm máy này thiếu package đề đòi thì từ chối cả gói.
      *
-     * <p>EXEMPT là bộ publish từ trước khi có khâu kiểm — giữ nguyên diện miễn trừ, không tự
-     * dựng thêm rào cho bộ đang chạy. Còn lại thì giữ nguyên yêu cầu kiểm và ghi lại vân tay
-     * Golden đã kiểm; bên này không có Golden để đổi nên dấu đó là bất biến.
+     * <p>Không đọc được ảnh chấm ({@code goiCoTrongAnhCham} trả tập rỗng) thì CHO QUA: "không
+     * biết" phải khác "ảnh không có gì", nếu không thì Docker chưa chạy là chặn oan mọi gói.
      */
-    private void chepDauKiem(Exam exam, Map<String, Object> meta) {
-        Map<?, ?> dau = meta.get("starter_check") instanceof Map<?, ?> m ? m : Map.of();
-        String state = chuoi(dau.get("state"));
-        if (StarterSyncService.MIEN_TRU.equals(state)) {
-            exam.setStarterCheckRequired(false);
+    private void chanNeuAnhChamThieuGoi(byte[] zipBytes) throws IOException {
+        Set<String> coSan = examService.goiCoTrongAnhCham();
+        if (coSan.isEmpty()) return;
+        String contract = docTepTrongZip(zipBytes, "contract.json");
+        if (contract == null) return;
+        Map<String, String> deCan;
+        try {
+            deCan = ExamService.goiDeCanTrongHopDong(contract);
+        } catch (Exception e) {
+            log.warn("Gói bàn giao có contract.json không đọc được, bỏ qua phép kiểm package: {}", e.toString());
             return;
         }
-        exam.setStarterCheckRequired(true);
-        exam.setStarterCheckedGoldenSha(chuoi(dau.get("golden_sha")));
-        String luc = chuoi(dau.get("checked_at"));
-        if (!luc.isBlank()) {
-            try { exam.setStarterCheckedAt(Instant.parse(luc)); }
-            catch (Exception ignored) { /* mốc thời gian hỏng không đáng chặn cả lần nạp */ }
-        }
+        Map<String, Object> thieu = new LinkedHashMap<>();
+        deCan.forEach((ten, rangBuoc) -> {
+            if (!coSan.contains(ten)) thieu.put(ten, rangBuoc);
+        });
+        if (!thieu.isEmpty()) throw new PackageAvailabilityException(thieu,
+                "Ảnh chấm máy này chưa có package mà bộ chấm đòi: " + String.join(", ", thieu.keySet())
+                        + ". Gói CHƯA được nhận. Sang Thư viện chấm thêm đúng những gói đó, dựng lại"
+                        + " ảnh chấm, rồi nạp lại gói này.");
     }
 
     /** Đọc tờ khai từ trong zip mà không giải nén cả gói ra đĩa. */
     private Map<String, Object> docToKhai(byte[] zipBytes) throws IOException {
+        String noiDung = docTepTrongZip(zipBytes, TEN_META);
+        return noiDung == null ? null : mapper.readValue(noiDung, Map.class);
+    }
+
+    /** Một file văn bản ở GỐC gói, đọc thẳng từ luồng zip. null = gói không có file đó. */
+    private String docTepTrongZip(byte[] zipBytes, String tenCanTim) throws IOException {
         try (ZipInputStream zin = new ZipInputStream(new ByteArrayInputStream(zipBytes), StandardCharsets.UTF_8)) {
             ZipEntry e;
             while ((e = zin.getNextEntry()) != null) {
                 if (e.isDirectory()) continue;
                 String ten = e.getName().replace('\\', '/');
-                if (!ten.equals(TEN_META)) continue;
-                byte[] noiDung = zin.readNBytes(1024 * 1024);   // tờ khai không thể to hơn thế
-                return mapper.readValue(noiDung, Map.class);
+                if (!ten.equals(tenCanTim)) continue;
+                // Chặn trên 1 MB: cả tờ khai lẫn hợp đồng đều là JSON nhỏ. Gói lạ khai một file
+                // cùng tên mà khổng lồ thì đây là chỗ nó nuốt hết bộ nhớ.
+                return new String(zin.readNBytes(1024 * 1024), StandardCharsets.UTF_8);
             }
         }
         return null;

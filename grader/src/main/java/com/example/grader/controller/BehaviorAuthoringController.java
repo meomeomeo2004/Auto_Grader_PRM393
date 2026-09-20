@@ -333,6 +333,9 @@ public class BehaviorAuthoringController {
         return call(() -> {
             requireGoldenRuntimeReady(id);
             artifactService.requireComplete(id);
+            // Trước requirePassed và trước service.publish: phép kiểm này đọc file nên rẻ nhất trong
+            // chuỗi, mà nếu để sau publish() thì bộ chấm đã bị đánh dấu PUBLISHED rồi mới chết.
+            staticRuleService.requireDinhDanhNhatQuan(id);
             validationService.requirePassed(id);
             Map<String, Object> published = service.publish(id);
             Map<String, Object> artifact = materializer.materialize(id);
@@ -431,6 +434,16 @@ public class BehaviorAuthoringController {
             Map<String, Object> artifact = artifactService.upload(id, type, file, metadata);
             if (type == BehaviorArtifactType.GOLDEN_SOLUTION) {
                 service.markGoldenSolutionReady(id, artifact);
+                // Cảnh báo SỚM, không chặn: lúc này Golden còn đang mở trong trình soạn thảo, sửa
+                // một dòng là xong. Cũng phép kiểm ấy sẽ CHẶN ở publish (requireDinhDanhNhatQuan);
+                // để tới đó mới báo thì người soạn đã ghi hình và chụp oracle xong, sửa Golden là
+                // phải làm lại từ đầu.
+                List<String> canhBao = staticRuleService.kiemDinhDanh(id);
+                if (!canhBao.isEmpty()) {
+                    Map<String, Object> kemCanhBao = new LinkedHashMap<>(artifact);
+                    kemCanhBao.put("canh_bao_dinh_danh", canhBao);
+                    return kemCanhBao;
+                }
             } else if (type == BehaviorArtifactType.HIDDEN_DATABASE) {
                 service.invalidateSuiteOracles(id);
             }

@@ -50,6 +50,11 @@ public class ExamCatalogController {
     public ResponseEntity<?> nhapGoiBanGiao(@RequestPart("file") MultipartFile file) {
         try {
             return ResponseEntity.ok(banGiaoService.nhapGoi(file.getBytes()));
+        } catch (com.example.grader.service.PackageAvailabilityException e) {
+            // PHẢI đứng trước IllegalArgumentException (nó là con của lớp đó): nhánh dưới chỉ
+            // trả mỗi câu chữ, mất danh sách gói và ràng buộc phiên bản mà màn hình cần để mở
+            // sẵn đúng những gói đó bên Thư viện chấm.
+            return ResponseEntity.badRequest().body(e.response());
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         } catch (IllegalStateException e) {

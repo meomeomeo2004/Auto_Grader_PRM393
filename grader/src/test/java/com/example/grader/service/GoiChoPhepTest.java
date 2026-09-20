@@ -79,4 +79,78 @@ class GoiChoPhepTest {
         assertTrue(ExamService.goiTuLock("packages:\n").isEmpty());
         assertTrue(ExamService.goiTuLock("khong-phai-lock").isEmpty());
     }
+
+    // ==================== ĐỌC GÓI ĐỀ ĐÒI TỪ HỢP ĐỒNG ====================
+
+    @Test
+    void hopDongDoiCuChiCoTenThiRangBuocDeRong_khongPhaiLoi() throws Exception {
+        var ra = ExamService.goiDeCanTrongHopDong("{\"allowed_packages\":[\"intl\",\"dio\"]}");
+
+        assertEquals(Set.of("intl", "dio"), ra.keySet());
+        assertEquals("", ra.get("intl"), "bộ xuất bản trước 19/9 không có ràng buộc, đó là bình thường");
+    }
+
+    @Test
+    void hopDongMoiMangTheoRangBuocPhienBan() throws Exception {
+        var ra = ExamService.goiDeCanTrongHopDong("""
+                {"allowed_packages":["intl","dio"],
+                 "allowed_package_specs":{"intl":"^0.19.0","dio":"^5.7.0"}}""");
+
+        assertEquals("^0.19.0", ra.get("intl"));
+        assertEquals("^5.7.0", ra.get("dio"));
+    }
+
+    @Test
+    void goiChiCoOKhoiSpecVanDuocTinhLaDeDoi() throws Exception {
+        var ra = ExamService.goiDeCanTrongHopDong(
+                "{\"allowed_packages\":[\"intl\"],\"allowed_package_specs\":{\"go_router\":\"^14.0.0\"}}");
+
+        assertEquals(Set.of("intl", "go_router"), ra.keySet());
+    }
+
+    @Test
+    void hopDongKhongCoKhoaNaoThiTraVeRong_khongNem() throws Exception {
+        assertTrue(ExamService.goiDeCanTrongHopDong("{}").isEmpty());
+        assertTrue(ExamService.goiDeCanTrongHopDong("{\"allowed_packages\":\"khong-phai-mang\"}").isEmpty());
+    }
+
+    // ==================== VERSION LÀ BẮT BUỘC ====================
+
+    /**
+     * Chặn ở BACKEND chứ không chỉ ở ô nhập: giao diện là lời nhắc, cổng thật phải nằm đây.
+     *
+     * <p>Ca thật dẫn tới luật này (19/9): ảnh chấm có {@code go_router ^17.5.0} trong khi Golden
+     * khai {@code ^14.7.1} — thêm gói mà bỏ trống version nên pub lấy bản mới nhất. Lệch ba
+     * major, và không ai nhận ra cho tới lúc điểm sai.
+     */
+    @Test
+    void themPackageMaBoTrongVersionThiTuChoi() {
+        ExamService s = new ExamService();
+
+        IllegalArgumentException loi = assertThrows(IllegalArgumentException.class,
+                () -> s.applyPackages(java.util.List.of(java.util.Map.of("name", "dio", "version", ""))));
+
+        assertTrue(loi.getMessage().contains("dio"), loi.getMessage());
+        assertTrue(loi.getMessage().contains("version"), loi.getMessage());
+    }
+
+    @Test
+    void thieuHanTruongVersionCungBiTuChoi() {
+        ExamService s = new ExamService();
+
+        assertThrows(IllegalArgumentException.class,
+                () -> s.applyPackages(java.util.List.of(java.util.Map.of("name", "dio"))));
+    }
+
+    @Test
+    void motGoiHopLeMaGoiKhacTrongVersionThiCaLuotBiChan() {
+        ExamService s = new ExamService();
+
+        IllegalArgumentException loi = assertThrows(IllegalArgumentException.class,
+                () -> s.applyPackages(java.util.List.of(
+                        java.util.Map.of("name", "intl", "version", "^0.20.2"),
+                        java.util.Map.of("name", "go_router", "version", "  "))));
+
+        assertTrue(loi.getMessage().contains("go_router"), loi.getMessage());
+    }
 }

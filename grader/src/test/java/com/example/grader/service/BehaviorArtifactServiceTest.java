@@ -19,6 +19,7 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -163,7 +164,9 @@ class BehaviorArtifactServiceTest {
         var error = assertThrows(PackageAvailabilityException.class,
                 () -> uploadGolden("const databaseName = 'new.db';"));
         assertEquals(List.of("path"), error.response().get("missing_packages"));
-        assertEquals("/teacher/libraries?packages=path", error.response().get("library_url"));
+        assertEquals(List.of(Map.of("name", "path", "version", "^1.9.0")),
+                error.response().get("missing_package_specs"));
+        assertNull(error.response().get("library_url"), "library_url da bo: khong ai doc toi");
         assertEquals(1, stored.size());
         assertTrue(stored.get(0).getActive());
         assertTrue(suite.getDatabaseContractJson().contains("grader.db"));
@@ -248,6 +251,43 @@ class BehaviorArtifactServiceTest {
                 new java.util.HashSet<>(checkpoints.stream()
                         .map(row -> String.valueOf(row.get("operation"))).toList()));
         assertTrue(checkpoints.stream().allMatch(row -> "database_observation".equals(row.get("kind"))));
+    }
+
+    /** Khai mot goi ma khong import: khung phat se bat sinh vien tai ve thu vien vo dung. */
+    @Test
+    void canhBaoKhiGoldenKhaiPackageMaKhongImport() throws Exception {
+        Map<String, Object> ra = napGolden("  path: ^1.9.0\n", "void main() {}\n");
+
+        assertEquals(
+                List.of("Golden khai package nhung khong import: path"
+                        + ". Bo khoi pubspec.yaml de khung phat khong mang thua thu vien."),
+                ra.get("canh_bao"));
+    }
+
+    @Test
+    void khongCanhBaoKhiGoiDuocKhaiVaCoImport() throws Exception {
+        Map<String, Object> ra = napGolden("  path: ^1.9.0\n",
+                "import 'package:path/path.dart';\nvoid main() {}\n");
+
+        assertNull(ra.get("canh_bao"), "khai va co dung thi khong duoc keu");
+    }
+
+    /** flutter la goi loi, khong bao gio bi coi la khai thua du main.dart khong import. */
+    @Test
+    void khongCanhBaoRiengGoiLoiFlutter() throws Exception {
+        Map<String, Object> ra = napGolden("", "void main() {}\n");
+
+        assertNull(ra.get("canh_bao"));
+    }
+
+    private Map<String, Object> napGolden(String khaiThem, String nguon) throws Exception {
+        Path zip = tempDir.resolve("golden-canh-bao.zip");
+        try (var out = new java.util.zip.ZipOutputStream(Files.newOutputStream(zip))) {
+            putEntry(out, "lib/main.dart", nguon + "const databaseName = 'grader.db';\n");
+            putEntry(out, "pubspec.yaml", "dependencies:\n  flutter: {sdk: flutter}\n" + khaiThem);
+        }
+        return service.upload("suite-1", BehaviorArtifactType.GOLDEN_SOLUTION,
+                new MockMultipartFile("file", "golden.zip", "application/zip", Files.readAllBytes(zip)), "{}");
     }
 
     @Test
