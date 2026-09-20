@@ -880,9 +880,6 @@ function BehaviorAuthoringEditor() {
   // liệt kê được chúng (không nhãn thì không thành một dòng tick), mà đúng chúng mới là
   // đích của tiêu chí bố cục.
   const [dinhDanhTrenMan, setDinhDanhTrenMan] = useState<string[]>([]);
-  /** Lệch định danh backend trả về ngay lúc tải Golden lên. Ở lại tới lần tải sau chứ không
-   *  phải toast: đây là việc phải sửa, mà sửa xong mới tải lại được. */
-  const [canhBaoDinhDanh, setCanhBaoDinhDanh] = useState<string[]>([]);
   // KHÔNG điền sẵn: mã/tên luồng là danh tính của tiêu chí trong bảng điểm,
   // để mặc định thì mọi bộ chấm đều đầy "MAIN_FLOW/Luồng chính" vô nghĩa.
   const [scenarioCode, setScenarioCode] = useState("");
@@ -1180,24 +1177,14 @@ function BehaviorAuthoringEditor() {
     run(`upload-${type}`, async () => {
       const form = new FormData();
       form.append("file", file);
-      let ketQua: JsonMap = {};
       try {
-        ketQua = await api<JsonMap>(`/behavior-authoring/suites/${suite.id}/artifacts/${type}`, { method: "POST", body: form });
+        await api(`/behavior-authoring/suites/${suite.id}/artifacts/${type}`, { method: "POST", body: form });
       } catch (caught) {
         const missing = (caught as Error & { missingPackages?: MissingPackageSpec[] }).missingPackages;
         if (type === "GOLDEN_SOLUTION" && missing?.length) setMissingGoldenPackages(missing);
         throw caught;
       }
       await refresh(suite.id);
-      if (type === "GOLDEN_SOLUTION") {
-        const canhBao = Array.isArray(ketQua?.canh_bao_dinh_danh)
-          ? (ketQua.canh_bao_dinh_danh as string[]) : [];
-        setCanhBaoDinhDanh(canhBao);
-        if (canhBao.length) {
-          setNotice(`Đã lưu ${file.name}, nhưng định danh còn ${canhBao.length} chỗ lệch — xem cảnh báo dưới ô Golden Solution.`);
-          return;
-        }
-      }
       setNotice(`Đã lưu ${file.name} thành version mới của ${type}.`);
     });
   };
@@ -2021,25 +2008,14 @@ function BehaviorAuthoringEditor() {
     });
   };
 
-  /**
-   * Khai giá trị nhập cho một bước gõ chữ.
-   *
-   * Đây là nguồn sự thật duy nhất cho nội dung gõ: recorder chỉ ghi được cú chạm vào ô,
-   * còn đọc chữ từ DOM của Flutter Web đã hỏng đủ ba kiểu (cắt cụt, mất trắng, nhầm ô)
-   * vì Flutter tráo phần tử input giữa chừng và xoá value khi rời ô.
-   */
-  const suaGiaTriEvent = async (sequence: number, value: string) => {
-    const recordingId = activeRecordingId.current;
-    if (!recordingId || !suite) return;
-    try {
-      await api(`/behavior-authoring/recordings/${recordingId}/events/${sequence}`, {
-        method: "PUT", body: JSON.stringify({ value }),
-      });
-      await refresh(suite.id);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    }
-  };
+  // ĐÃ GỠ suaGiaTriEvent (20/9/2026): ô cho sửa tay nội dung của một bước gõ chữ.
+  //
+  // Nó có từ thời recorder chưa đọc được chữ từ DOM Flutter Web. Nay đường đọc đã có ba
+  // nguồn (input còn sống -> node semantics -> snapshot cuối của event input) và đo trên
+  // Golden thật ngày 20/9 thì vào đủ, không mất dấu tiếng Việt: "Mua đèn học", "55000".
+  //
+  // Giữ ô sửa tay thì mở đúng một đường cho plan lệch khỏi thứ người soạn thật sự làm trên
+  // app — mà đó là thứ duy nhất bộ chấm được phép mô tả. Ghi sai thì xóa bước rồi gõ lại.
 
   const deleteRecordedEvent = (sequence: number) => {
     const recordingId = activeRecordingId.current;
@@ -2597,20 +2573,6 @@ function BehaviorAuthoringEditor() {
                     <label className={`inline-flex shrink-0 items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold dark:border-slate-700 ${busy ? "cursor-not-allowed opacity-50" : "cursor-pointer hover:border-indigo-400 hover:text-indigo-600"}`}>{uploading ? <Loader2 size={15} className="animate-spin" /> : <UploadCloud size={15} />} {current ? "Thay file" : "Tải file"}<input aria-label={`Tải ${item.title.replace(/^\d+\.\s*/, "")}`} type="file" accept={item.accept} disabled={Boolean(busy)} className="hidden" onChange={(e) => { const file = e.target.files?.[0]; e.target.value = ""; if (file) uploadArtifact(item.type, file); }} /></label>
                   </div>
                   {item.type === "GOLDEN_SOLUTION" && current && <p className="mt-2 text-xs text-slate-500">Database: {databaseName ? <code className="break-all font-semibold text-slate-700 dark:text-slate-300">{databaseName}</code> : <span className="text-amber-600">Chưa xác định — hãy tải lại ZIP Golden</span>}<span className="ml-2 text-slate-400">· Tự động nhận diện</span></p>}
-                  {/* Cảnh báo SỚM, không chặn tải lên. Cùng phép kiểm ấy sẽ CHẶN lúc publish. */}
-                  {item.type === "GOLDEN_SOLUTION" && canhBaoDinhDanh.length > 0 && (
-                    <div className="mt-3 rounded-lg border border-amber-400 bg-amber-50 p-3 dark:border-amber-700 dark:bg-amber-950/40">
-                      <p className="flex items-center gap-1.5 text-xs font-bold text-amber-800 dark:text-amber-200">
-                        <XCircle size={14} className="shrink-0" /> Định danh còn {canhBaoDinhDanh.length} chỗ lệch — sẽ chặn lúc publish
-                      </p>
-                      <ul className="mt-2 space-y-1.5">
-                        {canhBaoDinhDanh.map((dong, i) => (
-                          <li key={i} className="text-xs leading-relaxed text-amber-800 dark:text-amber-200">• {dong}</li>
-                        ))}
-                      </ul>
-                      <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">Sửa trong Golden rồi tải lại ZIP. Sửa bây giờ rẻ hơn sửa sau khi đã ghi hình và chụp oracle.</p>
-                    </div>
-                  )}
                 </div>;
               })}
             </div>
@@ -3000,14 +2962,13 @@ function BehaviorAuthoringEditor() {
                     {(hienGiaTri || deltaText || expectation) && <div className="mt-2 grid gap-1.5 pl-8 text-slate-600 dark:text-slate-300">
                       {hienGiaTri && <div className="flex min-w-0 items-start gap-2">
                         <span className="w-20 shrink-0 text-slate-400">Giá trị nhập</span>
-                        {laGoChu ? <input
-                          defaultValue={String(item.value || "")}
-                          placeholder="Gõ nội dung cho ô này"
-                          title="Nội dung sẽ được gõ vào ô này lúc chấm. Sửa ở đây nếu recorder ghi chưa đúng."
-                          onBlur={(e) => { const v = e.target.value; if (v !== String(item.value || "")) void suaGiaTriEvent(sequence, v); }}
-                          onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
-                          className={`w-64 shrink-0 rounded border bg-transparent px-2 py-1 ${String(item.value || "").trim() ? "border-slate-300 dark:border-slate-600" : "border-amber-400"}`}
-                        /> : <span className="min-w-0 break-words font-semibold text-slate-700 dark:text-slate-200">{giaTri}</span>}
+                        {/* CHỈ HIỂN THỊ, không sửa được. Recorder đọc đúng nội dung đã gõ (đo
+                            20/9/2026 trên Golden thật: "Mua đèn học" và "55000" vào đủ, không
+                            mất dấu), nên một ô cho sửa tay chỉ mở đường cho plan lệch khỏi thứ
+                            người soạn thật sự làm trên app. Ghi sai thì ghi lại bước đó. */}
+                        {laGoChu && !String(item.value || "").trim()
+                          ? <span className="min-w-0 break-words font-semibold text-rose-600 dark:text-rose-400">(recorder không đọc được nội dung — ghi lại bước này)</span>
+                          : <span className="min-w-0 break-words font-semibold text-slate-700 dark:text-slate-200">{giaTri}</span>}
                       </div>}
                       {deltaText && <div className="flex min-w-0 items-start gap-2"><span className="w-20 shrink-0 text-slate-400">Độ cuộn</span><span>{deltaText}</span></div>}
                       {expectation && <div className="flex min-w-0 items-start gap-2"><span className="w-20 shrink-0 text-slate-400">Kỳ vọng</span><span className="min-w-0 break-words">{expectation}</span></div>}
@@ -3015,7 +2976,7 @@ function BehaviorAuthoringEditor() {
                   </div>;
                 })}</div>
                 {recording.status === "STOPPED" && error && <div className="mt-4 rounded-xl border border-rose-300 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-200">Không thể sinh testcase: {error}. Phiên vẫn được giữ để bạn thử lại hoặc hủy.</div>}
-                {buocThieuGiaTri > 0 && <p className="mt-3 rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-200">Còn {buocThieuGiaTri} bước gõ chữ chưa khai nội dung (ô viền đỏ ở trên). Điền xong mới sinh được testcase — nếu để trống, lúc chấm sẽ gõ chuỗi rỗng và mọi tiêu chí phía sau trượt theo.</p>}
+                {buocThieuGiaTri > 0 && <p className="mt-3 rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-200">Còn {buocThieuGiaTri} bước gõ chữ không đọc được nội dung (dòng đỏ ở trên). Xóa bước đó rồi gõ lại trên Golden — để trống thì lúc chấm sẽ gõ chuỗi rỗng và mọi tiêu chí phía sau trượt theo.</p>}
                 <div className="mt-4 flex flex-wrap gap-2"><button onClick={stopAndAbstract} disabled={Boolean(busy) || buocThieuGiaTri > 0} className="inline-flex items-center gap-2 rounded-xl bg-slate-800 px-4 py-2.5 font-bold text-white disabled:opacity-40 dark:bg-slate-700">{busy === "record-stop" ? <Loader2 size={17} className="animate-spin" /> : <Square size={17} />} {busy === "record-stop" ? "Đang replay Golden và sinh Output DB…" : recording.status === "STOPPED" ? "Thử sinh testcase lại" : editingScenarioId ? "Lưu sửa đổi và sinh lại testcase" : "Dừng, capture oracle và sinh testcase"}</button><button onClick={cancelActiveRecording} disabled={Boolean(busy)} className="rounded-xl border border-rose-300 px-4 py-2.5 font-bold text-rose-600 disabled:opacity-40 dark:border-rose-900">{editingScenarioId ? "Cancel" : "Cancel"}</button></div>
               </>}
             </div>

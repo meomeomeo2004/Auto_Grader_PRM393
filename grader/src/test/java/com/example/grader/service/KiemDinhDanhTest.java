@@ -66,37 +66,71 @@ class KiemDinhDanhTest {
     @Test
     @DisplayName("Golden khai và gắn khớp nhau thì không kêu gì")
     void goldenDungThiImLang() {
-        assertThat(KiemDinhDanh.kiem(nguon(KHAI, MAN_HINH))).isEmpty();
+        assertThat(KiemDinhDanh.kiem(nguon(KHAI, MAN_HINH)).coLech()).isFalse();
     }
 
     @Test
     @DisplayName("Hằng số khai thêm mà không widget nào dùng thì bị bắt")
     void khaiMaKhongGan() {
         String khaiThua = KHAI.replace("}", "  static const String formLuu = 'chi_tieu.form.luu';\n}");
-        List<String> loi = KiemDinhDanh.kiem(nguon(khaiThua, MAN_HINH));
-        assertThat(loi).hasSize(1);
-        assertThat(loi.get(0)).contains("KHAI MÀ KHÔNG GẮN").contains("DinhDanh.formLuu");
+        KiemDinhDanh.KetQua kq = KiemDinhDanh.kiem(nguon(khaiThua, MAN_HINH));
+        assertThat(kq.khaiMaKhongGan()).containsExactly("DinhDanh.formLuu");
+        assertThat(kq.ganMaKhongKhai()).isEmpty();
+        assertThat(kq.goThangGiaTri()).isEmpty();
     }
 
     @Test
-    @DisplayName("Gõ thẳng chuỗi vào identifier: thay vì đi qua lớp hằng số thì bị bắt")
-    void ganMaKhongKhai() {
+    @DisplayName("Gõ thẳng ĐÚNG giá trị của hằng số đã khai — báo MỘT lỗi, không tách làm hai")
+    void goThangGiaTriDaKhai() {
         String goTay = MAN_HINH.replace("identifier: DinhDanh.formTieuDe",
                 "identifier: 'chi_tieu.form.tieu_de'");
-        List<String> loi = KiemDinhDanh.kiem(nguon(KHAI, goTay));
-        // formTieuDe thanh khai ma khong gan, va chuoi go tay thanh gan ma khong khai.
-        assertThat(loi).hasSize(2);
-        assertThat(String.join("\n", loi))
-                .contains("GẮN MÀ KHÔNG KHAI")
-                .contains("chi_tieu.form.tieu_de");
+        KiemDinhDanh.KetQua kq = KiemDinhDanh.kiem(nguon(KHAI, goTay));
+        assertThat(kq.goThangGiaTri()).containsExactly("DinhDanh.formTieuDe");
+        // Chỉ có MỘT dòng phải sửa, nên hai vế kia phải im.
+        assertThat(kq.khaiMaKhongGan()).isEmpty();
+        assertThat(kq.ganMaKhongKhai()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("Gõ thẳng giá trị sinh từ hằng số CÓ THAM SỐ cũng nhận ra đúng hằng số đó")
+    void goThangGiaTriCoThamSo() {
+        String goTay = MAN_HINH.replace("identifier: DinhDanh.dong(e.id ?? 0)",
+                "identifier: 'chi_tieu.dong.6'");
+        KiemDinhDanh.KetQua kq = KiemDinhDanh.kiem(nguon(KHAI, goTay));
+        assertThat(kq.goThangGiaTri()).containsExactly("DinhDanh.dong");
+        assertThat(kq.ganMaKhongKhai()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("Gõ thẳng chuỗi KHÔNG hằng số nào mang thì vẫn là gắn-mà-không-khai")
+    void ganMaKhongKhai() {
+        String goTay = MAN_HINH.replace("identifier: DinhDanh.formTieuDe",
+                "identifier: 'chi_tieu.khong_ai_khai'");
+        KiemDinhDanh.KetQua kq = KiemDinhDanh.kiem(nguon(KHAI, goTay));
+        assertThat(kq.ganMaKhongKhai()).containsExactly("'chi_tieu.khong_ai_khai'");
+        assertThat(kq.khaiMaKhongGan()).containsExactly("DinhDanh.formTieuDe");
+        assertThat(kq.goThangGiaTri()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("Câu báo ngắn gọn đủ nói sửa cái gì, và chỉ một dòng")
+    void cauBaoNganGon() {
+        String goTay = MAN_HINH.replace("identifier: DinhDanh.formTieuDe",
+                "identifier: 'chi_tieu.form.tieu_de'");
+        String gon = KiemDinhDanh.kiem(nguon(KHAI, goTay)).gon();
+        assertThat(gon).doesNotContain("\n");
+        assertThat(gon).contains("gõ thẳng giá trị thay vì dùng hằng số: DinhDanh.formTieuDe");
+        assertThat(gon).doesNotContain("khai mà không gắn");
     }
 
     @Test
     @DisplayName("Golden thiếu hẳn dinh_danh.dart thì báo đúng một câu, không đổ ra hàng loạt")
     void thieuTepKhai() {
-        List<String> loi = KiemDinhDanh.kiem(nguon(null, MAN_HINH));
-        assertThat(loi).hasSize(1);
-        assertThat(loi.get(0)).contains("lib/dinh_danh.dart");
+        KiemDinhDanh.KetQua kq = KiemDinhDanh.kiem(nguon(null, MAN_HINH));
+        assertThat(kq.coLech()).isTrue();
+        assertThat(kq.khaiMaKhongGan()).isEmpty();
+        assertThat(kq.ganMaKhongKhai()).isEmpty();
+        assertThat(kq.gon()).contains("lib/dinh_danh.dart").doesNotContain("\n");
     }
 
     @Test
@@ -107,7 +141,7 @@ class KiemDinhDanhTest {
                 "identifier: maNutThem, button: true,");
         String them = quaBien.replace("class HomeScreen",
                 "const String maNutThem = DinhDanh.them;\nclass HomeScreen");
-        assertThat(KiemDinhDanh.kiem(nguon(KHAI, them))).isEmpty();
+        assertThat(KiemDinhDanh.kiem(nguon(KHAI, them)).coLech()).isFalse();
     }
 
     @Test
@@ -115,6 +149,6 @@ class KiemDinhDanhTest {
     void chuThichKhongTinh() {
         String coChuThich = MAN_HINH.replace("body: Column(children: [",
                 "// identifier: 'chi_tieu.ghi_chu' — ví dụ trong chú thích\n      body: Column(children: [");
-        assertThat(KiemDinhDanh.kiem(nguon(KHAI, coChuThich))).isEmpty();
+        assertThat(KiemDinhDanh.kiem(nguon(KHAI, coChuThich)).coLech()).isFalse();
     }
 }

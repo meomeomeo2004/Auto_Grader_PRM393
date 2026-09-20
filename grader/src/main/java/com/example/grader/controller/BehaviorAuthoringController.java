@@ -175,13 +175,12 @@ public class BehaviorAuthoringController {
     @PutMapping("/recordings/{id}/events/{sequence}")
     public ResponseEntity<?> updateEvent(@PathVariable String id, @PathVariable int sequence,
                                          @RequestBody Map<String, Object> body) {
-        // Hai việc sửa được trên một dòng đã ghi: điểm của checkpoint, và GIÁ TRỊ NHẬP
-        // của bước gõ chữ. Cái sau là đường chính thức để khai chữ — recorder không còn
-        // đoán nữa.
-        if (body.containsKey("value")) {
-            return call(() -> service.updateEventValue(id, sequence,
-                    body.get("value") == null ? "" : String.valueOf(body.get("value"))));
-        }
+        // Chỉ còn MỘT việc sửa được trên một dòng đã ghi: điểm của checkpoint.
+        //
+        // Nhánh sửa GIÁ TRỊ NHẬP đã gỡ 20/9/2026. Nó có từ thời recorder chưa đọc được chữ từ
+        // DOM Flutter Web; nay đường đọc có ba nguồn và đo trên Golden thật thì vào đủ, không
+        // mất dấu. Sửa tay nội dung là mở đường cho plan mô tả một thao tác KHÁC với thứ người
+        // soạn thật sự làm trên app — ghi sai thì xóa bước rồi gõ lại.
         return call(() -> service.updateEventWeight(id, sequence,
                 body.get("weight") instanceof Number number ? number.doubleValue() : 1.0));
     }
@@ -333,9 +332,10 @@ public class BehaviorAuthoringController {
         return call(() -> {
             requireGoldenRuntimeReady(id);
             artifactService.requireComplete(id);
-            // Trước requirePassed và trước service.publish: phép kiểm này đọc file nên rẻ nhất trong
-            // chuỗi, mà nếu để sau publish() thì bộ chấm đã bị đánh dấu PUBLISHED rồi mới chết.
-            staticRuleService.requireDinhDanhNhatQuan(id);
+            // KHÔNG kiểm định danh ở đây nữa (gỡ 20/9/2026). Khâu tải lên đã từ chối hẳn Golden lệch,
+            // mà tải lên là đường DUY NHẤT ghi artifact GOLDEN_SOLUTION — mọi chỗ khác chỉ đọc, và
+            // không có đường kích hoạt lại một version cũ. Giữ thêm một cổng không bao giờ bắn chỉ
+            // khiến lần sau phải mất công đọc xem nó còn đúng không.
             validationService.requirePassed(id);
             Map<String, Object> published = service.publish(id);
             Map<String, Object> artifact = materializer.materialize(id);
@@ -431,19 +431,24 @@ public class BehaviorAuthoringController {
                         "Chỉ được tải lên Database ẩn hoặc Golden Solution. "
                                 + type + " phải do hệ thống sinh từ phiên record.");
             }
+            // TỪ CHỐI NHẬN Golden lệch định danh, soát trên chính luồng file chứ không trên kho.
+            //
+            // Phải chặn TRƯỚC artifactService.upload: nhận vào rồi mới báo thì bản lệch đã thành bản
+            // đang hoạt động, và nếu bộ chấm đang có một Golden tốt thì nó vừa bị đè mất. Bắt người
+            // soạn quay lại dọn hộ máy là việc không đáng có.
+            //
+            // dinh_danh.dart được chép NGUYÊN BYTE sang khung phát cho sinh viên, nên lệch ở đây là
+            // lệch thẳng xuống tay người làm bài — không khâu nào phía sau bắt được, kể cả Kiểm
+            // Golden (Golden luôn tự khớp với chính nó).
+            if (type == BehaviorArtifactType.GOLDEN_SOLUTION) {
+                String loiDinhDanh = staticRuleService.loiDinhDanhTrongZip(file.getInputStream());
+                if (loiDinhDanh != null) {
+                    throw new IllegalArgumentException(loiDinhDanh + " — Upload không thành công.");
+                }
+            }
             Map<String, Object> artifact = artifactService.upload(id, type, file, metadata);
             if (type == BehaviorArtifactType.GOLDEN_SOLUTION) {
                 service.markGoldenSolutionReady(id, artifact);
-                // Cảnh báo SỚM, không chặn: lúc này Golden còn đang mở trong trình soạn thảo, sửa
-                // một dòng là xong. Cũng phép kiểm ấy sẽ CHẶN ở publish (requireDinhDanhNhatQuan);
-                // để tới đó mới báo thì người soạn đã ghi hình và chụp oracle xong, sửa Golden là
-                // phải làm lại từ đầu.
-                List<String> canhBao = staticRuleService.kiemDinhDanh(id);
-                if (!canhBao.isEmpty()) {
-                    Map<String, Object> kemCanhBao = new LinkedHashMap<>(artifact);
-                    kemCanhBao.put("canh_bao_dinh_danh", canhBao);
-                    return kemCanhBao;
-                }
             } else if (type == BehaviorArtifactType.HIDDEN_DATABASE) {
                 service.invalidateSuiteOracles(id);
             }

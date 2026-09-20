@@ -101,7 +101,12 @@ class GoldenRuntimeServiceTest {
         assertThat(html).contains("flt-semantics-identifier");
         assertThat(html).contains("INTERACTIVE_ROLES");
         assertThat(html).contains("CONTAINER_ROLES");
-        assertThat(html).contains("Khong ghi thao tac de tranh chon nham element cha");
+        assertThat(html).contains("Khong ghi duoc thao tac nay");
+        // Bấm vào KHOẢNG TRỐNG phải im lặng bỏ qua: cuộn màn, bỏ focus khỏi ô nhập, bấm
+        // bâng quơ đều là việc bình thường lúc ghi hình. Cảnh báo mọi cú bấm trượt thì
+        // người soạn quen luôn cả những cảnh báo thật.
+        assertThat(html).contains("function coControlTaiDiem(event)");
+        assertThat(html).contains("if (coControlTaiDiem(event)) warnNoTarget();");
         assertThat(html).contains("uniqueLocator('semanticId', semanticId, elements)");
         assertThat(html).contains("function spatialSemanticNode(event, mode, elements)");
         assertThat(html).contains("Nhieu semantic control trung khop tai cung vi tri.");

@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.transaction.Transactional;
 import org.springframework.stereotype.Service;
 
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -16,6 +17,7 @@ import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
+import java.util.zip.ZipInputStream;
 
 /**
  * Luật chấm TĨNH của một behavior suite (nhóm Kiến trúc + chất lượng mã).
@@ -198,44 +200,42 @@ public class StaticRuleService {
     }
 
     /**
-     * KIỂM ĐỊNH DANH của Golden trước khi publish: khai mà không gắn, gắn mà không khai.
+     * KIỂM ĐỊNH DANH — soát CHÍNH file vừa tải lên, TRƯỚC khi nó được lưu.
      *
-     * <p>Đặt ở lớp này vì nó giữ bộ đọc duy nhất của mã nguồn Golden ({@code goldenSources});
-     * phép so thì nằm riêng ở {@link KiemDinhDanh}.
+     * <p>Phải đọc từ luồng chứ không đọc từ kho: mục đích là từ chối nhận file, mà từ chối thì
+     * không được để lại dấu vết nào trong kho artifact. Đọc lại kho thì đã muộn — bản lệch đã thành
+     * bản đang hoạt động, và nếu bộ chấm đang có một Golden tốt thì nó vừa bị đè mất.
      *
-     * <p>Vì sao chặn ở publish chứ không nhét vào Kiểm Golden: Kiểm Golden là một lượt Docker gần
-     * hai phút và nó trả lời câu "bộ chấm chạy đúng trên Golden không". Hai lệch dưới đây KHÔNG làm
-     * Golden sai — Golden luôn tự khớp với chính nó — nên bỏ vào đó thì vừa bắt người soạn chờ hai
-     * phút cho một phép đọc file, vừa làm báo cáo mất tiêu điểm.
+     * <p>Bỏ qua entry lớn bất thường (cùng ngưỡng 2 MB với {@code goldenSources}): file Dart của
+     * bài giải không có cái nào cỡ đó, còn zip nhồi thì không được phép làm treo khâu tải lên.
+     *
+     * @return {@code null} khi không lệch; khác null là câu báo NGẮN để từ chối nhận file
      */
-    public void requireDinhDanhNhatQuan(String suiteId) {
-        List<String> loi = kiemDinhDanh(suiteId);
-        if (!loi.isEmpty()) {
-            throw new IllegalStateException(
-                    "Định danh của Golden chưa nhất quán:" + System.lineSeparator()
-                            + "- " + String.join(System.lineSeparator() + "- ", loi));
-        }
-    }
-
-    /**
-     * Bản KHÔNG ném của phép kiểm trên — dùng để cảnh báo SỚM ngay lúc tải Golden lên.
-     *
-     * <p>Lúc đó người soạn còn đang mở Golden trong trình soạn thảo, sửa một dòng là xong. Đợi tới
-     * publish mới báo thì họ đã ghi hình và chụp oracle xong hết rồi, sửa Golden là phải làm lại
-     * từ đầu.
-     *
-     * <p>Không ném vì tải lên phải THÀNH CÔNG: chặn ngay ở đây thì người soạn không còn Golden nào
-     * trên hệ thống để mà đối chiếu, mà Golden lệch định danh vẫn ghi hình được bình thường.
-     */
-    public List<String> kiemDinhDanh(String suiteId) {
-        List<SourceFile> golden = goldenSources(suiteId);
-        if (golden == null) return List.of();   // chưa có Golden thì cổng khác đã chặn trước rồi
+    public String loiDinhDanhTrongZip(InputStream zip) {
         Map<String, String> nguon = new LinkedHashMap<>();
-        for (SourceFile f : golden) {
-            if (!f.relPath().endsWith(".dart")) continue;
-            nguon.put(f.relPath(), new String(f.content(), StandardCharsets.UTF_8));
+        try (ZipInputStream in = new ZipInputStream(zip, StandardCharsets.UTF_8)) {
+            ZipEntry entry;
+            while ((entry = in.getNextEntry()) != null) {
+                if (entry.isDirectory()) continue;
+                String ten = entry.getName().replace('\\', '/');
+                if (!ten.endsWith(".dart")) continue;
+                String rel;
+                if (ten.startsWith("lib/")) rel = ten;
+                else {
+                    int i = ten.indexOf("/lib/");
+                    if (i < 0) continue;
+                    rel = ten.substring(i + 1);
+                }
+                byte[] noiDung = in.readNBytes(2 * 1024 * 1024);
+                nguon.put(rel, new String(noiDung, StandardCharsets.UTF_8));
+            }
+        } catch (Exception e) {
+            // Zip hỏng thì để khâu tải lên báo bằng câu của nó; đừng đổ tội cho định danh.
+            return null;
         }
-        return KiemDinhDanh.kiem(nguon);
+        if (nguon.isEmpty()) return null;   // không có lib/: khâu kia lo
+        KiemDinhDanh.KetQua kq = KiemDinhDanh.kiem(nguon);
+        return kq.coLech() ? kq.gon() : null;
     }
 
     /** Gọi lại lúc publish: golden có thể đã được upload bản mới sau khi lưu luật. */
