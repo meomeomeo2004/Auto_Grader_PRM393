@@ -63,10 +63,7 @@ public class GoldenOracleCaptureService {
 
             Map<String, Object> plan = mapper.readValue(
                     test.resolve("behavior_plan.json").toFile(), new TypeReference<>() {});
-            List<Map<String, Object>> casesCuaLuong = list(plan.get("cases")).stream()
-                    .map(GoldenOracleCaptureService::map)
-                    .filter(item -> scenarioId.equals(text(item, "scenario_id")))
-                    .toList();
+            List<Map<String, Object>> casesCuaLuong = luongCuaScenario(plan, scenarioId);
             if (casesCuaLuong.isEmpty()) {
                 throw new IllegalStateException("Không tìm thấy execution case cho scenario " + scenarioId);
             }
@@ -132,7 +129,8 @@ public class GoldenOracleCaptureService {
                 daNuongBoCuc = authoring.applyCapturedLayout(scenarioId, map(layout.get("components")));
                 // Đường dự phòng: cách tìm lại widget khi bài nộp quên gắn nhãn. Engine chỉ
                 // ghi mô tả nào DUY NHẤT trên cây Golden nên ở đây nhận sao dùng vậy.
-                daNuongDuPhong = authoring.applyCapturedTargets(scenarioId, map(layout.get("targets")));
+                daNuongDuPhong = authoring.applyCapturedTargets(scenarioId,
+                        map(layout.get("targets")), map(layout.get("targets_by_id")));
                 // Định danh Semantics(identifier:) đo trên Golden — nướng vào bước để bộ đề đã
                 // ghi hình nhận định danh mà không ghi hình lại (Gói 2 kế hoạch Định danh
                 // Semantics). Engine cũ không ghi khoá này: vắng thì bỏ qua, không phải lỗi.
@@ -338,6 +336,22 @@ public class GoldenOracleCaptureService {
             for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) Files.deleteIfExists(path);
         } catch (Exception ignored) {
         }
+    }
+
+    /**
+     * Các LUỒNG của một scenario trong plan.
+     *
+     * <p>Plan từ 21/9/2026 gom theo luồng — mỗi luồng đúng một mã thực thi — nên chỗ này đọc
+     * thẳng danh sách đó. Plan đời cũ là danh sách case phẳng, mỗi tiêu chí một dòng lặp lại mã
+     * thực thi; hai hình đều cho ra cùng thứ mà hàm gọi cần: mã thực thi của luồng.
+     */
+    private static List<Map<String, Object>> luongCuaScenario(Map<String, Object> plan, String scenarioId) {
+        List<Object> luong = list(plan.get("luong"));
+        List<Object> nguon = luong.isEmpty() ? list(plan.get("cases")) : luong;
+        return nguon.stream()
+                .map(GoldenOracleCaptureService::map)
+                .filter(item -> scenarioId.equals(text(item, "scenario_id")))
+                .toList();
     }
 
     /** Nhặt các dòng ###RAR_CHECKPOINT### có passed=false: "tên — lý do", mỗi checkpoint một dòng. */

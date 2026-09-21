@@ -100,8 +100,11 @@ class StaticRuleServiceTest {
         assertNotNull(row, "dòng ma trận phải mang id <suite>_STATIC_<rule>");
         assertEquals("STATIC_ANALYSIS", row.get("runner"));
         assertEquals("source_pattern", row.get("static_rule"));
-        assertEquals("STATIC", row.get("testcase_group"));
-        assertEquals("G_KIENTRUC", row.get("group_id"));
+        // Luat tinh mac dinh thuoc nhom "Architecture"; testcase_group/layer da go vi khong
+        // ai doc (21/9/2026).
+        assertEquals("Architecture", row.get("group_id"));
+        assertNull(row.get("testcase_group"));
+        assertNull(row.get("group_name"));
         assertNotNull(row.get("static_config"));
     }
 

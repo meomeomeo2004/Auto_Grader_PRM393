@@ -21,6 +21,7 @@ import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.*;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /** Đóng gói execution plan thành bộ runner dùng chung có thể mount trực tiếp vào Docker. */
@@ -91,13 +92,13 @@ public class BehaviorSuiteMaterializer {
             Exam exam = exams.findByExamId(examId).orElseGet(Exam::new);
             if (exam.getExamId() == null) exam.setExamId(examId);
             exam.setExamName(text(suite, "name"));
-            exam.setTeacherNote(text(suite, "description"));
             exam.setTestcasePath(target.toAbsolutePath().toString());
             exam.setStatus(ExamStatus.READY);
             exam.setTestcaseStatus("PUBLISHED");
             exam.setTestcaseVersion((exam.getTestcaseVersion() == null ? 0 : exam.getTestcaseVersion()) + 1);
             exam.setTestcasePublishedAt(Instant.now());
             exams.save(exam);
+            donAnhMoCoi(suiteId, maThucThiDangDung(cases));
 
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("exam_id", examId);
@@ -170,7 +171,7 @@ public class BehaviorSuiteMaterializer {
      * Trả về đúng nội dung runner và dữ liệu điều khiển sẽ được sinh cho bộ chấm.
      * Đây là thao tác chỉ đọc: không ghi Exam, không thay bundle đã publish và không cần copy fixture DB.
      */
-    public Map<String, Object> previewCode(String suiteId, String selectedScenarioCode) {
+    public Map<String, Object> previewCode(String suiteId) {
         try {
             Map<String, Object> plan = authoring.previewExecutionPlan(suiteId);
             Map<String, Object> suite = map(plan.get("suite"));
@@ -178,39 +179,16 @@ public class BehaviorSuiteMaterializer {
             List<Map<String, Object>> cases = expandCases(plan, suiteCode);
             Map<String, Object> matrix = fullMatrix(suiteId, suiteCode, cases);
 
-            String requestedCode = selectedScenarioCode == null ? "" : selectedScenarioCode.trim();
-            Map<String, Object> selectedScenario = new LinkedHashMap<>();
-            if (!requestedCode.isBlank()) {
-                selectedScenario = list(plan.get("scenarios")).stream()
-                        .map(BehaviorSuiteMaterializer::map)
-                        .filter(item -> requestedCode.equalsIgnoreCase(text(item, "scenario_code")))
-                        .findFirst()
-                        .orElseThrow(() -> new IllegalArgumentException(
-                                "Không tìm thấy scenario " + requestedCode + " trong bộ chấm"));
-            }
-
+            // CHỈ ba file NỘI DUNG CỦA BỘ ĐỀ (bỏ 21/9/2026).
+            //
+            // exam_test.dart và grader.dart đã gỡ khỏi màn xem: chúng là runner DÙNG CHUNG cho
+            // mọi đề, 4.300 dòng Dart không đổi theo bộ chấm nào — bày ra chỉ khiến người soạn
+            // phải lướt qua chúng để tới thứ mình cần xem.
+            //
+            // Đường xem riêng từng scenario cũng gỡ: từ khi plan gom theo luồng, mỗi luồng đã là
+            // một khối liền mạch trong behavior_plan.json, nên tách ra file riêng không cho thêm
+            // thông tin nào mà lại đẻ thêm một trạng thái "đang chọn scenario nào" để nhầm.
             List<Map<String, Object>> files = new ArrayList<>();
-            if (!selectedScenario.isEmpty()) {
-                String scenarioCode = text(selectedScenario, "scenario_code");
-                Map<String, Object> scenarioMatrix = new LinkedHashMap<>();
-                matrix.forEach((testId, rawMetadata) -> {
-                    Map<String, Object> metadata = map(rawMetadata);
-                    if (scenarioCode.equals(String.valueOf(metadata.get("scenario_code")))) {
-                        scenarioMatrix.put(testId, metadata);
-                    }
-                });
-                files.add(previewFile(
-                        "scenario.json",
-                        "Scenario đang chọn: action, checkpoint, viewport, biến và oracle.",
-                        "SCENARIO",
-                        json(selectedScenario)));
-                files.add(previewFile(
-                        "scenario_testcases.json",
-                        "Các đầu điểm thực tế được tách ra từ checkpoint của scenario này.",
-                        "SCENARIO",
-                        json(scenarioMatrix)));
-            }
-
             files.add(previewFile(
                     "behavior_plan.json",
                     "Toàn bộ action, checkpoint và oracle mà runner sẽ replay.",
@@ -222,16 +200,6 @@ public class BehaviorSuiteMaterializer {
                     "BUNDLE",
                     json(matrix)));
             files.add(previewFile(
-                    "exam_test.dart",
-                    "Runner Dart dùng chung; nội dung từng scenario được đọc từ behavior_plan.json.",
-                    "ENGINE",
-                    readResource("behavior-replay-engine/exam_test.dart")));
-            files.add(previewFile(
-                    "grader.dart",
-                    "Script tổng hợp kết quả flutter test thành điểm và JSON báo cáo.",
-                    "ENGINE",
-                    readResource("behavior-replay-engine/grader.dart")));
-            files.add(previewFile(
                     "contract.json",
                     "Contract công khai và package được phép của bộ chấm.",
                     "BUNDLE",
@@ -240,8 +208,6 @@ public class BehaviorSuiteMaterializer {
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("suite_id", suiteId);
             result.put("suite_code", suiteCode);
-            result.put("selected_scenario_code",
-                    selectedScenario.isEmpty() ? null : selectedScenario.get("scenario_code"));
             result.put("scenario_count", list(plan.get("scenarios")).size());
             result.put("criterion_count", matrix.size());
             result.put("files", files);
@@ -258,8 +224,8 @@ public class BehaviorSuiteMaterializer {
      * bỏ UUID/thời gian để hai suite tương đương có thể được đối chiếu đúng nghĩa.
      */
     public Map<String, Object> determinismReport(String suiteId) {
-        Map<String, Object> first = previewCode(suiteId, null);
-        Map<String, Object> second = previewCode(suiteId, null);
+        Map<String, Object> first = previewCode(suiteId);
+        Map<String, Object> second = previewCode(suiteId);
         Map<String, String> firstHashes = previewHashes(first);
         Map<String, String> secondHashes = previewHashes(second);
         Map<String, Object> plan = authoring.previewExecutionPlan(suiteId);
@@ -359,12 +325,56 @@ public class BehaviorSuiteMaterializer {
         if (Files.isDirectory(screens)) {
             Path dest = target.resolve("fixtures").resolve("screens");
             Files.createDirectories(dest);
+            // CHỈ chép ảnh của luồng ĐANG CÓ. Tên tệp khoá theo execution_code, mà mã đó đổi
+            // mỗi khi người soạn đổi mã nhóm hoặc tên luồng — ảnh tên cũ nằm lại trong kho và
+            // trước đây được chép nguyên si sang gói bàn giao. Đo 21/9/2026 trên
+            // PE_PRM393_FA26: 29 tệp cho 16 luồng, 15 tệp mồ côi, từng cặp cũ/mới trùng đúng
+            // từng byte — nửa MB ảnh chết đi theo mỗi bản bàn giao.
+            Set<String> maDangDung = maThucThiDangDung(cases);
             try (var pngs = Files.list(screens)) {
                 for (Path png : pngs.filter(f -> f.getFileName().toString().endsWith(".png")).toList()) {
+                    // Tập mã rỗng thì chép tất: thà mang thừa ảnh còn hơn im lặng ship bộ
+                    // chấm KHÔNG có ảnh đối chứng nào vì một lỗi suy mã.
+                    if (!maDangDung.isEmpty() && !maDangDung.contains(tenKhongDuoi(png))) continue;
                     Files.copy(png, dest.resolve(png.getFileName().toString()),
                             StandardCopyOption.REPLACE_EXISTING);
                 }
             }
+        }
+    }
+
+    /** Mã thực thi của mọi case trong bản đang publish — khoá nhận diện ảnh chuẩn. */
+    private Set<String> maThucThiDangDung(List<Map<String, Object>> cases) {
+        Set<String> ra = new LinkedHashSet<>();
+        for (Map<String, Object> item : cases) {
+            String ma = text(item, "execution_code");
+            if (!ma.isBlank()) ra.add(ma);
+        }
+        return ra;
+    }
+
+    private static String tenKhongDuoi(Path png) {
+        String ten = png.getFileName().toString();
+        return ten.substring(0, ten.length() - ".png".length());
+    }
+
+    /**
+     * Xoá khỏi KHO những ảnh chuẩn không còn luồng nào trỏ tới. Lọc lúc chép chỉ giữ cho gói
+     * bàn giao sạch; không dọn kho thì ảnh chết vẫn nằm đó mãi và mỗi lần đổi mã lại đẻ thêm.
+     *
+     * Nuốt lỗi: dọn kho là việc phụ, không được làm hỏng một lượt publish đã thành công.
+     */
+    private void donAnhMoCoi(String suiteId, Set<String> maDangDung) {
+        if (maDangDung.isEmpty()) return;
+        try {
+            Path screens = artifacts.goldenScreenshotDir(suiteId);
+            if (!Files.isDirectory(screens)) return;
+            try (var pngs = Files.list(screens)) {
+                for (Path png : pngs.filter(f -> f.getFileName().toString().endsWith(".png")).toList()) {
+                    if (!maDangDung.contains(tenKhongDuoi(png))) Files.deleteIfExists(png);
+                }
+            }
+        } catch (Exception ignored) {
         }
     }
 
@@ -484,13 +494,18 @@ public class BehaviorSuiteMaterializer {
                     String executionCode = text(scenario, "scenario_code")
                             + (khungDesktop ? HAU_TO_DESKTOP : "__VP_" + viewportIndex);
                     String testSuffix = checkpointViewports.size() > 1 ? "_" + viewportName : "";
-                    String testId = safeTestId(suiteCode + "_" + text(scenario, "scenario_code")
+                    // test_id = [mã nhóm]_[tên luồng]_[checkpoint] (chốt 21/9/2026). Mã đề đã bỏ
+                    // khỏi tiền tố: mọi tiêu chí trong file đều thuộc cùng một đề, nhắc lại mã đề
+                    // ở từng dòng chỉ làm bảng điểm dài ra mà không phân biệt thêm được gì.
+                    // scenario_code đã mang sẵn phần [mã nhóm]_[tên luồng].
+                    String testId = safeTestId(text(scenario, "scenario_code")
                             + "_" + checkpointId + testSuffix);
                     double itemWeight = checkpointWeight / checkpointViewports.size();
                     Map<String, Object> item = new LinkedHashMap<>();
                     item.put("test_id", testId);
                     item.put("scenario_id", scenario.get("id"));
                     item.put("scenario_code", scenario.get("scenario_code"));
+                    item.put("group_code", scenario.get("group_code"));
                     item.put("scenario_name", scenario.get("name"));
                     item.put("execution_code", executionCode);
                     item.put("name", checkpointName(scenario, checkpoint, index)
@@ -531,41 +546,37 @@ public class BehaviorSuiteMaterializer {
         Map<String, Object> matrix = new LinkedHashMap<>();
         for (Map<String, Object> item : cases) {
             Map<String, Object> checkpoint = map(item.get("checkpoint"));
-            String expected = text(checkpoint, "expected");
-            if (expected.isBlank()) expected = "Kết quả phải khớp observation của Golden App.";
             boolean component = ABSOLUTE_WEIGHT_KINDS.contains(text(checkpoint, "kind"));
-            boolean ch7 = CH7_KINDS.contains(text(checkpoint, "kind"));
-            Map<String, Object> uiGroup = map(checkpoint.get("ui_group"));
+            // SÁU FIELD, KHÔNG HƠN (chốt 21/9/2026). Trước đó bảng có mười lăm, đo lại thì chín
+            // cái không có một người đọc nào trong toàn bộ mã nguồn:
+            //   · instance_id      — chép y nguyên KHOÁ của chính dòng này
+            //   · checkpoint_id    — không ai đọc
+            //   · execution_code   — engine đọc bản trong behavior_plan.json, không đọc bản này
+            //   · description      — luôn null, màn soạn không có ô nhập mô tả luồng
+            //   · expected         — một câu y hệt nhau ở mọi dòng, không mang tin gì
+            //   · difficulty       — suy máy móc từ loại tiêu chí rồi tắc ở result.json
+            //   · layer, testcase_group — chỉ TestCaseTaxonomy đọc, mà lớp đó không ai gọi
+            //   · group_name       — luôn bằng group_id kể từ khi nhóm do người soạn gõ
+            // Thêm field mới vào đây thì phải chỉ ra được NGƯỜI ĐỌC, không thì nó lại nằm đó
+            // mười tháng và người sau phải đi đo lại từ đầu.
             Map<String, Object> metadata = new LinkedHashMap<>();
-            metadata.put("instance_id", item.get("test_id"));
             metadata.put("runner", "BEHAVIOR_REPLAY");
             metadata.put("scenario_code", item.get("scenario_code"));
-            metadata.put("execution_code", item.get("execution_code"));
-            metadata.put("checkpoint_id", checkpoint.get("id"));
-            // KHÔNG ghi "skill_code" nữa (bỏ khung năng lực, 17/9/2026). Trước đây mọi tiêu
-            // chí giao diện bị gán cứng "UI_LAYOUT" — một mã đời cũ không còn trong syllabus,
-            // và nó lọt được chỉ vì nhánh publish bên giảng viên không ép validate. Khi bộ chấm
-            // bắt đầu đi sang người chấm bằng gói .zip thì cửa nạp kiểm chặt và chặn cả gói.
-            // Điểm không đọc mã năng lực — trọng số và group_id mới là thứ tính điểm.
-            metadata.put("testcase_group", component ? "UI" : "BEHAVIOR");
-            metadata.put("layer", component ? "ui" : "behavior");
-            // Nhóm là cấp mà điểm lẻ nổi lên (đạt 3/4 thành phần = 15/20) và là cấp đối
-            // chiếu với phiếu chấm tay — thiếu group_id thì mỗi dòng lẻ loi không quy về đâu.
-            // Dòng behavior không có ui_group thì mỗi SCENARIO là một nhóm: "Thêm khoản chi"
-            // trên phiếu tay chính là toàn bộ checkpoint của luồng thêm.
-            if (!uiGroup.isEmpty()) {
-                metadata.put("group_id", uiGroup.get("id"));
-                metadata.put("group_name", uiGroup.get("name"));
-            } else if (!text(item, "scenario_code").isBlank()) {
-                metadata.put("group_id", "G_" + text(item, "scenario_code"));
-                metadata.put("group_name", text(item, "scenario_name").isBlank()
-                        ? text(item, "scenario_code") : text(item, "scenario_name"));
-            }
+            // Tên luồng phải đi kèm: bảng điểm có cột "Luồng" riêng, và nó đọc từ đây.
+            metadata.put("scenario_name", item.get("scenario_name"));
+            // NHÓM CHỈ ĐẾN TỪ MÃ NHÓM NGƯỜI SOẠN GÕ (chốt 21/9/2026). Để trống = không thuộc
+            // nhóm nào, và bảng điểm xếp những luồng đó xuống cuối với ô nhóm ghi "—".
+            //
+            // Hai đường suy nhóm cũ đã gỡ, ghi lại kẻo có người thấy tiện mà thêm lại:
+            //   · theo `ui_group` của bảng tick giao diện — nhãn là tên MÀN, nên hai màn cùng
+            //     đặt tên "Màn hình" bị gộp một rọ, kéo tiêu chí của nhiều luồng khác nhau vào
+            //     chung một dòng điểm. Ca thật FA26: 23 tiêu chí của ba màn dồn vào một nhóm.
+            //   · mỗi scenario là một nhóm — khi đó "nhóm" và "luồng" là một, cột Nhóm không
+            //     nói thêm gì, mà lại chặn mất việc gom sáu luồng lọc vào nhóm FILTER.
+            String maNhom = text(item, "group_code");
+            if (!maNhom.isBlank()) metadata.put("group_id", maNhom);
             metadata.put("name", component && !text(checkpoint, "name").isBlank()
                     ? checkpoint.get("name") : item.get("name"));
-            metadata.put("description", item.get("description"));
-            metadata.put("expected", expected);
-            metadata.put("difficulty", component ? "basic" : "intermediate");
             metadata.put("weight", item.get("weight"));
             matrix.put(String.valueOf(item.get("test_id")), metadata);
         }
@@ -576,7 +587,7 @@ public class BehaviorSuiteMaterializer {
         Map<String, Object> contract = new LinkedHashMap<>();
         contract.put("engine", "GOLDEN_BEHAVIOR_RECORD_REPLAY");
         contract.put("schema_version", plan.get("schema_version"));
-        contract.put("public_contract", plan.get("public_contract"));
+        contract.put("public_contract", boLocatorDaGo(map(plan.get("public_contract"))));
         contract.put("database_contract", plan.get("database_contract"));
         // Policy của bài nộp chỉ sinh từ chính Golden; cấu hình runtime cũ không còn là nguồn.
         BehaviorArtifact golden = artifacts.active(suiteId, BehaviorArtifactType.GOLDEN_SOLUTION);
@@ -598,6 +609,28 @@ public class BehaviorSuiteMaterializer {
         return contract;
     }
 
+    /** Cách tìm widget engine KHÔNG còn cài — không được để lọt vào hợp đồng phát đi. */
+    private static final Set<String> LOCATOR_DA_GO = Set.of("value_key", "valueKey");
+
+    /**
+     * Bỏ locator đã gỡ khỏi `locator_priority` trước khi ghi contract.json.
+     *
+     * <p>`public_contract` bị ĐÓNG BĂNG trong bản ghi bộ chấm từ lúc tạo suite, còn
+     * {@code defaultPublicContract()} chỉ áp lúc tạo mới. Nên bộ dựng trước ngày gỡ `value_key`
+     * vẫn mang nó theo vào mọi lần xuất gói — hợp đồng quảng cáo một cách tìm mà engine không
+     * hiểu. Lọc ở khâu GHI thì mọi bộ cũ sạch theo, không phải đụng vào dữ liệu đã lưu.
+     */
+    private Map<String, Object> boLocatorDaGo(Map<String, Object> publicContract) {
+        if (!(publicContract.get("locator_priority") instanceof List<?> thuTu)) return publicContract;
+        List<Object> conLai = thuTu.stream()
+                .filter(x -> !LOCATOR_DA_GO.contains(String.valueOf(x)))
+                .collect(Collectors.toList());
+        if (conLai.size() == thuTu.size()) return publicContract;
+        Map<String, Object> ra = new LinkedHashMap<>(publicContract);
+        ra.put("locator_priority", conLai);
+        return ra;
+    }
+
     private Map<String, Object> executablePlan(Map<String, Object> plan,
                                                Map<String, Object> suite,
                                                List<Map<String, Object>> cases,
@@ -613,9 +646,53 @@ public class BehaviorSuiteMaterializer {
         executable.put("public_contract", plan.get("public_contract"));
         executable.put("database_contract", databaseContract);
         executable.put("runtime_config", plan.get("runtime_config"));
-        executable.put("cases", cases.stream()
-                .map(item -> gradingCase(item, includeInternalIdentity)).toList());
+        executable.put("luong", nhomTheoLuong(cases, includeInternalIdentity));
         return executable;
+    }
+
+    /**
+     * Gom case theo LUỒNG (execution_code) và đẩy phần dùng chung lên cấp luồng.
+     *
+     * <p>Trước 21/9/2026 plan là một danh sách phẳng, mỗi dòng tự mang đủ steps, initial_state,
+     * viewport và oracle. Đo trên PE_PRM393_FA26: 75 dòng nhưng chỉ <b>15</b> bản steps khác
+     * nhau và <b>1</b> bản initial_state — 29% file là bản sao byte-đối-byte của dòng phía trên.
+     * Luồng "màn thêm chi tiêu" có 22 tiêu chí nên dãy thao tác của nó bị chép lại 22 lần, và
+     * người mở file ra không biết mình đang đọc lặp hay đọc nhầm chỗ.
+     *
+     * <p>Phần lặp đó KHÔNG ai đọc: engine gom case theo execution_code rồi lấy steps từ case đầu
+     * của nhóm ({@code final testCase = cases.first} trong exam_test.dart). Còn {@code oracle}
+     * thì bỏ hẳn — không có dòng code nào trong engine đọc {@code testCase['oracle']}, giá trị
+     * chuẩn đã được nướng vào {@code checkpoint.expect} từ lúc capture.
+     *
+     * <p>Đây là phép biến đổi lúc GHI: danh sách {@code cases} trong bộ nhớ giữ nguyên, nên vân
+     * tay ngữ nghĩa của plan ({@link #semanticFingerprint}) không đổi và cổng publish không bị
+     * ảnh hưởng.
+     */
+    private List<Map<String, Object>> nhomTheoLuong(List<Map<String, Object>> cases,
+                                                    boolean includeInternalIdentity) {
+        List<String> capLuong = List.of("execution_code", "scenario_id", "scenario_code",
+                "scenario_name", "group_code", "description", "viewport", "initial_state", "steps");
+        List<String> capCase = List.of("test_id", "name", "weight", "checkpoint");
+        Map<String, Map<String, Object>> theoMa = new LinkedHashMap<>();
+        for (Map<String, Object> item : cases) {
+            Map<String, Object> luong = theoMa.computeIfAbsent(text(item, "execution_code"), ma -> {
+                Map<String, Object> moi = new LinkedHashMap<>();
+                for (String khoa : capLuong) {
+                    if ("scenario_id".equals(khoa) && !includeInternalIdentity) continue;
+                    if (item.containsKey(khoa)) moi.put(khoa, item.get(khoa));
+                }
+                moi.put("cases", new ArrayList<Map<String, Object>>());
+                return moi;
+            });
+            Map<String, Object> rieng = new LinkedHashMap<>();
+            for (String khoa : capCase) {
+                if (item.containsKey(khoa)) rieng.put(khoa, item.get(khoa));
+            }
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> ds = (List<Map<String, Object>>) luong.get("cases");
+            ds.add(rieng);
+        }
+        return new ArrayList<>(theoMa.values());
     }
 
     private Map<String, Object> gradingSuite(Map<String, Object> suite, boolean includeInternalIdentity) {
@@ -696,12 +773,6 @@ public class BehaviorSuiteMaterializer {
         file.put("scope", scope);
         file.put("content", content);
         return file;
-    }
-
-    private String readResource(String resource) throws Exception {
-        try (InputStream input = new ClassPathResource(resource).getInputStream()) {
-            return new String(input.readAllBytes(), StandardCharsets.UTF_8);
-        }
     }
 
     private String json(Object value) throws Exception {

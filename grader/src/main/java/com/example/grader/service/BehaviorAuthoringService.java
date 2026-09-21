@@ -24,6 +24,17 @@ import java.util.regex.Pattern;
 public class BehaviorAuthoringService {
 
     public static final String SCHEMA_VERSION = "1.0";
+    /**
+     * Khoá trong `expect` là GIÁ TRỊ CHUẨN do engine đo trên Golden, không phải do người soạn
+     * gõ. Dùng khi so hai checkpoint để quyết định có giữ điểm cũ không — giữ đồng bộ với
+     * {@link #applyCapturedLayout}, thêm kênh nướng mới thì phải thêm khoá vào đây.
+     */
+    private static final Set<String> KHOA_GIA_TRI_MAY_DO = Set.of(
+            "value", "repeat", "relation", "color", "center_x", "center_y", "width", "height");
+    /** Loại tiêu chí có nhận giá trị chuẩn từ capture — cũng lấy từ applyCapturedLayout. */
+    private static final Set<String> LOAI_NHAN_GIA_TRI_MAY_DO = Set.of(
+            "component_position", "component_color", "theme_color", "component_present",
+            "layout_relation", "preferences_observation", "widget_state", "text_style", "theme_value");
     private static final Pattern CODE = Pattern.compile("[A-Z0-9][A-Z0-9_-]{2,79}");
     private static final Set<String> EVENT_KINDS = Set.of(
             "action", "ui_observation", "database_observation", "checkpoint", "navigation", "exception",
@@ -64,7 +75,7 @@ public class BehaviorAuthoringService {
             "screen_match",
             // Ch.7 — widget bố cục và hiển thị nâng cao. Không quét được từ semantics
             // (Stack/IndexedStack/Table/Sliver đều lộ ra là container "list"/"generic"
-            // giống nhau) nên giáo viên tự gõ ValueKey thay vì tick từ bảng quét. Mỗi
+            // giống nhau) nên giáo viên tự gõ định danh thay vì tick từ bảng quét. Mỗi
             // kind ứng với đúng 1 runner COMMON_V1 cùng tên khái niệm ở
             // common-testcase-engine/exam_test.dart — xem CH7_KIND_TO_EXPECT_FIELDS.
             "component_scroll_direction", "component_scroll_to_end", "component_stack_order",
@@ -564,7 +575,7 @@ public class BehaviorAuthoringService {
 
     private boolean sameLogicalInputTarget(Map<String, Object> first, Map<String, Object> second) {
         if (first.isEmpty() || second.isEmpty()) return false;
-        for (String key : List.of("semanticId", "semantic_id", "valueKey", "value_key", "key")) {
+        for (String key : List.of("semanticId", "semantic_id")) {
             String left = optional(first, key);
             String right = optional(second, key);
             if (left != null && right != null) return left.equals(right);
@@ -835,11 +846,19 @@ public class BehaviorAuthoringService {
             throw new IllegalArgumentException("Scenario sửa không thuộc bộ chấm của phiên record");
         }
 
+        // Mã nhóm + TÊN luồng là hai thứ duy nhất người soạn gõ (chốt 21/9/2026). Mã luồng —
+        // khoá sinh ra test_id và execution_code — máy tự dựng từ chúng. Để người gõ thì luôn có
+        // cửa hai luồng trùng mã, mà trùng mã là engine gom chung MỘT lượt replay.
+        String maNhom = maNhom(body.containsKey("group_code") || body.containsKey("groupCode")
+                ? text(body, "group_code", text(body, "groupCode", ""))
+                : (revision == null || revision.getGroupCode() == null ? "" : revision.getGroupCode()));
+        String tenLuong = text(body, "name",
+                revision == null ? recording.getName() : revision.getName());
         String requestedCode = text(body, "scenario_code", "");
         String code = requestedCode.isBlank()
-                ? (revision == null
-                    ? uniqueScenarioCode(suite.getId(), slug(recording.getName()))
-                    : revision.getScenarioCode())
+                ? uniqueScenarioCode(suite.getId(),
+                        slug(maNhom.isBlank() ? tenLuong : maNhom + "_" + tenLuong),
+                        revision == null ? null : revision.getId())
                 : requestedCode.toUpperCase(Locale.ROOT).replaceAll("[^A-Z0-9_-]", "_");
         Optional<BehaviorScenario> codeOwner = scenarios.findBySuiteIdAndScenarioCode(suite.getId(), code);
         if (codeOwner.isPresent() && (revision == null || !codeOwner.get().getId().equals(revision.getId()))) {
@@ -850,7 +869,8 @@ public class BehaviorAuthoringService {
         scenario.setSuiteId(suite.getId());
         scenario.setSourceRecordingId(recording.getId());
         scenario.setScenarioCode(code);
-        scenario.setName(text(body, "name", recording.getName()));
+        scenario.setGroupCode(maNhom.isBlank() ? null : maNhom);
+        scenario.setName(tenLuong);
         scenario.setSkillCode(text(body, "skill_code",
                 revision == null
                         ? (checkpoints.stream().anyMatch(item -> "database_observation".equals(text(item, "kind", "")))
@@ -862,7 +882,30 @@ public class BehaviorAuthoringService {
         if (revision == null) {
             scenario.setDisplayOrder((int) scenarios.countBySuiteIdAndEnabledTrue(suite.getId()) + 1);
         }
-        scenario.setWeight(number(body.get("weight"), Math.max(1.0, checkpoints.size())));
+        // ── Giữ điểm và ràng buộc khi sinh lại testcase mà checkpoint KHÔNG đổi ────────────
+        // Sửa một dòng giao diện trong Golden là phải upload lại rồi sinh lại testcase cho
+        // từng luồng. Trước đây lượt sinh lại ghi đè trắng checkpointsJson, nên công chia điểm
+        // và các ràng buộc `requires` mất sạch dù nội dung y hệt — bộ đề nhiều luồng thì chia
+        // lại điểm còn lâu hơn ghi hình lại. Cơ chế thừa kế viết 30/8 không cứu được ca này:
+        // applyDerivedDatabaseCheckpoints đi tìm "cái cũ" trong chính ô vừa bị ghi đè ở đây,
+        // nên lúc nó tìm thì cái cũ đã chết rồi.
+        //
+        // Luật (chốt 20/9): ĐƯỢC ĂN CẢ NGÃ VỀ KHÔNG và so CHẶT. Danh sách checkpoint mới giống
+        // hệt danh sách cũ — cùng số lượng, cùng thứ tự, cùng nội dung tới từng giá trị mong
+        // đợi — thì giữ nguyên toàn bộ điểm + requires + id. Lệch một chỗ là reset sạch, vì
+        // lúc đó không còn cách nào biết điểm cũ thuộc về tiêu chí nào.
+        List<Map<String, Object>> checkpointCu = revision == null
+                ? List.<Map<String, Object>>of()
+                : readObjectList(revision.getCheckpointsJson());
+        double diemMacDinh = Math.max(1.0, checkpoints.size());
+        boolean giuNguyenDiem = thuaKeDiemNeuKhongDoi(checkpointCu, checkpoints);
+        if (giuNguyenDiem) {
+            // Giữ lại checkpoint CSDL cũ để lượt capture ngay sau đây còn chỗ mà thừa kế:
+            // applyDerivedDatabaseCheckpoints tra "cái cũ" trong đúng ô checkpointsJson này.
+            checkpointCu.stream().filter(this::laCheckpointCsdlTuSinh).forEach(checkpoints::add);
+        }
+        scenario.setWeight(number(body.get("weight"),
+                giuNguyenDiem && revision.getWeight() != null ? revision.getWeight() : diemMacDinh));
         scenario.setInitialStateJson(recording.getInitialStateJson());
         scenario.setStepsJson(json(steps));
         scenario.setCheckpointsJson(json(checkpoints));
@@ -902,6 +945,91 @@ public class BehaviorAuthoringService {
         Map<String, Object> out = new LinkedHashMap<>(scenarioView(scenario, true));
         out.put("oracle", oracleView(oracle));
         return out;
+    }
+
+    /**
+     * Chép điểm + ràng buộc + id từ danh sách checkpoint cũ sang danh sách vừa dựng lại, CHỈ KHI
+     * hai danh sách không khác gì nhau. Trả về true nếu đã chép.
+     *
+     * So theo THỨ TỰ, không theo tập hợp: đảo chỗ hai checkpoint cũng là một thay đổi thật của
+     * bộ đề, và nếu so theo tập hợp thì hai checkpoint trùng nội dung sẽ tranh nhau một điểm.
+     *
+     * Checkpoint CSDL tự sinh phải loại khỏi phép so: ở thời điểm này chúng chưa có trong danh
+     * sách mới (chỉ xuất hiện sau lượt replay Docker), để nguyên thì lần nào cũng ra "khác".
+     */
+    private boolean thuaKeDiemNeuKhongDoi(List<Map<String, Object>> cu, List<Map<String, Object>> moi) {
+        List<Map<String, Object>> cuUi = cu.stream().filter(item -> !laCheckpointCsdlTuSinh(item)).toList();
+        if (cuUi.isEmpty() || cuUi.size() != moi.size()) return false;
+        for (int i = 0; i < moi.size(); i++) {
+            if (!vanTayCheckpoint(cuUi.get(i)).equals(vanTayCheckpoint(moi.get(i)))) return false;
+        }
+        for (int i = 0; i < moi.size(); i++) {
+            Map<String, Object> truoc = cuUi.get(i);
+            Map<String, Object> sau = moi.get(i);
+            if (truoc.get("weight") != null) sau.put("weight", truoc.get("weight"));
+            if (truoc.get("requires") != null) sau.put("requires", truoc.get("requires"));
+            // Giữ luôn id cũ: `requires` của checkpoint khác đang trỏ vào đúng chuỗi id này,
+            // đổi id mà giữ requires là tự tay làm đứt liên kết cha–con.
+            if (!text(truoc, "id", "").isBlank()) sau.put("id", truoc.get("id"));
+        }
+        return true;
+    }
+
+    /**
+     * Vân tay nội dung một checkpoint. Loại ba khoá thay vì liệt kê khoá cần so: checkpoint có
+     * hàng chục dạng (Ch.7, entity_consistency, database_diff…), liệt kê tay là chắc chắn bỏ sót
+     * dạng mới rồi âm thầm coi hai thứ khác nhau là một.
+     *
+     * `weight` và `requires` là của người soạn — đúng thứ đang đi thừa kế nên không được so.
+     * `id` do phép tách đánh số theo thứ tự, không phải nội dung.
+     */
+    private String vanTayCheckpoint(Map<String, Object> checkpoint) {
+        Map<String, Object> rut = new LinkedHashMap<>(checkpoint);
+        rut.keySet().removeAll(Set.of("weight", "requires", "id"));
+        // Bỏ nốt GIÁ TRỊ CHUẨN do máy đo. Toạ độ, màu, luật lặp, giá trị widget đều do engine
+        // đo trên Golden lúc capture rồi nướng vào (xem applyCapturedLayout) — chúng KHÔNG nằm
+        // trong raw_trace, nên bản dựng lại từ trace không đời nào có. Để nguyên thì mọi
+        // scenario có lấy một tiêu chí vị trí/màu/trạng thái đều "khác" ở mọi lượt sinh lại,
+        // và cơ chế thừa kế chết cứng — đo thật 20/9: bên cũ có expect{center_x…}, bên mới
+        // không có khoá expect nào.
+        //
+        // Không phải nới luật so chặt: người soạn chưa từng gõ mấy con số này, và vài giây sau
+        // capture sẽ đo lại rồi nướng vào đúng chỗ cũ.
+        if (LOAI_NHAN_GIA_TRI_MAY_DO.contains(text(checkpoint, "kind", ""))) {
+            Map<String, Object> mongDoi = new LinkedHashMap<>(map(rut.get("expect")));
+            mongDoi.keySet().removeAll(KHOA_GIA_TRI_MAY_DO);
+            // Rỗng thì phải XOÁ HẲN khoá: bên mới không có `expect` chứ không phải có mà rỗng.
+            if (mongDoi.isEmpty()) rut.remove("expect");
+            else rut.put("expect", mongDoi);
+        }
+        return json(chuanHoaSoSanh(rut));
+    }
+
+    /**
+     * Sắp xếp khoá và quy số về một kiểu để so bằng chuỗi. Bên cũ đọc từ JSON đã lưu, bên mới
+     * vừa dựng trong bộ nhớ: cùng một con số có thể là Integer 1 bên này và Double 1.0 bên kia,
+     * so thô thì báo "khác" dù giá trị y hệt.
+     */
+    private Object chuanHoaSoSanh(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> ra = new TreeMap<>();
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                ra.put(String.valueOf(entry.getKey()), chuanHoaSoSanh(entry.getValue()));
+            }
+            return ra;
+        }
+        if (value instanceof List<?> list) {
+            List<Object> ra = new ArrayList<>();
+            for (Object item : list) ra.add(chuanHoaSoSanh(item));
+            return ra;
+        }
+        if (value instanceof Number number) return number.doubleValue();
+        return value;
+    }
+
+    private boolean laCheckpointCsdlTuSinh(Map<String, Object> checkpoint) {
+        return Set.of("hidden_output_diff", "hidden_output_consistency")
+                .contains(text(checkpoint, "generated_from", ""));
     }
 
     /**
@@ -1129,17 +1257,50 @@ public class BehaviorAuthoringService {
      * mất đúng tiêu chí nhãn thay vì kéo sập cả màn phía sau.
      */
     @Transactional
-    public int applyCapturedTargets(String scenarioId, Map<String, Object> nhan) {
-        if (nhan == null || nhan.isEmpty()) return 0;
+    public int applyCapturedTargets(String scenarioId, Map<String, Object> nhan,
+                                    Map<String, Object> theoDinhDanh) {
+        if ((nhan == null || nhan.isEmpty()) && (theoDinhDanh == null || theoDinhDanh.isEmpty())) return 0;
+        Map<String, Object> banNhan = nhan == null ? Map.of() : nhan;
+        Map<String, Object> banId = theoDinhDanh == null ? Map.of() : theoDinhDanh;
         BehaviorScenario scenario = scenario(scenarioId);
         ensureEditable(suite(scenario.getSuiteId()));
         List<Map<String, Object>> steps = new ArrayList<>(readObjectList(scenario.getStepsJson()));
         int daNuong = 0;
         for (Map<String, Object> step : steps) {
             Map<String, Object> target = new LinkedHashMap<>(map(step.get("target")));
+            String maDinhDanh = text(target, "semantic_id", "");
+            if (maDinhDanh.isBlank()) maDinhDanh = text(target, "semanticId", "");
+            if (!maDinhDanh.isBlank()) {
+                // BƯỚC ĐI BẰNG ĐỊNH DANH. Recorder chốt đúng một khoá rồi dừng, nên target
+                // không mang nhãn nào — bài quên gắn định danh là bước hỏng và cả lượt chấm
+                // sập theo. Nướng đường lui đo trên Golden vào đây: nhãn cho nút có chữ, hình
+                // dạng (kiểu widget + mã icon) cho nút chỉ có icon.
+                Map<String, Object> lui = map(banId.get(maDinhDanh));
+                boolean doi = false;
+                String nhanLui = text(lui, "label", "");
+                // Không ghi đè nhãn người soạn đã khai bằng tay.
+                if (!nhanLui.isBlank() && text(target, "label", "").isBlank()) {
+                    target.put("label", nhanLui);
+                    doi = true;
+                }
+                Map<String, Object> hinh = map(lui.get("shape"));
+                if (!hinh.isEmpty()) {
+                    target.put("fallback", List.of(hinh));
+                    doi = true;
+                }
+                if (doi) {
+                    step.put("target", target);
+                    daNuong++;
+                    continue;
+                }
+                // KHÔNG `continue` khi bảng theo định danh không có mục nào: bước mang CẢ hai
+                // khoá (nhãn ghi hình trước, định danh nướng vào sau qua applyCapturedIdentifiers)
+                // vẫn phải nhận được đường lui theo nhãn như trước. Chặn ở đây là lặng lẽ làm
+                // mất đường lui của mọi bộ đề đã nâng cấp định danh kiểu đó.
+            }
             String label = text(target, "label", "");
             if (label.isBlank()) continue;
-            Map<String, Object> moTa = map(nhan.get(label));
+            Map<String, Object> moTa = map(banNhan.get(label));
             if (moTa.isEmpty()) continue;
             target.put("fallback", List.of(moTa));
             step.put("target", target);
@@ -1250,6 +1411,19 @@ public class BehaviorAuthoringService {
                 || body.containsKey("checkpoints")
                 || body.containsKey("viewports");
         if (body.containsKey("name")) scenario.setName(required(body, "name"));
+        // Đổi mã nhóm hoặc đổi tên luồng là đổi luôn mã luồng, vì mã luồng dựng từ đúng hai thứ
+        // đó. Kéo theo test_id đổi — nên sau khi sửa phải publish lại, và kết quả đã chấm bằng
+        // bản cũ không còn đối chiếu được theo id. Người soạn chỉ sửa ở bước soạn nên đổi ở đây
+        // rẻ hơn nhiều so với việc để một mã vô nghĩa đi theo bộ đề suốt đời.
+        if (body.containsKey("group_code") || body.containsKey("name")) {
+            String maNhom = body.containsKey("group_code")
+                    ? maNhom(text(body, "group_code", ""))
+                    : (scenario.getGroupCode() == null ? "" : scenario.getGroupCode());
+            scenario.setGroupCode(maNhom.isBlank() ? null : maNhom);
+            scenario.setScenarioCode(uniqueScenarioCode(scenario.getSuiteId(),
+                    slug(maNhom.isBlank() ? scenario.getName() : maNhom + "_" + scenario.getName()),
+                    scenario.getId()));
+        }
         if (body.containsKey("skill_code")) scenario.setSkillCode(required(body, "skill_code"));
         if (body.containsKey("description")) scenario.setDescription(optional(body, "description"));
         if (body.containsKey("weight")) scenario.setWeight(number(body.get("weight"), 1.0));
@@ -1324,6 +1498,57 @@ public class BehaviorAuthoringService {
         oracle.setStatus(OracleStatus.READY);
         oracles.save(oracle);
         return oracleView(oracle);
+    }
+
+    /**
+     * Duyệt MỌI scenario đang bật để biết cái nào không còn khớp Golden hiện tại.
+     *
+     * Vì sao cần: sửa một dòng giao diện trong Golden là phải upload lại, và mọi oracle cũ lập
+     * tức lệch sha. publish() dừng ngay ở scenario ĐẦU TIÊN lệch rồi ném lỗi, nên bộ chấm mười
+     * hai luồng thì người soạn phải bấm publish mười hai lần mới biết hết danh sách phải sửa.
+     * Hàm này gom cả danh sách trong một lượt, cùng bộ điều kiện y hệt publish().
+     *
+     * KHÔNG chạy Docker: thứ chặn publish ở đây là điều kiện tĩnh (thiếu bước, action không hỗ
+     * trợ, oracle lệch phiên bản Golden). Phần replay thật đã có nút "Chạy thử trên Golden" lo,
+     * và kết quả của nó hiện ở bảng "Tiêu chí chưa đạt".
+     */
+    public Map<String, Object> scenarioReadiness(String suiteId) {
+        BehaviorSuite suite = suite(suiteId);
+        GoldenApp app = golden(suite.getGoldenAppId());
+        List<BehaviorScenario> enabled = scenarios.findBySuiteIdOrderByDisplayOrderAscCreatedAtAsc(suiteId)
+                .stream().filter(row -> Boolean.TRUE.equals(row.getEnabled())).toList();
+        List<Map<String, Object>> rows = new ArrayList<>();
+        List<String> hong = new ArrayList<>();
+        for (BehaviorScenario scenario : enabled) {
+            List<String> lyDo = new ArrayList<>();
+            try {
+                validateScenario(scenario, true);
+            } catch (RuntimeException e) {
+                lyDo.add(e.getMessage());
+            }
+            boolean oracleKhop = oracles.findByScenarioIdOrderByCreatedAtDesc(scenario.getId()).stream()
+                    .anyMatch(row -> row.getStatus() == OracleStatus.READY
+                            && Objects.equals(row.getGoldenSha256(), app.getArtifactSha256()));
+            if (!oracleKhop) {
+                lyDo.add("Oracle chưa khớp bản Golden đang dùng — mở “Sửa thao tác” rồi “Sinh lại testcase”.");
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", scenario.getId());
+            row.put("scenario_code", scenario.getScenarioCode());
+            row.put("name", scenario.getName());
+            row.put("ok", lyDo.isEmpty());
+            row.put("reasons", lyDo);
+            rows.add(row);
+            if (!lyDo.isEmpty()) hong.add(scenario.getScenarioCode());
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("suite_id", suiteId);
+        out.put("golden_sha256", app.getArtifactSha256());
+        out.put("golden_ready", app.getStatus() == GoldenAppStatus.READY);
+        out.put("total", rows.size());
+        out.put("failed", hong);
+        out.put("scenarios", rows);
+        return out;
     }
 
     @Transactional
@@ -1607,6 +1832,7 @@ public class BehaviorAuthoringService {
         out.put("suite_id", scenario.getSuiteId());
         out.put("source_recording_id", scenario.getSourceRecordingId());
         out.put("scenario_code", scenario.getScenarioCode());
+        out.put("group_code", scenario.getGroupCode() == null ? "" : scenario.getGroupCode());
         out.put("name", scenario.getName());
         out.put("skill_code", scenario.getSkillCode());
         out.put("description", scenario.getDescription());
@@ -1759,7 +1985,7 @@ public class BehaviorAuthoringService {
 
     private Map<String, Object> defaultPublicContract() {
         return Map.of(
-                "locator_priority", List.of("semantic_id", "value_key", "accessibility_label", "role_text", "structure"),
+                "locator_priority", List.of("semantic_id", "accessibility_label", "role_text", "structure"),
                 "required_semantics", List.of(),
                 "allow_coordinate_fallback", false);
     }
@@ -1790,7 +2016,7 @@ public class BehaviorAuthoringService {
 
 
     private String locatorAttribute(Map<String, Object> target) {
-        for (String key : List.of("semanticId", "semantic_id", "valueKey", "value_key", "key",
+        for (String key : List.of("semanticId", "semantic_id",
                 "label", "hint", "text", "text_prefix", "tooltip", "role")) {
             if (target.get(key) != null && !String.valueOf(target.get(key)).isBlank()) return key;
         }
@@ -1850,19 +2076,46 @@ public class BehaviorAuthoringService {
 
 
     private String uniqueScenarioCode(String suiteId, String base) {
+        return uniqueScenarioCode(suiteId, base, null);
+    }
+
+    /**
+     * @param boQuaScenarioId luồng được phép giữ mã đó mà không tính là đụng độ — chính nó.
+     *                        Thiếu tham số này thì mỗi lượt "Sinh lại testcase" của một luồng
+     *                        không đổi tên lại mọc thêm hậu tố "_2", và test_id trôi theo.
+     */
+    private String uniqueScenarioCode(String suiteId, String base, String boQuaScenarioId) {
         String value = base.isBlank() ? "SCENARIO" : base;
         String candidate = value;
         int suffix = 2;
-        while (scenarios.findBySuiteIdAndScenarioCode(suiteId, candidate).isPresent()) {
+        while (true) {
+            Optional<BehaviorScenario> chu = scenarios.findBySuiteIdAndScenarioCode(suiteId, candidate);
+            if (chu.isEmpty() || chu.get().getId().equals(boQuaScenarioId)) return candidate;
             candidate = value + "_" + suffix++;
         }
-        return candidate;
+    }
+
+    /** Chuẩn hoá mã nhóm. Chuỗi rỗng nghĩa là luồng KHÔNG thuộc nhóm nào — đó là trạng thái hợp lệ. */
+    private String maNhom(String value) {
+        String s = boDau(value == null ? "" : value).toUpperCase(Locale.ROOT)
+                .replaceAll("[^A-Z0-9_-]+", "_").replaceAll("^[_-]+|[_-]+$", "");
+        return s.length() > 50 ? s.substring(0, 50) : s;
     }
 
     private String slug(String value) {
-        String slug = value == null ? "" : value.toUpperCase(Locale.ROOT).replaceAll("[^A-Z0-9]+", "_")
-                .replaceAll("^_+|_+$", "");
+        String slug = value == null ? "" : boDau(value).toUpperCase(Locale.ROOT)
+                .replaceAll("[^A-Z0-9]+", "_").replaceAll("^_+|_+$", "");
         return slug.length() > 90 ? slug.substring(0, 90) : slug;
+    }
+
+    /**
+     * Bỏ dấu tiếng Việt trước khi dựng mã. Không bỏ thì "lọc học tập" ra "L_C_H_C_T_P" — mã rác,
+     * mà mã này đi thẳng vào test_id, thứ người chấm đọc trên bảng điểm.
+     */
+    private static String boDau(String value) {
+        String tach = java.text.Normalizer.normalize(value, java.text.Normalizer.Form.NFD)
+                .replaceAll("\\p{M}+", "");
+        return tach.replace('đ', 'd').replace('Đ', 'D');
     }
 
     private String normalizeObject(Object value, Map<String, Object> fallback) {

@@ -84,7 +84,10 @@ public class BanGiaoService {
         examRepository.save(exam);
 
         Path testcase = thuMucTestcase(exam);
-        Map<String, Object> meta = dungToKhai(exam, vanTay, testcase);
+        // `vanTay` vẫn phải tính và đóng dấu ở trên: màn soạn bên giảng viên đọc nó qua
+        // /khung-phat/trang-thai để biết Golden đã đổi kể từ lần phát khung gần nhất. Chỉ có
+        // việc mang nó sang bên người chấm là bỏ — bên đó không có gì để đối chiếu.
+        Map<String, Object> meta = dungToKhai(exam, testcase);
 
         ByteArrayOutputStream ra = new ByteArrayOutputStream();
         try (ZipOutputStream zip = new ZipOutputStream(ra, StandardCharsets.UTF_8)) {
@@ -163,21 +166,17 @@ public class BanGiaoService {
         return p;
     }
 
-    private Map<String, Object> dungToKhai(Exam exam, String vanTayKhung, Path testcase) {
+    private Map<String, Object> dungToKhai(Exam exam, Path testcase) {
         Map<String, Object> meta = new LinkedHashMap<>();
         meta.put("schema_version", 1);
         meta.put("exam_id", exam.getExamId());
         meta.put("exam_name", exam.getExamName());
-        meta.put("teacher_note", exam.getTeacherNote());
         // Ảnh nền quyết định bài sinh viên biên dịch được hay không. Ghi lại nhãn để bên nhận
         // đối chiếu; hai máy khác ảnh là cùng một bài cho hai kết quả khác nhau.
         meta.put("base_image", baseImage);
         // Vân tay của engine chấm nằm trong gói — để khi điểm hai bên lệch nhau còn biết có phải
         // do khác engine hay không, thay vì đoán.
         meta.put("engine_sha256", vanTayEngine(testcase));
-        // Vân tay của khung phát đi kèm lần xuất này — bên người chấm không dùng để chặn gì,
-        // nhưng khi hai bên nghi ngờ nhau thì đây là con số đối chiếu được.
-        meta.put("khung_van_tay", vanTayKhung);
         meta.put("exported_at", Instant.now().toString());
         return meta;
     }
@@ -234,8 +233,10 @@ public class BanGiaoService {
 
         // Dùng lại đúng đường nạp testcase cũ: giải nén, kiểm tra đủ file, chuẩn hóa tên test,
         // ghi bản ghi đề và chuẩn bị sandbox. Không viết lại khâu nào.
-        examService.setupExamFromZipBytes(examId, chuoi(meta.get("exam_name")),
-                chuoi(meta.get("teacher_note")), zipBytes);
+        // Ghi chú của giảng viên KHÔNG đi theo gói (21/9/2026): nó được lưu vào bản ghi đề bên
+        // người chấm nhưng không màn nào in ra, nên đó là dữ liệu chết — mang sang chỉ khiến
+        // người đọc tưởng bên kia có đọc.
+        examService.setupExamFromZipBytes(examId, chuoi(meta.get("exam_name")), zipBytes);
 
         Exam exam = examRepository.findByExamId(examId)
                 .orElseThrow(() -> new IllegalStateException("Nạp xong nhưng không thấy bản ghi đề " + examId));
@@ -245,7 +246,6 @@ public class BanGiaoService {
         ra.put("exam_name", exam.getExamName());
         ra.put("base_image_cua_goi", meta.get("base_image"));
         ra.put("base_image_may_nay", baseImage);
-        ra.put("khung_van_tay", meta.get("khung_van_tay"));
         return ra;
     }
 

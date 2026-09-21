@@ -78,12 +78,15 @@ interface Recording { id: string; suite_id: string; name: string; status: string
 interface Artifact { id: string; type: ArtifactType; version: number; file_name: string; size_bytes: number; active: boolean; sha256: string }
 interface MissingPackageSpec { name: string; version: string }
 interface Readiness { ready: boolean; missing: ArtifactType[]; artifacts: Partial<Record<ArtifactType, Artifact | null>> }
+/** Kết quả duyệt toàn bộ scenario xem cái nào còn khớp Golden hiện tại (không chạy Docker). */
+interface SoatScenarioRow { id: string; scenario_code: string; name: string; ok: boolean; reasons: string[] }
+interface SoatScenario { total: number; failed: string[]; golden_ready: boolean; scenarios: SoatScenarioRow[] }
 interface GoldenValidation { status: "NOT_RUN" | "RUNNING" | "PASSED" | "FAILED" | "UNAVAILABLE"; current: boolean; total_checkpoints?: number; passed_checkpoints?: number; log?: string }
 interface RuntimeStatus { status: string; runtime_url?: string | null; runtime_path?: string | null; available?: boolean; cached?: boolean; message?: string; metadata?: JsonMap }
 interface CodePreviewFile { name: string; description: string; scope: "SCENARIO" | "BUNDLE" | "ENGINE"; content: string }
-interface CodePreview { suite_id: string; suite_code: string; selected_scenario_code?: string | null; scenario_count: number; criterion_count: number; files: CodePreviewFile[] }
+interface CodePreview { suite_id: string; suite_code: string; scenario_count: number; criterion_count: number; files: CodePreviewFile[] }
 interface StaticRuleGolden { passed: boolean | null; detail: string }
-interface StaticRule { id: string; name: string; kind: "lint" | "source_pattern"; lint_code?: string; config?: JsonMap; weight: number; group_id: string; group_name: string; skill_code?: string; description?: string; golden?: StaticRuleGolden }
+interface StaticRule { id: string; name: string; kind: "lint" | "source_pattern"; lint_code?: string; config?: JsonMap; weight: number; group_id: string; skill_code?: string; description?: string; golden?: StaticRuleGolden }
 interface StaticRulesView { suite_id: string; golden_available: boolean; rules: StaticRule[]; presets: StaticRule[] }
 
 const ARTIFACTS: { type: ArtifactType; title: string; owner: "teacher" | "system"; accept: string; hint: string; icon: typeof Database }[] = [
@@ -120,8 +123,8 @@ const ACTIONS = [
   "open_uri", "browser_back", "browser_forward", "reload", "restart",
   "wait_until", "wait_for_route",
 ];
-// Bỏ hẳn "valueKey" khỏi danh sách chọn: đề chỉ còn MỘT hệ định danh. Engine vẫn đọc
-// được khoá cũ để bộ đề đã ra không chết, nhưng không mời ai khai thêm cái mới.
+// Đề chỉ còn MỘT hệ định danh. "valueKey" đã gỡ hẳn khỏi cả danh sách này lẫn engine
+// (21/9/2026) — để lại một khoá thứ hai là mời người sau dựng lại hệ định danh song song.
 const LOCATORS = ["semanticId", "label", "hint", "text", "text_prefix", "tooltip"];
 const ACTION_LABELS: Record<string, string> = {
   boot: "Khởi động app",
@@ -145,8 +148,7 @@ const ACTION_LABELS: Record<string, string> = {
   observe_layout: "Kiểm tra bố cục",
 };
 // Chữ hiển thị cho từng cách định vị. Giá trị gửi đi giữ nguyên; chỉ đổi chữ để không ai
-// tưởng "semanticId" là ValueKey: máy chấm tìm nó bằng Semantics(identifier:), còn ValueKey
-// thì recorder không bao giờ thấy (không ra tới DOM) nên chỉ dùng được khi gõ tay ở đây.
+// tưởng "semanticId" là ValueKey: máy chấm tìm nó bằng Semantics(identifier:).
 function asJsonMap(value: unknown): JsonMap {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonMap : {};
 }
@@ -198,7 +200,6 @@ const SEMANTIC_ROLES = [
 
 const LOCATOR_LABELS: Record<string, string> = {
   semanticId: "định danh — Semantics(identifier:)",
-  valueKey: "ValueKey (recorder không thấy, chỉ gõ tay)",
   label: "nhãn — Semantics(label:)",
   hint: "gợi ý ô nhập — hintText",
   text: "chữ hiển thị",
@@ -750,6 +751,7 @@ function BehaviorAuthoringEditor() {
   const [recording, setRecording] = useState<Recording | null>(null);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [readiness, setReadiness] = useState<Readiness | null>(null);
+  const [soatScenario, setSoatScenario] = useState<SoatScenario | null>(null);
   const [validation, setValidation] = useState<GoldenValidation | null>(null);
   // KIỂM ĐỒNG BỘ KHUNG PHÁT. Khung được bóc ra từ Golden sau cùng, nên nó rất dễ tụt lại
   // phía sau; lệch schema hay lệch định danh làm hỏng cả lớp mà không khâu nào khác thấy.
@@ -757,6 +759,51 @@ function BehaviorAuthoringEditor() {
   const [deGiao, setDeGiao] = useState("");
   // parseCheckpointLog đã lọc sẵn dòng trượt, nên đây là danh sách CHƯA ĐẠT chứ không phải toàn bộ.
   const checkpointFails = useMemo(() => parseCheckpointLog(validation?.log), [validation?.log]);
+  /** Scenario bị "Duyệt lại scenario" gạch tên, kèm lý do để hiện thẳng trên thẻ của nó. */
+  /**
+   * Mã nhóm đã dùng trong bộ chấm — nguồn cho dropdown của ô Mã nhóm. Luồng đầu tiên gõ tay,
+   * từ luồng thứ hai chỉ việc chọn — gõ tay mỗi lần là sớm muộn có FILTER và FILTERS nằm cạnh nhau.
+   */
+  const maNhomCoSan = useMemo(() => {
+    const ra = new Set<string>();
+    for (const sc of suite?.scenarios || []) {
+      const ma = String((sc as JsonMap).group_code || "").trim();
+      if (ma) ra.add(ma);
+    }
+    return [...ra].sort();
+  }, [suite]);
+  /**
+   * Thẻ luồng xếp theo nhóm: cùng mã nhóm thì đứng liền nhau, luồng chưa có nhóm dồn xuống
+   * cuối. `dauNhom` đánh dấu thẻ đầu của mỗi nhóm để chèn tiêu đề chạy hết chiều ngang lưới.
+   */
+  const scenarioSapXep = useMemo(() => {
+    const ds = (suite?.scenarios || []).map((item, index) => ({ item, index }));
+    const nhomCua = (x: { item: JsonMap }) => String(x.item.group_code || "").trim();
+    const thuTuNhom: string[] = [];
+    for (const x of ds) {
+      const n = nhomCua(x);
+      if (n && !thuTuNhom.includes(n)) thuTuNhom.push(n);
+    }
+    const sapXep = [
+      ...thuTuNhom.flatMap((n) => ds.filter((x) => nhomCua(x) === n)),
+      ...ds.filter((x) => !nhomCua(x)),
+    ];
+    let truoc = "";
+    let dauTien = true;
+    return sapXep.map((x) => {
+      const nhanNhom = nhomCua(x) || "Chưa xếp nhóm";
+      const dauNhom = dauTien || nhanNhom !== truoc;
+      truoc = nhanNhom;
+      dauTien = false;
+      return { ...x, dauNhom, nhanNhom };
+    });
+  }, [suite]);
+
+  const scenarioHong = useMemo(() => {
+    const ra = new Map<string, string[]>();
+    for (const row of soatScenario?.scenarios || []) if (!row.ok) ra.set(String(row.id), row.reasons || []);
+    return ra;
+  }, [soatScenario]);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [recorderReady, setRecorderReady] = useState(false);
   const [busy, setBusy] = useState("");
@@ -882,7 +929,9 @@ function BehaviorAuthoringEditor() {
   const [dinhDanhTrenMan, setDinhDanhTrenMan] = useState<string[]>([]);
   // KHÔNG điền sẵn: mã/tên luồng là danh tính của tiêu chí trong bảng điểm,
   // để mặc định thì mọi bộ chấm đều đầy "MAIN_FLOW/Luồng chính" vô nghĩa.
-  const [scenarioCode, setScenarioCode] = useState("");
+  // Mã NHÓM (FILTER, UI, CRUD…) — để trống là luồng không thuộc nhóm nào. Không còn ô "Mã
+  // luồng": mã đó nay do máy dựng từ mã nhóm + tên luồng, xem BehaviorAuthoringService.
+  const [groupCode, setGroupCode] = useState("");
   const [scenarioName, setScenarioName] = useState("");
   const [scenarioWeight, setScenarioWeight] = useState<DiemNhap>(10);
   // Bảng tick thành phần giao diện — đổ về từ lệnh quét màn hình của bridge.
@@ -1028,7 +1077,7 @@ function BehaviorAuthoringEditor() {
         setEditingScenarioId(suaId || null);
         const scenarioCu = (suiteData.scenarios || []).find((s) => String(s.id || "") === suaId);
         if (scenarioCu) {
-          setScenarioCode(String(scenarioCu.scenario_code || ""));
+          setGroupCode(String(scenarioCu.group_code || ""));
           setScenarioName(String(scenarioCu.name || scenarioCu.scenario_code || ""));
           setScenarioWeight(Number(scenarioCu.weight || 1));
         } else if (dangSoan.name) {
@@ -1130,6 +1179,7 @@ function BehaviorAuthoringEditor() {
     setRecording(null);
     setArtifacts([]);
     setReadiness(null);
+    setSoatScenario(null);
     setValidation(null);
     setRuntimeStatus(null);
     setRuntimeUrl("");
@@ -1435,7 +1485,9 @@ function BehaviorAuthoringEditor() {
   /** Đổi loại thì nạp sẵn giá trị mặc định, để ô đang hiện trên màn cũng là ô sẽ gửi đi. */
   const doiLoaiCh7 = (ma: string) => {
     setCh7Kind(ma);
-    if (ma !== "quan_he") layDinhDanhTrenMan();
+    // Đọc cho MỌI loại, kể cả "quan_he": loại này cũng gõ định danh vào ô A/B nên cũng cần
+    // danh sách gợi ý. Bỏ sót nó thì ở loại hay dùng nhất, cảnh báo gõ sai không bao giờ bật.
+    layDinhDanhTrenMan();
     const loai = CH7_LOAI.find((x) => x.ma === ma);
     const macDinh: Record<string, string> = {};
     for (const t of loai?.truong || []) {
@@ -1570,10 +1622,6 @@ function BehaviorAuthoringEditor() {
               attribute: it.attribute, attributeValue: it.value, valueType: "string", value: "",
               name: `${screen} — ${mat.nhan} ${it.value}`, weight: diemDong[i],
               ...(mat.saiSo > 0 ? { tolerance_pct: Math.min(50, Math.max(0.5, Number(mat.saiSo))) } : {}),
-              ui_group: {
-                id: "G_UI_" + slug + mat.hau,
-                name: `Giao diện — ${screen}${mat.hau === "" ? "" : mat.hau === "_VITRI" ? " (vị trí)" : " (màu sắc)"}`,
-              },
             }),
           });
           daLuu++;
@@ -1709,10 +1757,6 @@ function BehaviorAuthoringEditor() {
             name: `${man} — ${mat.nhan} ${it.loai === "icon" ? "icon" : "ảnh"} ${it.ten}`,
             weight: diemDong[i],
             ...(mat.saiSo > 0 ? { tolerance_pct: Math.min(50, Math.max(0.5, Number(mat.saiSo))) } : {}),
-            ui_group: {
-              id: "G_UI_" + slug + mat.hau,
-              name: `Giao diện — ${man}${mat.hau === "" ? "" : mat.hau === "_VITRI" ? " (vị trí)" : " (màu sắc)"}`,
-            },
           });
         });
       }
@@ -1821,10 +1865,12 @@ function BehaviorAuthoringEditor() {
       const diemDong = chiaDeu(score, manh.length + yeu.length);
       // Nền chung của mọi tiêu chí responsive. Cờ `khung` là thứ materializer đọc để đẩy case
       // sang 1280×800; thiếu nó là tiêu chí âm thầm chạy ở khung điện thoại và luôn đạt.
+      // KHÔNG gắn ui_group nữa (21/9/2026): nhóm điểm chỉ đến từ MÃ NHÓM của luồng. Nhãn cũ
+      // lấy tên MÀN làm nhãn, nên hai màn cùng tên bị gộp một rọ, kéo tiêu chí của nhiều luồng
+      // khác nhau vào chung một dòng điểm.
       const nen = {
         checkpoint: true, scope: "ui", stage: "ASSERT", action: "observe_ui",
         browser: "flutter_tester", khung: "desktop",
-        ui_group: { id: "G_RESPONSIVE", name: "Responsive — khung desktop 1280×800" },
       };
       const them: JsonMap[] = [];
       manh.forEach((b, i) => {
@@ -2066,14 +2112,17 @@ function BehaviorAuthoringEditor() {
   };
 
   const stopAndAbstract = () => {
+    // Kết quả duyệt cũ hết giá trị ngay khi có một scenario được sinh lại: để nguyên thì thẻ
+    // vừa sửa xong vẫn đỏ. Xoá đi, người soạn bấm "Duyệt lại scenario" để xem còn sót cái nào.
+    setSoatScenario(null);
     const recordingId = activeRecordingId.current;
     if (!recordingId || !recording || !suite) { setError("Không còn phiên record nào gắn với trang — hãy tải lại trang."); return; }
     if (!["ACTIVE", "STOPPED"].includes(recording.status)) {
       setError(`Phiên record đang ở trạng thái ${recording.status}, không sinh testcase được. Hãy tải lại trang.`);
       return;
     }
-    if (!scenarioCode.trim() || !scenarioName.trim()) {
-      setError("Cần nhập Mã luồng và Tên luồng (ô ngay trên nút này) trước khi sinh testcase.");
+    if (!scenarioName.trim()) {
+      setError("Cần nhập Tên luồng (ô ngay trên nút này) trước khi sinh testcase. Mã nhóm để trống được.");
       return;
     }
     run("record-stop", async () => {
@@ -2105,7 +2154,7 @@ function BehaviorAuthoringEditor() {
         const sinhXong = await api<JsonMap>(`/behavior-authoring/recordings/${recordingId}/abstract`, {
           method: "POST",
           body: JSON.stringify({
-            scenario_code: scenarioCode.trim().toUpperCase(),
+            group_code: groupCode.trim(),
             name: scenarioName.trim(),
             weight: score,
             ...(editingScenarioId ? { replace_scenario_id: editingScenarioId } : {}),
@@ -2212,11 +2261,37 @@ function BehaviorAuthoringEditor() {
     setNotice(`Golden Solution đã pass ${result.passed_checkpoints}/${result.total_checkpoints} checkpoint.`);
   });
 
-  const openCodePreview = (selectedScenarioCode?: string) => suite && run("code-preview", async () => {
-    const query = selectedScenarioCode
-      ? `?scenarioCode=${encodeURIComponent(selectedScenarioCode)}`
-      : "";
-    const result = await api<CodePreview>(`/behavior-authoring/suites/${suite.id}/code-preview${query}`);
+  /**
+   * Bấm MỘT lần thay cho việc mở từng luồng bấm "Sửa thao tác" rồi "Sinh lại testcase".
+   *
+   * Phải hỏi trước: mỗi luồng là một lượt chạy Docker nên bộ nhiều luồng mất vài phút, và
+   * nó ghi đè oracle của toàn bộ bộ chấm.
+   */
+  const sinhLaiToanBo = () => {
+    if (!suite) return;
+    const soLuong = suite.scenarios?.length || 0;
+    if (!window.confirm(`Sinh lại ${soLuong} scenario trên bản Golden hiện tại?\n\n`
+      + `Thay cho ${soLuong} lần bấm “Sửa thao tác” + “Sinh lại testcase”. `
+      + `Điểm đã chia và ràng buộc đã gắn được giữ nguyên.\n\n`
+      + `Mỗi luồng là một lượt chạy Docker nên có thể mất vài phút.`)) return;
+    run("sinh-lai-tat", async () => {
+      const result = await api<SoatScenario>(
+        `/behavior-authoring/suites/${suite.id}/scenarios/recapture-all`, { method: "POST" });
+      setSoatScenario(result);
+      await refresh(suite.id);
+      if (result.total === 0) { setNotice("Bộ chấm chưa có scenario nào đang bật."); return; }
+      if (result.failed.length === 0) {
+        setNotice(`Đã sinh lại ${result.total}/${result.total} scenario trên Golden hiện tại. `
+          + `Hãy chạy thử trên Golden trước khi publish.`);
+        return;
+      }
+      throw new Error(`Đã sinh lại ${result.total - result.failed.length}/${result.total} scenario. `
+        + `Không xong: ${result.failed.join(", ")} — lý do in ngay trên thẻ từng luồng.`);
+    });
+  };
+
+  const openCodePreview = () => suite && run("code-preview", async () => {
+    const result = await api<CodePreview>(`/behavior-authoring/suites/${suite.id}/code-preview`);
     setCodePreview(result);
     setPreviewFileName(result.files[0]?.name || "");
   });
@@ -2287,7 +2362,7 @@ function BehaviorAuthoringEditor() {
       return;
     }
     run(`revise-scenario-${String(item.id)}`, async () => {
-      setScenarioCode(String(item.scenario_code || ""));
+      setGroupCode(String(item.group_code || ""));
       setScenarioName(String(item.name || item.scenario_code || ""));
       setScenarioWeight(Number(item.weight || 1));
       // Đưa Golden về màn đầu với dữ liệu gốc — cùng lý lẽ với lúc bắt đầu record: máy chấm
@@ -2666,7 +2741,7 @@ function BehaviorAuthoringEditor() {
             </div>
 
             <div ref={authoringPanel} className="min-w-0 scroll-mt-24 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
-              <div className="flex items-center justify-between"><div><h1 className="text-xl font-bold">Ghi thao tác & soạn tiêu chí</h1></div>{editingScenarioId && <span className="mr-3 rounded-full bg-indigo-100 px-2.5 py-1 text-xs font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300" title="Đang sửa một scenario đã có. Bước cũ nằm sẵn trong danh sách dưới; bấm Hủy sửa ở hàng nút cuối để thoát.">Đang sửa {scenarioCode || "scenario"}</span>}{recording ? <span className={`flex items-center gap-2 text-sm font-bold ${recording.status === "ACTIVE" ? "text-rose-500" : "text-amber-500"}`}><span className={`h-2 w-2 rounded-full ${recording.status === "ACTIVE" ? "animate-pulse bg-rose-500" : "bg-amber-500"}`} /> {recording.status === "ACTIVE" ? "RECORDING" : "Chờ sinh testcase"}</span> : <span className="text-sm text-slate-500">Chưa ghi</span>}</div>
+              <div className="flex items-center justify-between"><div><h1 className="text-xl font-bold">Ghi thao tác & soạn tiêu chí</h1></div>{editingScenarioId && <span className="mr-3 rounded-full bg-indigo-100 px-2.5 py-1 text-xs font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300" title="Đang sửa một scenario đã có. Bước cũ nằm sẵn trong danh sách dưới; bấm Hủy sửa ở hàng nút cuối để thoát.">Đang sửa {scenarioName || "luồng"}</span>}{recording ? <span className={`flex items-center gap-2 text-sm font-bold ${recording.status === "ACTIVE" ? "text-rose-500" : "text-amber-500"}`}><span className={`h-2 w-2 rounded-full ${recording.status === "ACTIVE" ? "animate-pulse bg-rose-500" : "bg-amber-500"}`} /> {recording.status === "ACTIVE" ? "RECORDING" : "Chờ sinh testcase"}</span> : <span className="text-sm text-slate-500">Chưa ghi</span>}</div>
               {iconInventory && iconScenario && (
                 <div className="mt-4 rounded-xl border border-teal-300 bg-teal-50/40 p-3 dark:border-teal-800 dark:bg-teal-950/20">
                   <div className="flex flex-wrap items-center gap-2">
@@ -2709,7 +2784,7 @@ function BehaviorAuthoringEditor() {
                 <p className="mt-2 text-[11px] text-slate-500">Với ảnh cho sẵn, nên để <b>tắt</b> phần màu: sinh viên không vẽ ra tấm ảnh đó nên màu của nó không phản ánh bài làm. Lưu xong hệ thống tự capture lại để đo giá trị chuẩn.</p>
                 </div>
               )}
-              <div className="mt-4 grid gap-3 sm:grid-cols-3"><input value={scenarioCode} disabled={Boolean(editingScenarioId)} onChange={(e) => setScenarioCode(e.target.value)} placeholder="Mã luồng (vd: ADD, EDIT, FILTER_ALL)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700" /><input value={scenarioName} onChange={(e) => setScenarioName(e.target.value)} placeholder="Tên luồng (vd: Thêm khoản chi)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><input type="text" inputMode="decimal" value={scenarioWeight} onChange={(e) => setScenarioWeight(e.target.value)} aria-label="Trọng số scenario" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /></div>
+              <div className="mt-4 grid gap-3 sm:grid-cols-3"><div><input value={groupCode} onChange={(e) => setGroupCode(e.target.value)} list="ma-nhom-co-san" title="Gõ mã nhóm mới hoặc chọn một mã đã dùng. Để trống nếu luồng này không thuộc nhóm nào." placeholder="Mã nhóm (vd: FILTER — để trống nếu không nhóm)" className="w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><datalist id="ma-nhom-co-san">{maNhomCoSan.map((ma) => <option key={ma} value={ma} />)}</datalist></div><input value={scenarioName} onChange={(e) => setScenarioName(e.target.value)} placeholder="Tên luồng (vd: Thêm khoản chi)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><input type="text" inputMode="decimal" value={scenarioWeight} onChange={(e) => setScenarioWeight(e.target.value)} aria-label="Trọng số scenario" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /></div>
               <div className="mt-2 grid gap-2 sm:grid-cols-2">
                   <div className="rounded-lg border border-blue-800 bg-blue-800 px-3 py-2 text-xs font-bold text-white sm:col-span-2 dark:border-blue-600 dark:bg-blue-730">
   Khung app: {KHUNG_RONG} × {KHUNG_CAO} dp — máy Pixel 7 (màn 412×915 dp, đã trừ 77 dp thanh trạng thái và thanh cử chỉ)
@@ -2740,7 +2815,9 @@ function BehaviorAuthoringEditor() {
                       <button onClick={() => setCheckpointMode("ui")} className={`rounded-md px-3 py-1.5 ${checkpointMode === "ui" ? "bg-white text-indigo-600 shadow dark:bg-slate-700" : "text-slate-500"}`}>UI</button>
                       <button onClick={() => setCheckpointMode("database")} className={`rounded-md px-3 py-1.5 ${checkpointMode === "database" ? "bg-white text-indigo-600 shadow dark:bg-slate-700" : "text-slate-500"}`}>Database</button>
                       <button onClick={() => setCheckpointMode("route")} className={`rounded-md px-3 py-1.5 ${checkpointMode === "route" ? "bg-white text-indigo-600 shadow dark:bg-slate-700" : "text-slate-500"}`}>Route</button>
-                      <button onClick={() => setCheckpointMode("layout")} className={`rounded-md px-3 py-1.5 ${checkpointMode === "layout" ? "bg-white text-indigo-600 shadow dark:bg-slate-700" : "text-slate-500"}`}>Bố cục</button>
+                      {/* Mở tab là đọc luôn, để danh sách gợi ý đã sẵn trước khi người soạn gõ
+                          chữ đầu tiên — không ai nghĩ tới việc phải bấm một nút nạp dữ liệu. */}
+                      <button onClick={() => { setCheckpointMode("layout"); layDinhDanhTrenMan(); }} className={`rounded-md px-3 py-1.5 ${checkpointMode === "layout" ? "bg-white text-indigo-600 shadow dark:bg-slate-700" : "text-slate-500"}`}>Bố cục</button>
                     </div>
                   </div>
                   {checkpointMode === "ui" ? (
@@ -2852,6 +2929,17 @@ function BehaviorAuthoringEditor() {
                       </select>
                       <datalist id="golden-layout-targets">{(uiInventory || []).map((item) => <option key={`${item.attribute}:${item.value}`} value={item.value}>{item.attribute}</option>)}</datalist>
                       <datalist id="golden-dinh-danh">{dinhDanhDaThay.map((ma) => <option key={ma} value={ma} />)}</datalist>
+                      {/* Hàng này phải nằm NGOÀI nhánh loại. Trước đây nó nằm trong nhánh Ch.7
+                          đặc biệt, nên ở "Quan hệ vị trí" — loại mặc định, dùng nhiều nhất — không
+                          có nút nào nạp danh sách: ô A/B không xổ gợi ý và cảnh báo gõ sai câm. */}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button onClick={layDinhDanhTrenMan} title="Đọc lại định danh của màn Golden đang mở" className="inline-flex items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 text-xs font-bold text-slate-600 dark:border-slate-600 dark:text-slate-300">Đọc lại định danh</button>
+                        <span className="text-xs text-slate-500">
+                          {dinhDanhDaThay.length > 0
+                            ? `${dinhDanhDaThay.length} định danh đang có trên màn Golden, bấm vào ô để chọn.`
+                            : "Chưa đọc được định danh nào: mở màn cần chấm trong Golden rồi bấm “Đọc lại định danh”."}
+                        </span>
+                      </div>
                       {!loaiCh7Hien ? (
                         <>
                           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
@@ -2870,7 +2958,6 @@ function BehaviorAuthoringEditor() {
                             <label className="flex items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700">Sai số %<input type="number" min={0} max={50} step={0.5} value={layoutTolerance} onChange={(e) => setLayoutTolerance(Number(e.target.value))} className="min-w-0 flex-1 bg-transparent text-right outline-none" /></label>
                             <button onClick={appendLayoutCheckpoint} title="Lưu checkpoint quan hệ bố cục" className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white"><Check size={16} /></button>
                           </div>
-                          <p className="text-xs text-slate-500">Không so pixel. Runner chỉ đo Rect logic của hai semantic element. Hãy “Quét thành phần UI” trước để lấy gợi ý target; chế độ tự động sẽ nướng quan hệ đo được từ Golden vào oracle. Hai thành phần đều phải đang HIỆN trên màn, thứ nằm ngoài khung nhìn thì runner không đo được.</p>
                         </>
                       ) : (
                         <>
@@ -2909,12 +2996,6 @@ function BehaviorAuthoringEditor() {
                           <p className="rounded-lg border border-dashed border-amber-400 px-3 py-2 text-xs text-amber-700 dark:border-amber-700 dark:text-amber-300">{loaiCh7Hien.canhBao}</p>
                           <div className="flex flex-wrap items-center gap-2">
                             <button onClick={appendLayoutCheckpoint} disabled={Boolean(busy)} className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white disabled:opacity-40"><Check size={16} /> Lưu tiêu chí bố cục</button>
-                            <button onClick={layDinhDanhTrenMan} title="Đọc lại định danh của màn Golden đang mở" className="inline-flex items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 text-xs font-bold text-slate-600 dark:border-slate-600 dark:text-slate-300">Đọc lại định danh</button>
-                            <span className="text-xs text-slate-500">
-                              {dinhDanhDaThay.length > 0
-                                ? `${dinhDanhDaThay.length} định danh đang có trên màn Golden, bấm vào ô để chọn.`
-                                : "Chưa đọc được định danh nào: mở màn cần chấm trong Golden rồi bấm “Đọc lại định danh”."}
-                            </span>
                           </div>
                         </>
                       )}
@@ -2931,7 +3012,7 @@ function BehaviorAuthoringEditor() {
                   const dinhDanh = readableValue(target.semantic_id || target.semanticId);
                   // Chuỗi người soạn NHÌN THẤY trên màn (nhãn, chữ, gợi ý...). Bỏ hai khoá định
                   // danh ra khỏi danh sách này để khỏi in hai lần cùng một giá trị.
-                  const nhinThay = ["label", "text", "hint", "text_prefix", "tooltip", "valueKey"]
+                  const nhinThay = ["label", "text", "hint", "text_prefix", "tooltip"]
                     .map((key) => readableValue(target[key]))
                     .find((value) => value.trim().length > 0) || "";
                   const laGoChu = String(item.action || "") === "enter_text";
@@ -3053,14 +3134,19 @@ function BehaviorAuthoringEditor() {
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
-                <button onClick={() => openCodePreview()} disabled={!suite.scenarios?.length || Boolean(busy)} className="inline-flex items-center gap-2 rounded-xl border border-slate-300 px-5 py-3 font-bold text-slate-700 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:text-slate-200">
-                  {busy === "code-preview" ? <Loader2 className="animate-spin" size={18} /> : <Code2 size={18} />} Xem code bộ chấm
+                <button onClick={() => openCodePreview()} disabled={!suite.scenarios?.length || Boolean(busy)} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:text-slate-200">
+                  {busy === "code-preview" ? <Loader2 className="animate-spin" size={16} /> : <Code2 size={16} />} Xem code
                 </button>
-                <button onClick={validateGolden} disabled={!readiness?.ready || !goldenReady || Boolean(recording) || Boolean(busy)} className="inline-flex items-center gap-2 rounded-xl border border-indigo-300 px-5 py-3 font-bold text-indigo-700 disabled:cursor-not-allowed disabled:opacity-40 dark:border-indigo-700 dark:text-indigo-300">
-                  {busy === "validate-golden" ? <Loader2 className="animate-spin" size={18} /> : <Play size={18} />} Chạy thử trên Golden
+                {/* Chạy được cả khi recorder chưa nối: capture là Docker thuần, không cần iframe.
+                    Chỉ cần Golden App đã build xong — backend tự chặn và nói nếu chưa. */}
+                <button onClick={sinhLaiToanBo} disabled={!suite.scenarios?.length || Boolean(busy)} title="Bấm một lần thay cho việc mở từng luồng bấm “Sửa thao tác” rồi “Sinh lại testcase”" className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 px-3 py-2 text-sm font-bold text-amber-700 disabled:cursor-not-allowed disabled:opacity-40 dark:border-amber-700 dark:text-amber-300">
+                  {busy === "sinh-lai-tat" ? <Loader2 className="animate-spin" size={16} /> : <ShieldCheck size={16} />} {busy === "sinh-lai-tat" ? "Đang sinh lại…" : "Sinh lại toàn bộ"}
                 </button>
-                <button onClick={publish} disabled={!readiness?.ready || !goldenReady || !preflightPassed || Boolean(recording) || Boolean(busy)} className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40">
-                  {busy === "publish" ? <Loader2 className="animate-spin" size={18} /> : <Send size={18} />} Publish bộ chấm
+                <button onClick={validateGolden} disabled={!readiness?.ready || !goldenReady || Boolean(recording) || Boolean(busy)} className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-300 px-3 py-2 text-sm font-bold text-indigo-700 disabled:cursor-not-allowed disabled:opacity-40 dark:border-indigo-700 dark:text-indigo-300">
+                  {busy === "validate-golden" ? <Loader2 className="animate-spin" size={16} /> : <Play size={16} />} Chạy thử trên Golden
+                </button>
+                <button onClick={publish} disabled={!readiness?.ready || !goldenReady || !preflightPassed || Boolean(recording) || Boolean(busy)} className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white disabled:cursor-not-allowed disabled:opacity-40">
+                  {busy === "publish" ? <Loader2 className="animate-spin" size={16} /> : <Send size={16} />} Publish
                 </button>
               </div>
             </div>
@@ -3092,7 +3178,7 @@ function BehaviorAuthoringEditor() {
             <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
               {/* Các hàm chứa ref phía dưới chỉ chạy trong onClick, không chạy trong render. */}
               {/* eslint-disable-next-line react-hooks/refs */}
-              {(suite.scenarios || []).map((item, index) => <div key={String(item.id || index)} className="rounded-xl border border-slate-200 px-4 py-3 dark:border-slate-700"><div className="flex items-center justify-between gap-2"><span className="font-bold">{String(item.name || item.scenario_code)}</span><span className="rounded-full bg-indigo-100 px-2 py-1 text-xs font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">{String(item.weight)} điểm</span></div><p className="mt-1 font-mono text-[11px] text-indigo-500">{String(item.scenario_code || "")}</p>{(() => {
+              {scenarioSapXep.flatMap(({ item, index, dauNhom, nhanNhom }) => [dauNhom ? <p key={`nhom-${nhanNhom}`} className="col-span-full mt-2 border-b border-slate-200 pb-1 text-xs font-bold uppercase tracking-wide text-slate-500 dark:border-slate-700">{nhanNhom}</p> : null, <div key={String(item.id || index)} className={`rounded-xl border px-4 py-3 ${scenarioHong.has(String(item.id)) ? "border-rose-400 bg-rose-50/40 dark:border-rose-800 dark:bg-rose-950/20" : "border-slate-200 dark:border-slate-700"}`}><div className="flex items-center justify-between gap-2"><span className="font-bold">{String(item.name || item.scenario_code)}</span><span className="rounded-full bg-indigo-100 px-2 py-1 text-xs font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">{String(item.weight)} điểm</span></div>{(scenarioHong.get(String(item.id)) || []).map((lyDo, i) => <p key={i} className="mt-1 rounded bg-rose-100 px-2 py-1 text-[11px] font-bold text-rose-700 dark:bg-rose-950/50 dark:text-rose-300">{lyDo}</p>)}{(() => {
                 // Độ phủ định danh của kịch bản: bước có target mà chưa có định danh vẫn chấm được
                 // bằng nhãn, nhưng người soạn cần thấy để biết kịch bản nào chưa hưởng định danh
                 // (gắn vào Golden rồi "Sinh lại testcase" là máy nướng vào, không ghi hình lại).
@@ -3163,7 +3249,7 @@ function BehaviorAuthoringEditor() {
                     </button>
                   </div>;
                 })()}
-                <div className="mt-3 flex flex-wrap gap-2"><button onClick={() => openCodePreview(String(item.scenario_code || ""))} disabled={Boolean(busy)} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-bold text-slate-700 hover:border-indigo-400 disabled:opacity-40 dark:border-slate-700 dark:text-slate-200"><Code2 size={14} /> Xem testcase</button><button onClick={() => moChiaDiem(item)} disabled={Boolean(busy) || Boolean(recording)} title="Sửa trọng số hàm và điểm từng checkpoint đã lưu" className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 px-2.5 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-50 disabled:opacity-40 dark:border-emerald-800 dark:text-emerald-300 dark:hover:bg-emerald-950"><Database size={14} /> Chia điểm</button><button onClick={() => openScenarioEditor(item)} disabled={Boolean(busy) || Boolean(recording)} title={recording ? "Hãy kết thúc phiên đang soạn trước" : "Nạp lại các bước vào khung record để chỉnh sửa"} className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-300 px-2.5 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50 disabled:opacity-40 dark:border-indigo-800 dark:text-indigo-300 dark:hover:bg-indigo-950"><Pencil size={14} /> Sửa thao tác</button><button onClick={() => doCoGian(item)} disabled={Boolean(busy) || Boolean(recording) || !previewUrl} title="Đo bố cục ở khung điện thoại rồi đo lại ở khung desktop 1280×800, chỉ ra cặp thành phần ĐỔI quan hệ — đó là chỗ app thật sự co giãn." className="inline-flex items-center gap-1.5 rounded-lg border border-sky-300 px-2.5 py-1.5 text-xs font-bold text-sky-700 hover:bg-sky-50 disabled:opacity-40 dark:border-sky-800 dark:text-sky-300 dark:hover:bg-sky-950">{busy === "resp-scan" ? <Loader2 className="animate-spin" size={14} /> : <MonitorPlay size={14} />} Dò responsive</button><button onClick={() => deleteScenario(item)} disabled={Boolean(busy) || Boolean(recording)} className="inline-flex items-center gap-1.5 rounded-lg border border-rose-300 px-2.5 py-1.5 text-xs font-bold text-rose-600 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-900 dark:hover:bg-rose-950"><Trash2 size={14} /> Xóa</button></div></div>)}
+                <div className="mt-3 flex flex-wrap gap-2"><button onClick={() => moChiaDiem(item)} disabled={Boolean(busy) || Boolean(recording)} title="Sửa trọng số hàm và điểm từng checkpoint đã lưu" className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 px-2.5 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-50 disabled:opacity-40 dark:border-emerald-800 dark:text-emerald-300 dark:hover:bg-emerald-950"><Database size={14} /> Chia điểm</button><button onClick={() => openScenarioEditor(item)} disabled={Boolean(busy) || Boolean(recording)} title={recording ? "Hãy kết thúc phiên đang soạn trước" : "Nạp lại các bước vào khung record để chỉnh sửa"} className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-300 px-2.5 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50 disabled:opacity-40 dark:border-indigo-800 dark:text-indigo-300 dark:hover:bg-indigo-950"><Pencil size={14} /> Sửa thao tác</button><button onClick={() => doCoGian(item)} disabled={Boolean(busy) || Boolean(recording) || !previewUrl} title="Đo bố cục ở khung điện thoại rồi đo lại ở khung desktop 1280×800, chỉ ra cặp thành phần ĐỔI quan hệ — đó là chỗ app thật sự co giãn." className="inline-flex items-center gap-1.5 rounded-lg border border-sky-300 px-2.5 py-1.5 text-xs font-bold text-sky-700 hover:bg-sky-50 disabled:opacity-40 dark:border-sky-800 dark:text-sky-300 dark:hover:bg-sky-950">{busy === "resp-scan" ? <Loader2 className="animate-spin" size={14} /> : <MonitorPlay size={14} />} Dò responsive</button><button onClick={() => deleteScenario(item)} disabled={Boolean(busy) || Boolean(recording)} className="inline-flex items-center gap-1.5 rounded-lg border border-rose-300 px-2.5 py-1.5 text-xs font-bold text-rose-600 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-900 dark:hover:bg-rose-950"><Trash2 size={14} /> Xóa</button></div></div>])}
               {respKq && respScenario && (() => {
                 const soManh = respKq.bangChung.length + respKq.doiCot.length;
                 const daTick = respKq.bangChung.filter((b) => b.checked).length + respKq.capReflow.filter((c) => c.checked).length;
@@ -3234,7 +3320,7 @@ function BehaviorAuthoringEditor() {
         {codePreview && previewFile && <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/75 p-3 backdrop-blur-sm sm:p-6">
           <div className="flex h-[min(900px,94vh)] w-full max-w-[1500px] min-w-0 flex-col overflow-hidden rounded-2xl border border-slate-700 bg-slate-950 text-slate-100 shadow-2xl">
             <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-800 px-5 py-4">
-              <div className="min-w-0"><p className="text-xs font-bold uppercase tracking-widest text-indigo-400">Code sinh theo bộ Golden</p><h2 className="mt-1 truncate text-xl font-bold">{suite?.name || name}{codePreview.selected_scenario_code ? ` · ${codePreview.selected_scenario_code}` : ""}</h2><p className="mt-1 text-sm text-slate-400">{codePreview.scenario_count} scenario · {codePreview.criterion_count} đầu điểm. File hiển thị được sinh từ cùng engine dùng khi publish.</p></div>
+              <div className="min-w-0"><p className="text-xs font-bold uppercase tracking-widest text-indigo-400">Code sinh theo bộ Golden</p><h2 className="mt-1 truncate text-xl font-bold">{suite?.name || name}</h2><p className="mt-1 text-sm text-slate-400">{codePreview.scenario_count} scenario · {codePreview.criterion_count} đầu điểm. File hiển thị được sinh từ cùng engine dùng khi publish.</p></div>
               <button onClick={() => setCodePreview(null)} title="Đóng bản xem code" className="rounded-lg border border-slate-700 p-2 text-slate-300 hover:bg-slate-800"><X size={20} /></button>
             </div>
             <div className="flex min-h-0 flex-1 flex-col lg:flex-row">

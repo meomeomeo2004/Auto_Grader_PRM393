@@ -20,6 +20,7 @@ import java.util.zip.ZipInputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -61,7 +62,6 @@ class BanGiaoServiceTest {
         Exam e = new Exam();
         e.setExamId("DE_X");
         e.setExamName("Đề X");
-        e.setTeacherNote("ghi chú");
         e.setTestcasePath(testcase.toString());
         return e;
     }
@@ -104,8 +104,11 @@ class BanGiaoServiceTest {
         assertEquals("Đề X", meta.get("exam_name"));
         assertEquals("grading-base:2026-08-22e", meta.get("base_image"));
         assertNotNull(meta.get("engine_sha256"), "phải có vân tay engine để truy khi điểm lệch");
-        assertEquals("van-tay-khung-abc", meta.get("khung_van_tay"),
-                "vân tay khung để hai bên còn con số đối chiếu khi nghi ngờ nhau");
+        // Hai trường đã gỡ khỏi tờ khai (21/9/2026): `khung_van_tay` chỉ có nghĩa bên giảng viên
+        // (so với bản ghi đề để biết Golden đã đổi chưa), còn `teacher_note` thì bên người chấm
+        // lưu vào DB mà không màn nào in ra. Mang đi là để người đọc tưởng bên kia có dùng.
+        assertNull(meta.get("khung_van_tay"));
+        assertNull(meta.get("teacher_note"));
     }
 
     /** Vân tay được đóng vào bản ghi đề để LẦN XUẤT SAU biết Golden đã đổi ở chỗ khung lấy về chưa. */
@@ -154,7 +157,7 @@ class BanGiaoServiceTest {
         assertEquals("grading-base:2026-08-22e", ra.get("base_image_cua_goi"));
         assertEquals("grading-base:khac", ra.get("base_image_may_nay"),
                 "hai máy khác ảnh là cùng một bài cho hai kết quả — bên nhận phải thấy được");
-        assertEquals("van-tay-khung-abc", ra.get("khung_van_tay"));
+        assertNull(ra.get("khung_van_tay"), "bên nhận không có gì để đối chiếu vân tay khung");
     }
 
     // ==================== CỬA CHẶN THIẾU THƯ VIỆN ====================

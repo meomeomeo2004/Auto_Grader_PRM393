@@ -12,6 +12,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -38,6 +39,12 @@ class BehaviorSuiteMaterializerTest {
                 .thenReturn(tempDir.resolve("golden-screens-missing"));
         mockGoldenPubspec(artifacts);
         return new BehaviorSuiteMaterializer(authoring, artifacts, staticRules, exams);
+    }
+
+    private static List<String> khoaCua(JsonNode row) {
+        List<String> ra = new ArrayList<>();
+        row.fieldNames().forEachRemaining(ra::add);
+        return ra;
     }
 
     private void mockGoldenPubspec(BehaviorArtifactService artifacts) {
@@ -74,14 +81,14 @@ class BehaviorSuiteMaterializerTest {
                 "suite", Map.of("id", "suite-zero", "suite_code", "ZERO"),
                 "scenarios", List.of(scenario)));
 
-        Map<String, Object> preview = materializer.previewCode("suite-zero", null);
+        Map<String, Object> preview = materializer.previewCode("suite-zero");
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> files = (List<Map<String, Object>>) preview.get("files");
         String content = files.stream().filter(file -> "skills_matrix.json".equals(file.get("name")))
                 .findFirst().orElseThrow().get("content").toString();
         JsonNode matrix = new ObjectMapper().readTree(content);
-        assertEquals(0.0, matrix.path("ZERO_ZERO_SCORE_PREREQUISITE").path("weight").asDouble(), 0.0);
-        assertEquals(2.0, matrix.path("ZERO_ZERO_SCORE_PAID").path("weight").asDouble(), 0.0);
+        assertEquals(0.0, matrix.path("ZERO_SCORE_PREREQUISITE").path("weight").asDouble(), 0.0);
+        assertEquals(2.0, matrix.path("ZERO_SCORE_PAID").path("weight").asDouble(), 0.0);
         assertEquals(2, matrix.size(), "Checkpoint 0 điểm vẫn phải được thực thi để kiểm tiên quyết");
     }
 
@@ -97,13 +104,13 @@ class BehaviorSuiteMaterializerTest {
                             "scenario_code", "TEST", "name", "Điểm thập phân", "weight", score,
                             "steps", List.of(Map.of("action", "boot")),
                             "checkpoints", List.of(Map.of("id", "PAID", "kind", "checkpoint", "weight", score))))));
-            Map<String, Object> preview = materializer.previewCode("suite-decimal", null);
+            Map<String, Object> preview = materializer.previewCode("suite-decimal");
             @SuppressWarnings("unchecked")
             List<Map<String, Object>> files = (List<Map<String, Object>>) preview.get("files");
             String content = files.stream().filter(file -> "skills_matrix.json".equals(file.get("name")))
                     .findFirst().orElseThrow().get("content").toString();
             JsonNode matrix = new ObjectMapper().readTree(content);
-            assertEquals(score, matrix.path("DECIMAL_TEST_PAID").path("weight").asDouble(), 0.0);
+            assertEquals(score, matrix.path("TEST_PAID").path("weight").asDouble(), 0.0);
         }
     }
 
@@ -122,7 +129,7 @@ class BehaviorSuiteMaterializerTest {
                 "scenarios", List.of(Map.of(
                         "scenario_code", "TEST", "weight", 2.0,
                         "checkpoints", checkpoints))));
-            assertThrows(IllegalArgumentException.class, () -> materializer.previewCode("suite-zero", null));
+            assertThrows(IllegalArgumentException.class, () -> materializer.previewCode("suite-zero"));
         }
     }
 
@@ -160,7 +167,10 @@ class BehaviorSuiteMaterializerTest {
                 "suite", Map.of(
                         "id", "suite-1", "suite_code", "RAR_USER", "exam_id", "RAR_USER_EXAM",
                         "name", "RAR User", "description", "Golden behavior", "revision", 1),
-                "public_contract", Map.of("allow_coordinate_fallback", false),
+                "public_contract", Map.of("allow_coordinate_fallback", false,
+                        // Bộ dựng TRƯỚC ngày gỡ value_key: hợp đồng đóng băng trong bản ghi
+                        // suite vẫn còn locator đó.
+                        "locator_priority", List.of("semantic_id", "value_key", "accessibility_label")),
                 "database_contract", Map.of("enabled", true, "database_name", "users.db"),
                 "runtime_config", Map.of("default_timeout_ms", 5000),
                 "scenarios", List.of(scenario));
@@ -191,6 +201,11 @@ class BehaviorSuiteMaterializerTest {
         // điền được vào ô pub — phải quy về rỗng chứ không được đổ nguyên khối ra.
         assertEquals(Map.of("flutter", "", "path", "^1.9.0"),
                 new ObjectMapper().convertValue(contract.get("allowed_package_specs"), Map.class));
+        // value_key đã gỡ khỏi engine nên không được để lọt ra hợp đồng phát đi: bên đọc sẽ
+        // tưởng máy chấm còn tìm widget theo khoá đó. Lọc lúc GHI nên bộ cũ cũng sạch theo.
+        assertEquals(List.of("semantic_id", "accessibility_label"),
+                new ObjectMapper().convertValue(
+                        contract.get("public_contract").get("locator_priority"), List.class));
         for (String file : List.of("exam_test.dart", "grader.dart", "behavior_plan.json",
                 "skills_matrix.json", "contract.json", "suite_manifest.json")) {
             assertTrue(Files.exists(output.resolve(file)), file + " phải được sinh");
@@ -202,9 +217,9 @@ class BehaviorSuiteMaterializerTest {
                 "action mơ hồ không được ngầm lấy widget đầu tiên");
         JsonNode matrix = new ObjectMapper().readTree(output.resolve("skills_matrix.json").toFile());
         assertEquals(3, matrix.size());
-        assertEquals(3.0, matrix.get("RAR_USER_ADD_USER_UI_VISIBLE_PHONE").get("weight").asDouble(), 0.0001);
-        assertEquals(3.0, matrix.get("RAR_USER_ADD_USER_UI_VISIBLE_DESKTOP").get("weight").asDouble(), 0.0001);
-        assertEquals(2.0, matrix.get("RAR_USER_ADD_USER_DB_ROW").get("weight").asDouble(), 0.0001);
+        assertEquals(3.0, matrix.get("ADD_USER_UI_VISIBLE_PHONE").get("weight").asDouble(), 0.0001);
+        assertEquals(3.0, matrix.get("ADD_USER_UI_VISIBLE_DESKTOP").get("weight").asDouble(), 0.0001);
+        assertEquals(2.0, matrix.get("ADD_USER_DB_ROW").get("weight").asDouble(), 0.0001);
         Map<String, byte[]> firstGeneration = new LinkedHashMap<>();
         for (String file : List.of("exam_test.dart", "grader.dart", "behavior_plan.json",
                 "skills_matrix.json", "contract.json", "suite_manifest.json")) {
@@ -218,7 +233,7 @@ class BehaviorSuiteMaterializerTest {
     }
 
     @Test
-    void componentCheckpointUsesScenarioBudgetAndKeepsUiGroup() throws Exception {
+    void componentCheckpointUsesScenarioBudgetAndIgnoresUiGroup() throws Exception {
         // Mọi checkpoint chia cùng ngân sách scenario theo tỷ lệ; tiêu chí thành phần chỉ
         // chạy trên viewport đầu và vẫn mang nhóm UI riêng trong matrix.
         BehaviorAuthoringService authoring = mock(BehaviorAuthoringService.class);
@@ -280,17 +295,22 @@ class BehaviorSuiteMaterializerTest {
         JsonNode matrix = new ObjectMapper().readTree(output.resolve("skills_matrix.json").toFile());
         // 2 viewport × UI_VISIBLE + 1 DB_ROW + 1 UI_COMP (chỉ viewport đầu) = 4 dòng.
         assertEquals(4, matrix.size());
-        assertEquals(1.333333, matrix.get("RAR_USER_ADD_USER_UI_VISIBLE_PHONE").get("weight").asDouble(), 0.0001);
-        assertEquals(0.888889, matrix.get("RAR_USER_ADD_USER_DB_ROW").get("weight").asDouble(), 0.0001);
-        JsonNode comp = matrix.get("RAR_USER_ADD_USER_UI_COMP");
+        assertEquals(1.333333, matrix.get("ADD_USER_UI_VISIBLE_PHONE").get("weight").asDouble(), 0.0001);
+        assertEquals(0.888889, matrix.get("ADD_USER_DB_ROW").get("weight").asDouble(), 0.0001);
+        JsonNode comp = matrix.get("ADD_USER_UI_COMP");
         assertEquals(4.444444, comp.get("weight").asDouble(), 0.0001,
                 "trọng số checkpoint phải được quy đổi trong ngân sách 8 điểm của scenario");
-        assertEquals("UI", comp.get("testcase_group").asText());
-        assertEquals("ui", comp.get("layer").asText());
-        assertNull(comp.get("skill_code"),
-                "bo khung nang luc: tieu chi khong con mang ma nang luc nao");
-        assertEquals("G_UI_DANH_SACH", comp.get("group_id").asText());
-        assertEquals("Giao diện — Màn danh sách", comp.get("group_name").asText());
+        // Bảng chỉ còn SÁU field có người đọc (21/9/2026). Ghim danh sách ở đây để ai thêm
+        // field mới phải sửa test và nói ra được ai sẽ đọc nó.
+        // Luồng này chưa khai mã nhóm nên KHÔNG có `group_id` — bảng chỉ mang đúng thứ có
+        // người đọc. Ca có nhóm được ghim ở appendsStaticRuleRows…, nơi group_id = "CRUD".
+        assertEquals(List.of("name", "runner", "scenario_code", "scenario_name", "weight"),
+                new java.util.TreeSet<>(khoaCua(comp)).stream().toList());
+        // ui_group trong checkpoint KHÔNG còn sinh nhóm (21/9/2026): nhãn của nó lấy tên MÀN,
+        // nên hai màn cùng tên bị gộp một rọ, kéo tiêu chí của nhiều luồng vào chung một dòng
+        // điểm. Nhóm nay chỉ đến từ mã nhóm người soạn gõ cho luồng.
+        assertNull(comp.get("group_id"), "ui_group không được sinh nhóm nữa");
+        assertNull(comp.get("group_name"), "ui_group không được sinh nhóm nữa");
         assertEquals("Màn danh sách — có nút thêm", comp.get("name").asText());
     }
 
@@ -356,16 +376,20 @@ class BehaviorSuiteMaterializerTest {
 
         Path output = tempDir.resolve("RAR_USER_EXAM").resolve("testcase");
         JsonNode sinhRa = new ObjectMapper().readTree(output.resolve("behavior_plan.json").toFile());
-        JsonNode cases = sinhRa.get("cases");
-        assertEquals(2, cases.size(), "mỗi tiêu chí đúng MỘT case — responsive không được nhân bản");
+        // Plan gom theo LUỒNG: khung điện thoại và khung desktop là hai mã thực thi nên thành
+        // hai luồng riêng, mỗi luồng đúng một tiêu chí — responsive không được nhân bản.
+        JsonNode luong = sinhRa.get("luong");
+        assertEquals(2, luong.size());
         JsonNode thuong = null;
         JsonNode resp = null;
-        for (JsonNode c : cases) {
-            if ("RESP_1".equals(c.get("checkpoint").get("id").asText())) resp = c;
-            else thuong = c;
+        for (JsonNode l : luong) {
+            if ("RESP_1".equals(l.get("cases").get(0).get("checkpoint").get("id").asText())) resp = l;
+            else thuong = l;
         }
-        assertNotNull(thuong, "phải có case của tiêu chí thường");
-        assertNotNull(resp, "phải có case của tiêu chí responsive");
+        assertNotNull(thuong, "phải có luồng của tiêu chí thường");
+        assertNotNull(resp, "phải có luồng của tiêu chí responsive");
+        assertEquals(1, thuong.get("cases").size());
+        assertEquals(1, resp.get("cases").size());
         assertEquals(412, thuong.get("viewport").get("width").asInt());
         assertEquals(838, thuong.get("viewport").get("height").asInt(),
                 "tiêu chí thường phải ở khung app thật của Pixel 7");
@@ -374,8 +398,12 @@ class BehaviorSuiteMaterializerTest {
         assertEquals(800, resp.get("viewport").get("height").asInt(),
                 "tiêu chí responsive phải ở khung desktop");
         assertEquals("LIST__VP_DESKTOP", resp.get("execution_code").asText());
-        assertEquals(5.0, resp.get("weight").asDouble(), 0.0001,
+        assertEquals(5.0, resp.get("cases").get(0).get("weight").asDouble(), 0.0001,
                 "responsive giữ nguyên phần điểm đã khai, không bị chia theo số khung");
+        // steps và initial_state nằm ở CẤP LUỒNG, không lặp xuống từng tiêu chí.
+        assertTrue(thuong.has("steps"), "steps phải ở cấp luồng");
+        assertFalse(thuong.get("cases").get(0).has("steps"), "case không được chép lại steps");
+        assertFalse(thuong.get("cases").get(0).has("oracle"), "oracle đã bỏ khỏi plan");
     }
 
     @Test
@@ -433,11 +461,11 @@ class BehaviorSuiteMaterializerTest {
                 Files.readAllBytes(output.resolve("fixtures/expected-output.db")),
                 "Capture bundle chỉ dùng Hidden DB làm placeholder trước khi có Output DB thật");
         JsonNode behaviorPlan = new ObjectMapper().readTree(output.resolve("behavior_plan.json").toFile());
-        assertEquals("scenario-42", behaviorPlan.path("cases").get(0).path("scenario_id").asText());
+        assertEquals("scenario-42", behaviorPlan.path("luong").get(0).path("scenario_id").asText());
     }
 
     @Test
-    void previewsExactBundleCodeAndCanFocusOneScenarioWithoutArtifacts() {
+    void previewsOnlyBundleContentFilesWithoutArtifacts() {
         BehaviorAuthoringService authoring = mock(BehaviorAuthoringService.class);
         BehaviorArtifactService artifacts = mock(BehaviorArtifactService.class);
         ExamRepository exams = mock(ExamRepository.class);
@@ -467,16 +495,18 @@ class BehaviorSuiteMaterializerTest {
                 "scenarios", List.of(scenario));
         when(authoring.previewExecutionPlan("suite-1")).thenReturn(plan);
 
-        Map<String, Object> preview = materializer.previewCode("suite-1", "SCREEN_CONTRACT");
+        Map<String, Object> preview = materializer.previewCode("suite-1");
 
         assertEquals(1, preview.get("criterion_count"));
         List<Map<String, Object>> files = ((List<?>) preview.get("files")).stream()
                 .map(item -> (Map<String, Object>) item)
                 .toList();
-        assertEquals("scenario.json", files.get(0).get("name"));
-        assertTrue(String.valueOf(files.get(0).get("content")).contains("SCREEN_CONTRACT"));
-        assertTrue(files.stream().anyMatch(file -> "exam_test.dart".equals(file.get("name"))
-                && String.valueOf(file.get("content")).contains("void main()")));
+        // Màn xem code chỉ bày NỘI DUNG CỦA BỘ ĐỀ (bỏ 21/9/2026). Runner Dart dùng chung cho
+        // mọi đề nên không bày; đường xem riêng từng scenario cũng gỡ vì plan đã gom theo luồng.
+        assertEquals(List.of("behavior_plan.json", "skills_matrix.json", "contract.json"),
+                files.stream().map(file -> String.valueOf(file.get("name"))).toList());
+        assertTrue(files.stream().anyMatch(file -> "behavior_plan.json".equals(file.get("name"))
+                && String.valueOf(file.get("content")).contains("SCREEN_CONTRACT")));
         assertTrue(files.stream().anyMatch(file -> "skills_matrix.json".equals(file.get("name"))
                 && String.valueOf(file.get("content")).contains("FIELD_EMAIL")));
         verify(artifacts).active("suite-1", BehaviorArtifactType.GOLDEN_SOLUTION);
@@ -512,6 +542,7 @@ class BehaviorSuiteMaterializerTest {
 
         Map<String, Object> scenario = Map.ofEntries(
                 Map.entry("scenario_code", "ADD_USER"),
+                Map.entry("group_code", "CRUD"),
                 Map.entry("name", "Thêm người dùng"),
                 Map.entry("skill_code", "STORAGE_SQLITE_CRUD"),
                 Map.entry("weight", 8.0),
@@ -560,10 +591,12 @@ class BehaviorSuiteMaterializerTest {
         assertEquals("source_pattern", row.get("static_rule").asText());
         assertEquals("lib/models/**",
                 row.get("static_config").get("require").get(0).get("paths").get(0).asText());
-        // Dòng behavior giờ cũng có nhóm mặc định theo scenario để phiếu tay đối chiếu được.
-        JsonNode behaviorRow = matrix.get("RAR_USER_ADD_USER_UI_VISIBLE");
-        assertEquals("G_ADD_USER", behaviorRow.get("group_id").asText());
-        assertEquals("Thêm người dùng", behaviorRow.get("group_name").asText());
+        // Nhóm đến TỪ MÃ NHÓM người soạn gõ cho luồng, không còn suy từ scenario_code hay
+        // ui_group (21/9/2026). Tên luồng đi kèm vì bảng điểm có cột "Luồng" riêng.
+        JsonNode behaviorRow = matrix.get("ADD_USER_UI_VISIBLE");
+        assertEquals("CRUD", behaviorRow.get("group_id").asText());
+        assertNull(behaviorRow.get("group_name"), "group_name đã gỡ: luôn trùng group_id");
+        assertEquals("Thêm người dùng", behaviorRow.get("scenario_name").asText());
     }
 
     @Test
@@ -605,5 +638,86 @@ class BehaviorSuiteMaterializerTest {
         scenarioB.put("steps", List.of(Map.of(
                 "id", "step_1", "action", "tap", "target", Map.of("semanticId", "action.delete"))));
         assertNotEquals(materializer.semanticFingerprint(planA), materializer.semanticFingerprint(planB));
+    }
+
+    /**
+     * Publish CHỈ mang theo ảnh chuẩn của luồng đang có, và dọn luôn ảnh chết trong kho.
+     *
+     * Tên tệp khoá theo execution_code, mà mã đó đổi mỗi khi người soạn đổi mã nhóm hoặc tên
+     * luồng. Trước 21/9/2026 publish chép cả thư mục nên ảnh tên cũ đi theo mãi — đo trên
+     * PE_PRM393_FA26: 29 tệp cho 16 luồng, 15 tệp mồ côi, từng cặp cũ/mới trùng đúng từng byte.
+     */
+    @Test
+    void publishChiChepAnhChuanCuaLuongDangCoVaDonKho() throws Exception {
+        BehaviorAuthoringService authoring = mock(BehaviorAuthoringService.class);
+        BehaviorArtifactService artifacts = mock(BehaviorArtifactService.class);
+        ExamRepository exams = mock(ExamRepository.class);
+        StaticRuleService staticRules = mock(StaticRuleService.class);
+        when(staticRules.matrixRows(anyString(), anyString())).thenReturn(new LinkedHashMap<>());
+        Path kho = tempDir.resolve("kho-anh");
+        Files.createDirectories(kho);
+        when(artifacts.goldenScreenshotDir(anyString())).thenReturn(kho);
+        mockGoldenPubspec(artifacts);
+        BehaviorSuiteMaterializer materializer =
+                new BehaviorSuiteMaterializer(authoring, artifacts, staticRules, exams);
+        ReflectionTestUtils.setField(materializer, "templateDir", Path.of("..", "grader-base").toString());
+        ReflectionTestUtils.setField(materializer, "examsDir", tempDir.toString());
+
+        Map<String, Object> scenario = Map.ofEntries(
+                Map.entry("scenario_code", "ADD_USER"),
+                Map.entry("name", "Thêm người dùng"),
+                Map.entry("skill_code", "STORAGE_SQLITE_CRUD"),
+                Map.entry("weight", 8.0),
+                Map.entry("initial_state", Map.of("reset_storage", true)),
+                Map.entry("steps", List.of(Map.of(
+                        "id", "step_1", "action", "tap", "target", Map.of("text", "Add")))),
+                Map.entry("viewports", List.of(Map.of("name", "phone", "width", 390, "height", 844))),
+                Map.entry("oracle", Map.of("seed", "seed-01", "input", Map.of())),
+                Map.entry("checkpoints", List.of(Map.of(
+                        "id", "UI_VISIBLE", "kind", "checkpoint", "scope", "ui",
+                        "weight", 1.0, "expect", Map.of("visible_texts", List.of("x"))))));
+        Map<String, Object> plan = Map.of(
+                "schema_version", "1.0",
+                "suite", Map.of("id", "suite-1", "suite_code", "RAR_ANH", "exam_id", "RAR_ANH_EXAM",
+                        "name", "RAR anh", "revision", 1),
+                "public_contract", Map.of(),
+                "database_contract", Map.of("enabled", true, "database_name", "users.db"),
+                "runtime_config", Map.of("default_timeout_ms", 5000),
+                "scenarios", List.of(scenario));
+        when(authoring.executionPlan("suite-1")).thenReturn(plan);
+        for (BehaviorArtifactType type : List.of(
+                BehaviorArtifactType.STUDENT_DATABASE,
+                BehaviorArtifactType.HIDDEN_DATABASE,
+                BehaviorArtifactType.OUTPUT_DATABASE)) {
+            Path source = tempDir.resolve("anh-" + type.name().toLowerCase() + ".db");
+            Files.writeString(source, "fixture");
+            BehaviorArtifact artifact = new BehaviorArtifact();
+            artifact.setArtifactType(type);
+            artifact.setStoragePath(source.toString());
+            when(artifacts.active("suite-1", type)).thenReturn(artifact);
+        }
+        when(exams.findByExamId("RAR_ANH_EXAM")).thenReturn(Optional.empty());
+        when(exams.save(any(Exam.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        // Lượt đầu chỉ để biết execution_code thật, khỏi chép lại luật đặt tên của production.
+        materializer.materialize("suite-1");
+        Path bundle = tempDir.resolve("RAR_ANH_EXAM").resolve("testcase");
+        JsonNode luongs = new ObjectMapper()
+                .readTree(bundle.resolve("behavior_plan.json").toFile()).get("luong");
+        String maDangDung = luongs.get(0).get("execution_code").asText();
+
+        Files.writeString(kho.resolve(maDangDung + ".png"), "anh cua luong dang co");
+        Files.writeString(kho.resolve("MA_CU_DA_DOI__VP_1.png"), "anh mo coi");
+        materializer.materialize("suite-1");
+
+        Path anhTrongGoi = bundle.resolve("fixtures").resolve("screens");
+        assertTrue(Files.isRegularFile(anhTrongGoi.resolve(maDangDung + ".png")),
+                "ảnh của luồng đang có phải đi theo gói");
+        assertFalse(Files.exists(anhTrongGoi.resolve("MA_CU_DA_DOI__VP_1.png")),
+                "ảnh mồ côi không được lọt vào gói bàn giao");
+        assertFalse(Files.exists(kho.resolve("MA_CU_DA_DOI__VP_1.png")),
+                "ảnh mồ côi phải bị dọn khỏi kho, không thì lần publish sau lại đẻ ra");
+        assertTrue(Files.isRegularFile(kho.resolve(maDangDung + ".png")),
+                "ảnh đang dùng phải còn nguyên trong kho");
     }
 }

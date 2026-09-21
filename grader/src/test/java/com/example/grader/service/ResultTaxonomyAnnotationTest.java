@@ -45,26 +45,32 @@ class ResultTaxonomyAnnotationTest {
     }
 
     @Test
-    void fillsSkillCodeAndDifficultyFromMatrix() throws Exception {
-        Map<String, Object> matrix = map("TC_ADD",
-                map("skill_code", "STORAGE_SQLITE_CRUD", "difficulty", "basic"));
+    void chiDoTenLuongVaMaNhomTuMaTran() throws Exception {
+        // skills_matrix.json chỉ còn sáu field có người đọc (21/9/2026). enrich không được
+        // dựng lại những field đã gỡ, kể cả khi ai đó nhét chúng vào ma trận bằng tay.
+        Map<String, Object> matrix = map("TC_ADD", map(
+                "scenario_name", "thêm chi tiêu", "group_id", "CRUD",
+                "skill_code", "STORAGE_SQLITE_CRUD", "difficulty", "basic", "group_name", "CRUD"));
         List<Map<String, Object>> tcs = cases(map("test_id", "TC_ADD"));
 
         enrich(tcs, matrix);
 
-        assertEquals("STORAGE_SQLITE_CRUD", tcs.get(0).get("skill_code"));
-        assertEquals("basic", tcs.get(0).get("difficulty"));
+        assertEquals("thêm chi tiêu", tcs.get(0).get("scenario_name"));
+        assertEquals("CRUD", tcs.get(0).get("group_id"));
+        assertNull(tcs.get(0).get("skill_code"));
+        assertNull(tcs.get(0).get("difficulty"));
+        assertNull(tcs.get(0).get("group_name"));
     }
 
     @Test
     void doesNotOverwriteWhatTheGraderAlreadySent() throws Exception {
         // Grader chạy trong container biết rõ hơn file cấu hình trên đĩa.
-        Map<String, Object> matrix = map("TC_ADD", map("skill_code", "TU_MATRIX"));
-        List<Map<String, Object>> tcs = cases(map("test_id", "TC_ADD", "skill_code", "TU_GRADER"));
+        Map<String, Object> matrix = map("TC_ADD", map("group_id", "TU_MATRIX"));
+        List<Map<String, Object>> tcs = cases(map("test_id", "TC_ADD", "group_id", "TU_GRADER"));
 
         enrich(tcs, matrix);
 
-        assertEquals("TU_GRADER", tcs.get(0).get("skill_code"));
+        assertEquals("TU_GRADER", tcs.get(0).get("group_id"));
     }
 
     @Test

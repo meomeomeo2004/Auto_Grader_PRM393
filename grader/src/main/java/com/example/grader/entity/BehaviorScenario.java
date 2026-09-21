@@ -31,6 +31,17 @@ public class BehaviorScenario {
     @Column(name = "scenario_code", length = 100, nullable = false)
     private String scenarioCode;
 
+    /**
+     * Mã nhóm do giảng viên đặt (FILTER, UI, CRUD…). ĐỂ TRỐNG nghĩa là luồng không thuộc nhóm nào.
+     *
+     * <p>Trước 21/9/2026 nhóm được máy tự suy từ `ui_group` của bảng tick thành phần giao diện,
+     * lấy tên màn làm nhãn. Hai màn cùng đặt tên "Màn hình" là gộp chung một rọ, kéo tiêu chí của
+     * nhiều luồng khác nhau vào một dòng điểm — mà không ai yêu cầu gộp. Nay nhóm chỉ đến từ ô
+     * này: người soạn gõ thì có nhóm, không gõ thì không.
+     */
+    @Column(name = "group_code", length = 50)
+    private String groupCode;
+
     @Column(name = "name", length = 240, nullable = false)
     private String name;
 

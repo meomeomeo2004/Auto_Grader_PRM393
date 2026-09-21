@@ -111,7 +111,7 @@ class ExamServiceSandboxTest {
 
         ExamService service = serviceWithReadyBaseImage(repository);
         Map<String, Object> result = service.importManualTestcase(
-                "Đề PE 01.zip", "Kiểm tra CRUD", validTestcaseZip(), "local-user");
+                "Đề PE 01.zip", validTestcaseZip(), "local-user");
 
         assertEquals("DE_PE_01", result.get("examId"));
         assertEquals("Đề PE 01", result.get("examName"));

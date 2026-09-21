@@ -105,10 +105,47 @@ class _RouteTracker {
   bool get canForward => index + 1 < history.length;
 }
 
+/// Trải plan dạng LUỒNG về danh sách case tự chứa, ngay lúc nạp.
+///
+/// Plan từ 21/9/2026 gom `steps`, `initial_state`, `viewport` lên cấp luồng để người mở file
+/// đọc được bằng mắt — trước đó 75 dòng case mỗi dòng chép lại nguyên dãy thao tác, mà engine
+/// chỉ đọc chúng từ case đầu của nhóm. Trải ở đây để phần còn lại của engine không phải biết
+/// plan có hình gì.
+///
+/// Plan đời cũ (`cases` nằm thẳng ở gốc) vẫn chạy: bộ đề đã publish mang engine đóng băng theo
+/// nó, nhưng thư mục exams/ trên máy có thể còn plan cũ trong khi engine vừa được chép đè.
+List<Map<String, dynamic>> _traiCases(Map<String, dynamic> plan) {
+  final luongs = _asList(plan['luong']);
+  if (luongs.isEmpty) return _asList(plan['cases']).map(_asMap).toList();
+  const dungChung = <String>[
+    'execution_code',
+    'scenario_id',
+    'scenario_code',
+    'scenario_name',
+    'group_code',
+    'description',
+    'viewport',
+    'initial_state',
+    'steps',
+  ];
+  final ra = <Map<String, dynamic>>[];
+  for (final raw in luongs) {
+    final luong = _asMap(raw);
+    for (final rawCase in _asList(luong['cases'])) {
+      final item = Map<String, dynamic>.from(_asMap(rawCase));
+      for (final khoa in dungChung) {
+        if (luong.containsKey(khoa)) item.putIfAbsent(khoa, () => luong[khoa]);
+      }
+      ra.add(item);
+    }
+  }
+  return ra;
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   final plan = _readObject('test/behavior_plan.json', 'behavior_plan.json');
-  final cases = _asList(plan['cases']).map(_asMap).toList();
+  final cases = _traiCases(plan);
   final selectedScenario = Platform.environment['GRADER_SCENARIO_CODE'];
   final grouped = <String, List<Map<String, dynamic>>>{};
   for (final testCase in cases) {
@@ -2895,6 +2932,7 @@ Future<void> _luuBoCucChuan(
   final kiemKeAnh = _kiemKeAnh(tester);
   if (thanhPhan.isEmpty &&
       _moTaNhanDaThu.isEmpty &&
+      _duPhongTheoDinhDanh.isEmpty &&
       _dinhDanhDaThu.isEmpty &&
       kiemKeIcon.isEmpty &&
       kiemKeAnh.isEmpty) {
@@ -2919,6 +2957,7 @@ Future<void> _luuBoCucChuan(
       },
       'components': thanhPhan,
       'targets': _moTaNhanDaThu,
+      'targets_by_id': _duPhongTheoDinhDanh,
       // Định danh theo khoá cũ của bước (Gói 1 kế hoạch Định danh Semantics); backend
       // nướng vào target bước, giữ nhãn cạnh bên làm đường lui.
       'identifiers': _dinhDanhDaThu,
@@ -3069,8 +3108,44 @@ Future<Finder> _waitForTarget(
   if (_dangThuOracle) {
     final nhan = _text(target, 'label');
     if (nhan.isNotEmpty && !_moTaNhanDaThu.containsKey(nhan)) {
-      final moTa = _moTaDuPhong(nhan);
+      final moTa = _moTaDuPhong(find.bySemanticsLabel(nhan));
       if (moTa != null) _moTaNhanDaThu[nhan] = moTa;
+    }
+    // ĐƯỜNG LUI CHO BƯỚC ĐI BẰNG ĐỊNH DANH (21/9/2026).
+    //
+    // Vì sao cần: bước thao tác của bộ hiện tại gần như toàn bộ đi bằng định danh, và target
+    // chỉ mang MỘT khoá — recorder chốt `semanticId` rồi dừng, không nhìn tới nhãn. Bài sinh
+    // viên quên gắn định danh cho một nút là bước đó hỏng, và mọi tiêu chí phía sau trong
+    // cùng lượt thành `not_run`. Đo trên PE_PRM393_FA26: riêng `chi_tieu.them` đứng đầu năm
+    // lượt, quên nó là mất 38/94 điểm — trong khi lỗi thật chỉ đáng một tiêu chí.
+    //
+    // Thu HAI thứ vì chúng bù nhau, không thay nhau:
+    //   · nhãn ngữ nghĩa — cứu được nút CÓ CHỮ (ô nhập labelText, chip, nút Lưu);
+    //   · hình dạng (kiểu widget + mã icon) — cứu được nút CHỈ CÓ ICON, đúng ca FAB Thêm.
+    // Dòng danh sách lặp thì cả hai đều bó tay: sáu dòng cùng kiểu, cùng icon, chỉ khác thứ
+    // tự — mà thứ tự chính là thứ đang chấm. Đó là giới hạn chấp nhận được.
+    //
+    // Chỉ dùng cho BƯỚC, không cho tiêu chí: quên định danh vẫn phải trượt đúng tiêu chí
+    // nhắm vào định danh, nhưng không được kéo sập phần chức năng phía sau.
+    final maDinhDanh = _text(target, 'semantic_id').isNotEmpty
+        ? _text(target, 'semantic_id')
+        : _text(target, 'semanticId');
+    if (maDinhDanh.isNotEmpty && !_duPhongTheoDinhDanh.containsKey(maDinhDanh)) {
+      final mo = <String, dynamic>{};
+      try {
+        final nhanThat = tester.getSemantics(finder.first).label.trim();
+        // Nhãn phải DUY NHẤT trên màn mới dùng được: hai nút cùng chữ thì lui sang nhãn là
+        // bấm đại một cái, chấm nhầm còn tệ hơn không chấm.
+        if (nhanThat.isNotEmpty &&
+            find.bySemanticsLabel(nhanThat).evaluate().length == 1) {
+          mo['label'] = nhanThat;
+        }
+      } catch (_) {
+        // Không đọc được cây ngữ nghĩa thì bỏ qua, đừng làm hỏng lượt capture.
+      }
+      final hinh = _moTaDuPhong(finder);
+      if (hinh != null) mo['shape'] = hinh;
+      if (mo.isNotEmpty) _duPhongTheoDinhDanh[maDinhDanh] = mo;
     }
     // Định danh của đúng widget vừa tìm được theo nhãn/chữ — để backend nướng vào bước,
     // nhờ đó bộ đề cũ nhận định danh sau một lần "Sinh lại testcase", không ghi hình lại.
@@ -3161,6 +3236,10 @@ String _docDinhDanhTaiDich(Finder finder) {
 /// Phải thu ĐÚNG LÚC bấm, không thu ở cuối kịch bản: cuối kịch bản màn hình đã chuyển
 /// đi, nhãn của màn trước không còn trên cây nên đo ra rỗng.
 final Map<String, dynamic> _moTaNhanDaThu = <String, dynamic>{};
+
+/// Đường lui của các bước đi bằng ĐỊNH DANH: {mã định danh: {label?, shape?}}.
+/// Backend nướng vào target của bước để bài quên gắn định danh còn tìm được nút.
+final Map<String, dynamic> _duPhongTheoDinhDanh = <String, dynamic>{};
 
 /// Loi TRAN BO CUC bat duoc trong luong hien tai, khu trung theo dong dau (overflow
 /// bao lai moi frame nen khong khu thi phinh vo han).
@@ -3686,8 +3765,7 @@ Finder? _timDuPhong(List<dynamic> danhSach) {
 ///
 /// Chỉ trả về khi mô tả khớp ĐÚNG MỘT widget. Nhập nhằng ngay ở bài chuẩn thì đừng đẻ
 /// ra đường lui — nút xóa lặp theo từng dòng danh sách rơi vào đúng ca này và tự bị loại.
-Map<String, dynamic>? _moTaDuPhong(String nhan) {
-  final goc = find.bySemanticsLabel(nhan);
+Map<String, dynamic>? _moTaDuPhong(Finder goc) {
   if (goc.evaluate().length != 1) return null;
   final ungVien = <String>[];
   int? maIcon;
@@ -4101,19 +4179,13 @@ Finder _finder(Map<String, dynamic> target, {bool duPhong = false}) {
   // Không thấy định danh thì rơi xuống nhãn/chữ như cũ: quên định danh không mất thêm
   // điểm nào so với trước, nó là bảo hiểm cho bài vẽ khác Golden, không phải bẫy mới.
   //
-  // KHÔNG có đường lui sang ValueKey ở nhánh này: đề chỉ còn MỘT hệ định danh, để lui
-  // sang ValueKey là bài gắn nhầm loại khoá vẫn đạt, hợp đồng thành vô nghĩa.
+  // ĐÃ GỠ HẲN NHÁNH ValueKey (21/9/2026). Đề chỉ còn MỘT hệ định danh: để ValueKey lại làm
+  // đường lui thì bài gắn nhầm loại khoá vẫn đạt, hợp đồng thành vô nghĩa. Màn soạn cũng
+  // không còn cho chọn nó từ trước đó, và bộ FA26 đo ngày 21/9 dùng 0 khoá value_key.
   for (final keyName in const ['semanticId', 'semantic_id']) {
     final value = _text(target, keyName);
     if (value.isNotEmpty) {
       final finder = find.bySemanticsIdentifier(value);
-      if (_locatorDungDuoc(finder, target, action: duPhong)) return finder;
-    }
-  }
-  for (final keyName in const ['valueKey', 'value_key', 'key']) {
-    final value = _text(target, keyName);
-    if (value.isNotEmpty) {
-      final finder = find.byKey(ValueKey<String>(value));
       if (_locatorDungDuoc(finder, target, action: duPhong)) return finder;
     }
   }
@@ -4253,9 +4325,6 @@ Finder _finder(Map<String, dynamic> target, {bool duPhong = false}) {
   const khoaNhanDien = <String>[
     'semanticId',
     'semantic_id',
-    'valueKey',
-    'value_key',
-    'key',
     'icon',
     'image',
     'label',

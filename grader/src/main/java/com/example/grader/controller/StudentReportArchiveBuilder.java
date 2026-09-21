@@ -134,38 +134,67 @@ final class StudentReportArchiveBuilder {
             // ── Điểm theo NHÓM — đúng hình phân bổ điểm của hệ thống ──
             // Điểm lẻ của bài nổi lên ở cấp nhóm (đạt 3/4 thành phần = 15/20), nên đây là
             // bảng sinh viên cần đọc TRƯỚC: nó nói mất điểm Ở ĐÂU trước khi nói vì sao.
-            Map<String, double[]> groups = new LinkedHashMap<>();   // {đạt, tổng, điểm, tối đa}
-            Map<String, String> groupLabel = new LinkedHashMap<>();
+            // Mỗi dòng là một LUỒNG, xếp theo nhóm; ô Nhóm chỉ ghi ở dòng đầu của nhóm. Luồng
+            // chưa được xếp nhóm dồn xuống cuối, ô Nhóm ghi "—" để không lẫn với dòng nối tiếp.
+            Map<String, Luong> luongs = new LinkedHashMap<>();
             for (JsonNode tc : result.path("test_cases")) {
-                String key = groupKey(tc);
-                String label = tc.path("group_name").asText("");
-                if (label.isBlank()) label = "Tiêu chí khác";
-                groupLabel.putIfAbsent(key, label);
-                double[] g = groups.computeIfAbsent(key, k -> new double[4]);
+                String key = luongKey(tc);
+                // Dòng hành vi thuộc một LUỒNG. Dòng luật tĩnh không thuộc luồng nào nên mỗi
+                // luật đứng riêng một dòng, lấy chính tên luật làm nhãn. Cả hai xếp nhóm bằng
+                // group_id — không còn nhánh nào suy nhóm kiểu khác.
+                String nhan = tc.path("scenario_name").asText("");
+                if (nhan.isBlank()) nhan = tc.path("name").asText("");
+                if (nhan.isBlank()) nhan = tc.path("test_id").asText("");
+                if (nhan.isBlank()) nhan = "Tiêu chí khác";
+                String maNhom = tc.path("group_id").asText("");
+                String tenLuong = nhan;
+                Luong l = luongs.computeIfAbsent(key, k -> new Luong(k, maNhom, tenLuong, new double[4]));
                 boolean passed = "passed".equals(tc.path("status").asText(""));
                 double max = tc.path("max_score").asDouble(0);
-                g[1]++;
-                g[3] += max;
-                if (passed) { g[0]++; g[2] += max; }
+                l.acc[1]++;
+                l.acc[3] += max;
+                if (passed) { l.acc[0]++; l.acc[2] += max; }
+            }
+            Map<String, List<Luong>> theoNhom = new LinkedHashMap<>();
+            List<Luong> khongNhom = new ArrayList<>();
+            for (Luong l : luongs.values()) {
+                if (l.maNhom.isBlank()) khongNhom.add(l);
+                else theoNhom.computeIfAbsent(l.maNhom, k -> new ArrayList<>()).add(l);
             }
             r = summaryHeader(sheet, st, r);
+            // Thứ tự này là hợp đồng giữa hai bảng: số thứ tự ở CHI TIẾT ("3.2") phải trỏ đúng
+            // dòng thứ 3 của bảng điểm. Dựng một lần rồi dùng lại, đừng sắp xếp lại lần nữa.
+            Map<String, String> nhanLuong = new LinkedHashMap<>();
             double earned = 0, total = 0;
-            int groupNumber = 0;
-            for (Map.Entry<String, double[]> e : groups.entrySet()) {
-                double[] g = e.getValue();
-                earned += g[2]; total += g[3];
-                XSSFRow line = sheet.createRow(r++);
-                cell(line, 0, "", st.summaryIndex);
-                line.getCell(0).setCellValue(++groupNumber);
-                cell(line, 1, groupLabel.get(e.getKey()), st.referencePlain);
-                cell(line, 2, (int) g[0] + "/" + (int) g[1], st.center);
-                cell(line, 3, num(g[2]) + "/" + num(g[3]), st.center);
+            int stt = 0;
+            for (Map.Entry<String, List<Luong>> e : theoNhom.entrySet()) {
+                int dongDauNhom = r;
+                boolean dauNhom = true;
+                for (Luong l : e.getValue()) {
+                    earned += l.acc[2]; total += l.acc[3];
+                    nhanLuong.put(l.key, l.ten);
+                    r = summaryLine(sheet, st, r, ++stt, dauNhom ? l.maNhom : "", st.summaryNhom, l);
+                    dauNhom = false;
+                }
+                // GỘP ô Nhóm theo chiều dọc: CRUD có ba luồng thì chữ CRUD phải nằm giữa cả ba
+                // dòng chứ không dính mỗi dòng đầu — nhìn vào mới biết nhóm này gồm những gì.
+                if (r - dongDauNhom > 1) {
+                    sheet.addMergedRegion(new CellRangeAddress(dongDauNhom, r - 1, 1, 1));
+                }
+            }
+            // Luồng chưa xếp nhóm: KHÔNG gộp và KHÔNG tô nền — nền kem nghĩa là "có nhóm", còn
+            // đây là mỗi dòng một thân phận riêng, gộp lại thành một khối là nói sai.
+            for (Luong l : khongNhom) {
+                earned += l.acc[2]; total += l.acc[3];
+                nhanLuong.put(l.key, l.ten);
+                r = summaryLine(sheet, st, r, ++stt, "—", st.center, l);
             }
             XSSFRow sum = sheet.createRow(r++);
             cell(sum, 0, "", st.summaryIndex);
             cell(sum, 1, "TỔNG", st.summaryTotal);
-            cell(sum, 2, num(earned) + "/" + num(total), st.boldCenter);
-            sheet.addMergedRegion(new CellRangeAddress(r - 1, r - 1, 2, 3));
+            cell(sum, 2, "", st.summaryTotal);
+            cell(sum, 3, num(earned) + "/" + num(total), st.boldCenter);
+            sheet.addMergedRegion(new CellRangeAddress(r - 1, r - 1, 3, 4));
             r++;
 
             // ── Chi tiết từng tiêu chí ───────────────────────────
@@ -174,22 +203,23 @@ final class StudentReportArchiveBuilder {
                     new String[]{"", "Check point", "Prerequisite", "Status", "Score", "Observation"});
             List<DetailCheckpoint> checkpoints = detailCheckpoints(row, result);
             Map<DetailCheckpoint, Integer> detailRows = new HashMap<>();
-            groupNumber = 0;
-            for (String group : groups.keySet()) {
-                groupNumber++;
+            int soLuong = 0;
+            for (Map.Entry<String, String> nhom : nhanLuong.entrySet()) {
+                String group = nhom.getKey();
+                soLuong++;
                 XSSFRow band = sheet.createRow(r++);
-                cell(band, 0, String.valueOf(groupNumber), st.section);
-                cell(band, 1, groupLabel.get(group), st.section);
+                cell(band, 0, String.valueOf(soLuong), st.section);
+                cell(band, 1, nhom.getValue(), st.section);
                 sheet.addMergedRegion(new CellRangeAddress(r - 1, r - 1, 1, 5));
                 List<DetailCheckpoint> ordered = new ArrayList<>();
                 Set<DetailCheckpoint> visited = new HashSet<>();
                 for (DetailCheckpoint checkpoint : checkpoints) {
-                    if (groupKey(checkpoint.result).equals(group)) orderCheckpoint(checkpoint, group, visited, ordered);
+                    if (luongKey(checkpoint.result).equals(group)) orderCheckpoint(checkpoint, group, visited, ordered);
                 }
                 int idx = 0;
                 for (DetailCheckpoint checkpoint : ordered) {
                     JsonNode tc = checkpoint.result;
-                    checkpoint.reference = groupNumber + "." + (++idx);
+                    checkpoint.reference = soLuong + "." + (++idx);
                     String status = tc.path("status").asText("");
                     XSSFCellStyle tone = switch (status) {
                         case "passed" -> st.pass;
@@ -218,8 +248,8 @@ final class StudentReportArchiveBuilder {
                     DetailCheckpoint parent = checkpoint.parent;
                     target.setCellValue(parent.reference + " · "
                             + statusLabel(parent.result.path("status").asText(""))
-                            + (groupKey(parent.result).equals(groupKey(checkpoint.result)) ? ""
-                            : " · " + groupLabel.get(groupKey(parent.result)))
+                            + (luongKey(parent.result).equals(luongKey(checkpoint.result)) ? ""
+                            : " · " + nhanLuong.get(luongKey(parent.result)))
                             + (hasCycle(checkpoint) ? " (cycle)" : ""));
                     var link = wb.getCreationHelper().createHyperlink(org.apache.poi.common.usermodel.HyperlinkType.DOCUMENT);
                     link.setAddress("'Ket qua'!B" + (detailRows.get(parent) + 1));
@@ -315,10 +345,10 @@ final class StudentReportArchiveBuilder {
     }
 
     private int summaryHeader(XSSFSheet sheet, Styles st, int r) {
-        r = title(sheet, r, "ĐIỂM THEO NHÓM TIÊU CHÍ", 2, st.summarySection);
-        cell(sheet.getRow(r - 1), 3, "", st.summaryTail);
+        r = title(sheet, r, "ĐIỂM THEO NHÓM TIÊU CHÍ", 3, st.summarySection);
+        cell(sheet.getRow(r - 1), 4, "", st.summaryTail);
         XSSFRow head = sheet.createRow(r++);
-        String[] columns = {"STT", "Nhóm", "Check point", "Điểm"};
+        String[] columns = {"STT", "Nhóm", "Luồng", "Check point", "Điểm"};
         for (int col = 0; col < columns.length; col++) {
             cell(head, col, columns[col], col == 0 ? st.summaryIndexHead : st.summaryHead);
         }
@@ -384,7 +414,8 @@ final class StudentReportArchiveBuilder {
     private static final class Styles {
         final XSSFCellStyle title, section, head, infoLabel, plain, center,
                 boldPlain, boldCenter, pass, fail, notRun, profileTitle,
-                referencePlain, summarySection, summaryTail, summaryHead, summaryIndex, summaryIndexHead, summaryTotal;
+                referencePlain, summarySection, summaryTail, summaryHead, summaryIndex, summaryIndexHead,
+                summaryTotal, summaryNhom;
 
         Styles(XSSFWorkbook wb) {
             title = base(wb, true, 13, null, HorizontalAlignment.LEFT);
@@ -403,6 +434,10 @@ final class StudentReportArchiveBuilder {
             referencePlain = base(wb, false, 11, null, HorizontalAlignment.GENERAL);
             summarySection = base(wb, true, 11, rgb(0xEE, 0xF2, 0xFF), HorizontalAlignment.CENTER);
             summaryTail = base(wb, false, 11, rgb(0xEE, 0xF2, 0xFF), HorizontalAlignment.GENERAL);
+            // Ô NHÓM: cỡ 13 trên nền kem, căn giữa cả hai chiều vì nó là ô GỘP trải nhiều dòng
+            // — căn trên thì chữ dính mép trên của khối, nhìn như bị lệch hàng.
+            summaryNhom = base(wb, false, 13, rgb(0xFF, 0xF2, 0xCC), HorizontalAlignment.CENTER);
+            summaryNhom.setVerticalAlignment(VerticalAlignment.CENTER);
             for (XSSFCellStyle caption : List.of(profileTitle, summarySection)) {
                 caption.setBorderTop(BorderStyle.NONE);
                 caption.setBorderRight(BorderStyle.NONE);
@@ -562,16 +597,72 @@ final class StudentReportArchiveBuilder {
         return v == null ? "?" : v;
     }
 
-    /** Giữ cả điểm rất nhỏ; chỉ bỏ số 0 thừa thay vì làm tròn mất trọng số. */
+    /**
+     * Giữ cả điểm rất nhỏ; chỉ bỏ số 0 thừa thay vì làm tròn mất trọng số.
+     *
+     * <p>Làm tròn về 12 chữ số CÓ NGHĨA trước: cộng dồn double đẻ ra rác ở chữ số thứ mười sáu,
+     * nên 14,9 điểm cộng dần in ra "9.999999999999998" — đo thật trên bảng điểm ngày 21/9/2026.
+     * 12 chữ số đủ để rác biến mất mà điểm 0,0000001 vẫn còn nguyên.
+     */
     private static String num(double v) {
-        return Double.isFinite(v) ? java.math.BigDecimal.valueOf(v).stripTrailingZeros().toPlainString()
-                : String.valueOf(v);
+        if (!Double.isFinite(v)) return String.valueOf(v);
+        return java.math.BigDecimal.valueOf(v)
+                .round(new java.math.MathContext(12))
+                .stripTrailingZeros().toPlainString();
     }
 
-    private static String groupKey(JsonNode tc) {
-        String id = tc.path("group_id").asText("");
-        String label = tc.path("group_name").asText("");
-        return id.isBlank() ? (label.isBlank() ? "KHAC" : label) : id;
+    /** Một dòng của bảng điểm: gộp mọi tiêu chí của cùng một luồng. */
+    private static final class Luong {
+        final String key, maNhom, ten;
+        final double[] acc;   // {đạt, tổng, điểm, tối đa}
+
+        Luong(String key, String maNhom, String ten, double[] acc) {
+            this.key = key; this.maNhom = maNhom; this.ten = ten; this.acc = acc;
+        }
+    }
+
+    private int summaryLine(XSSFSheet sheet, Styles st, int r, int stt, String nhom,
+                            XSSFCellStyle kieuNhom, Luong l) {
+        XSSFRow line = sheet.createRow(r);
+        cell(line, 0, "", st.summaryIndex);
+        line.getCell(0).setCellValue(stt);
+        // Ô gộp lấy style ở ô TRÊN-TRÁI, nhưng viền thì mỗi ô tự vẽ — nên dòng nối tiếp vẫn phải
+        // được tô cùng kiểu, không thì khối gộp bị hở viền và mất nền ở các dòng dưới.
+        cell(line, 1, nhom, kieuNhom);
+        cell(line, 2, l.ten, st.referencePlain);
+        cell(line, 3, (int) l.acc[0] + "/" + (int) l.acc[1], st.center);
+        cell(line, 4, num(l.acc[2]) + "/" + num(l.acc[3]), st.center);
+        return r + 1;
+    }
+
+    /**
+     * Danh sách tiêu chí trong behavior_plan.json, chấp nhận cả hai hình dạng: plan gom theo
+     * luồng (từ 21/9/2026) và plan phẳng đời cũ. Hồ sơ phúc khảo mở lại bộ đã chấm từ trước nên
+     * phải đọc được cả hai — không thì cột "tiên quyết" biến mất khỏi bảng chi tiết.
+     */
+    private static List<JsonNode> planCases(JsonNode plan) {
+        List<JsonNode> ra = new ArrayList<>();
+        JsonNode luong = plan.path("luong");
+        if (luong.isArray() && luong.size() > 0) {
+            for (JsonNode item : luong) {
+                for (JsonNode c : item.path("cases")) ra.add(c);
+            }
+            return ra;
+        }
+        for (JsonNode c : plan.path("cases")) ra.add(c);
+        return ra;
+    }
+
+    /**
+     * Khoá gom theo LUỒNG, không theo nhóm: một dòng bảng điểm là một luồng.
+     *
+     * <p>Luật tĩnh không có luồng nào — mỗi luật là một dòng riêng nên khoá theo `test_id`.
+     */
+    private static String luongKey(JsonNode tc) {
+        String code = tc.path("scenario_code").asText("").trim();
+        if (!code.isBlank()) return code;
+        String id = tc.path("test_id").asText("").trim();
+        return id.isBlank() ? "KHAC" : id;
     }
 
     private static String statusLabel(String status) {
@@ -605,7 +696,7 @@ final class StudentReportArchiveBuilder {
         Set<String> duplicateIds = new HashSet<>();
         try {
             JsonNode plan = MAPPER.readTree(Files.readString(testcase.resolve("behavior_plan.json"), StandardCharsets.UTF_8));
-            for (JsonNode item : plan.path("cases")) {
+            for (JsonNode item : planCases(plan)) {
                 String id = planText(item, "test_id", "");
                 if (!id.isBlank() && cases.putIfAbsent(id, item) != null) duplicateIds.add(id);
             }
@@ -647,7 +738,7 @@ final class StudentReportArchiveBuilder {
     private static void orderCheckpoint(DetailCheckpoint checkpoint, String group,
                                         Set<DetailCheckpoint> visited, List<DetailCheckpoint> ordered) {
         if (!visited.add(checkpoint)) return;
-        if (checkpoint.parent != null && groupKey(checkpoint.parent.result).equals(group)) {
+        if (checkpoint.parent != null && luongKey(checkpoint.parent.result).equals(group)) {
             orderCheckpoint(checkpoint.parent, group, visited, ordered);
         }
         ordered.add(checkpoint);
@@ -665,7 +756,7 @@ final class StudentReportArchiveBuilder {
         if (hasCycle(checkpoint)) return 0;
         int depth = 0;
         for (DetailCheckpoint parent = checkpoint.parent; parent != null; parent = parent.parent) {
-            if (!groupKey(parent.result).equals(groupKey(checkpoint.result))) break;
+            if (!luongKey(parent.result).equals(luongKey(checkpoint.result))) break;
             depth++;
         }
         return Math.min(depth, 6);
