@@ -1,3 +1,19 @@
+# LUAT CHUNG: moi file van ban luu LF trong kho VA giu LF trong cay lam viec.
+#
+# Vi sao can dong nay du ben duoi da khai tung loai: khong co no thi cac duoi KHONG
+# duoc liet ke (.java, .tsx, .dart thuong, .md, .json...) khong mang thuoc tinh nao ca,
+# Git nuot nguyen xi byte cua editor. Mot lan editor ghi CRLF la ca file vao kho duoi
+# dang CRLF, lan sau cong cu khac ghi LF la diff phinh ra toan bo file.
+# Do that 21/9/2026: mot commit khai 7338 them / 6546 xoa, bo CR cuoi dong ra chi con
+# 1524 / 732 - ExamService.java tu 6561 dong "doi" xuong con 17. Blame va review chet.
+#
+# eol=lf chu khong de trong: de trong thi luc checkout Git dung core.eol (mac dinh
+# "native" = CRLF tren Windows), cay lam viec lat sang CRLF trong khi hien tai no dang
+# toan LF. Ghim lf giu dung hien trang, khong ai phai lam gi ca.
+#
+# Cac luat rieng ben duoi VAN THANG dong nay vi chung dung sau.
+* text=auto eol=lf
+
 # Force LF for files that must run on Linux containers
 *.sh        text eol=lf
 Dockerfile* text eol=lf
