@@ -36,10 +36,9 @@ public class ExamSetupController {
     public ResponseEntity<?> uploadTestcase(
             @RequestParam("examId")   String examId,
             @RequestParam(value = "examName",    required = false) String examName,
-            @RequestParam(value = "teacherNote", required = false) String teacherNote,
             @RequestParam("testcase") MultipartFile zip) {
         try {
-            return ResponseEntity.ok(examService.setupExam(examId, examName, teacherNote, zip));
+            return ResponseEntity.ok(examService.setupExam(examId, examName, zip));
 
         } catch (IllegalArgumentException e) {
             // Thiếu file bắt buộc, sai format...
@@ -63,11 +62,10 @@ public class ExamSetupController {
      */
     @PostMapping("/import-manual-testcase")
     public ResponseEntity<?> importManualTestcase(
-            @RequestParam(value = "teacherNote", required = false) String teacherNote,
             @RequestParam("testcase") MultipartFile zip) {
         try {
             return ResponseEntity.ok(examService.importManualTestcase(
-                    zip.getOriginalFilename(), teacherNote, zip.getBytes(), AppActor.DEFAULT));
+                    zip.getOriginalFilename(), zip.getBytes(), AppActor.DEFAULT));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         } catch (IllegalStateException e) {

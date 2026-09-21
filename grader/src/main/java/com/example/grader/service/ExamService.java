@@ -170,7 +170,6 @@ public class ExamService {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("examId", e.getExamId());
             m.put("examName", e.getExamName() != null ? e.getExamName() : e.getExamId());
-            m.put("teacherNote", e.getTeacherNote() != null ? e.getTeacherNote() : "");
             m.put("status", e.getStatus() != null ? e.getStatus().name() : null);
             m.put("testcaseStatus", e.getTestcaseStatus() != null ? e.getTestcaseStatus() : "DRAFT");
             m.put("testcaseVersion", e.getTestcaseVersion());
@@ -457,7 +456,7 @@ public class ExamService {
      * mới. Bộ dựng bằng builder đi đường khác (clone cấu hình rồi sinh lại file).
      */
     public synchronized Map<String, Object> cloneImportedExam(String rawSourceId, String rawTargetId,
-                                                              String examName, String teacherNote, String actor) {
+                                                              String examName, String actor) {
         String sourceId = safeId(rawSourceId, "bộ testcase nguồn");
         String targetId = safeId(rawTargetId, "bộ testcase mới");
         if (targetId.length() > 50)
@@ -489,7 +488,6 @@ public class ExamService {
         Exam clone = new Exam();
         clone.setExamId(targetId);
         clone.setExamName(examName.trim());
-        clone.setTeacherNote(teacherNote == null ? "" : teacherNote.trim());
         clone.setTestcasePath(targetDir.toAbsolutePath().normalize().toString());
         clone.setStatus(ExamStatus.BUILDING);          // sandbox dựng lại khi bấm Lưu
         // Bản sao là NHÁP cho tới khi người dùng bấm Lưu trong trình sửa file — giống hệt
@@ -547,7 +545,6 @@ public class ExamService {
         clone.setExamName((examName == null || examName.isBlank())
                 ? (source != null ? source.getExamName() : targetId)
                 : examName.trim());
-        clone.setTeacherNote(source != null && source.getTeacherNote() != null ? source.getTeacherNote() : "");
         clone.setTestcaseConfigJson(source != null ? source.getTestcaseConfigJson() : null);
         clone.setStatus(ExamStatus.BUILDING);
         clone.setCreatedBy(actor);
@@ -592,7 +589,6 @@ public class ExamService {
         Exam adopted = new Exam();
         adopted.setExamId(examId);
         adopted.setExamName(examId);
-        adopted.setTeacherNote("");
         adopted.setTestcasePath(dir.toAbsolutePath().normalize().toString());
         adopted.setStatus(ExamStatus.BUILDING);      // sandbox dựng lại khi cần chấm
         adopted.setTestcaseStatus("PUBLISHED");
@@ -729,7 +725,6 @@ public class ExamService {
             Exam exam = new Exam();
             exam.setExamId(examId);
             exam.setExamName(examName == null || examName.isBlank() ? examId : examName.trim());
-            exam.setTeacherNote("");
             exam.setStatus(ExamStatus.BUILDING);
             return examRepository.save(exam);
         });
@@ -1433,7 +1428,7 @@ public class ExamService {
      * để Build Sandbox mount trực tiếp.
      */
     public synchronized Map<String, Object> importManualTestcase(
-            String originalFilename, String teacherNote, byte[] zipBytes, String actor) throws Exception {
+            String originalFilename, byte[] zipBytes, String actor) throws Exception {
         String examName = manualTestcaseName(originalFilename);
         String examId = manualTestcaseId(examName);
         if (zipBytes == null || zipBytes.length == 0)
@@ -1467,7 +1462,6 @@ public class ExamService {
             Exam exam = new Exam();
             exam.setExamId(examId);
             exam.setExamName(examName);
-            exam.setTeacherNote(teacherNote == null ? "" : teacherNote.trim());
             exam.setTestcasePath(testcaseDir.toAbsolutePath().normalize().toString());
             exam.setStatus(ExamStatus.BUILDING);
             exam.setTestcaseStatus("PUBLISHED");
@@ -1527,13 +1521,13 @@ public class ExamService {
 
     // ── Setup đề: chỉ lưu testcase (mount lúc chấm), KHÔNG build image ──
     public ExamSetupResponse setupExam(String examId, String examName,
-                                       String teacherNote, MultipartFile testcaseZip) throws Exception {
-        return setupExamFromZipBytes(examId, examName, teacherNote, testcaseZip.getBytes());
+                                       MultipartFile testcaseZip) throws Exception {
+        return setupExamFromZipBytes(examId, examName, testcaseZip.getBytes());
     }
 
     /** Như {@link #setupExam} nhưng nhận thẳng bytes của file zip để tái dùng pipeline validate hiện có. */
     public ExamSetupResponse setupExamFromZipBytes(String examId, String examName,
-                                                   String teacherNote, byte[] zipBytes) throws Exception {
+                                                   byte[] zipBytes) throws Exception {
         safeId(examId, "đề");                 // chặn path traversal khi tạo exams/<examId>/testcase
         Path tmplDir = locateTemplateDir();
         ensureBaseImage(tmplDir);   // vẫn cần ảnh nền (container chạy từ đây)
@@ -1555,7 +1549,6 @@ public class ExamService {
         if (exam.getTestcaseVersion() == null) exam.setTestcaseVersion(1);
         if (exam.getTestcasePublishedAt() == null) exam.setTestcasePublishedAt(Instant.now());
         if (examName    != null && !examName.isBlank())    exam.setExamName(examName.trim());
-        if (teacherNote != null && !teacherNote.isBlank()) exam.setTeacherNote(teacherNote.trim());
         examRepository.save(exam);
 
         log.info("✅ Đề {} sẵn sàng (mount testcase, không build image): {}", examId, testcaseDir);

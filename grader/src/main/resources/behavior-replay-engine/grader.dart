@@ -6,10 +6,28 @@ const _checkpointMarker = '###RAR_CHECKPOINT###';
 const _stageMarker = '###GRADER_STAGE###';
 const _engineVersion = 'BEHAVIOR_RAR-1.0.0';
 
+/// Trải plan dạng LUỒNG ra danh sách tiêu chí. Ở đây chỉ cần `test_id` và mã thực thi của
+/// từng tiêu chí; steps/oracle không dùng tới. Plan đời cũ (`cases` nằm thẳng ở gốc) vẫn đọc.
+List<Map<String, dynamic>> _traiCases(Map<String, dynamic> plan) {
+  final luongs = _asList(plan['luong']);
+  if (luongs.isEmpty) return _asList(plan['cases']).map(_asMap).toList();
+  final ra = <Map<String, dynamic>>[];
+  for (final raw in luongs) {
+    final luong = _asMap(raw);
+    for (final rawCase in _asList(luong['cases'])) {
+      final item = Map<String, dynamic>.from(_asMap(rawCase));
+      item.putIfAbsent('execution_code', () => luong['execution_code']);
+      item.putIfAbsent('scenario_code', () => luong['scenario_code']);
+      ra.add(item);
+    }
+  }
+  return ra;
+}
+
 Future<void> main() async {
   final plan = _readObject('test/behavior_plan.json', 'behavior_plan.json');
   final matrix = _readObject('test/skills_matrix.json', 'skills_matrix.json');
-  final planCases = _asList(plan['cases']).map(_asMap).toList();
+  final planCases = _traiCases(plan);
   final scenarioCodes = <String>{
     for (final item in planCases)
       _text(item, 'execution_code', _text(item, 'scenario_code')),

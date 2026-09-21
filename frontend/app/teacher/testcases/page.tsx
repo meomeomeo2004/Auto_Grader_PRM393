@@ -24,7 +24,6 @@ import {
 interface BoTestcase {
   examId: string;
   examName?: string;
-  teacherNote?: string;
   gradable?: boolean;
   hasTestcase?: boolean;
   /** Gói đề đòi mà ảnh chấm HIỆN TẠI không có. Tính lại mỗi lần mở danh sách. */

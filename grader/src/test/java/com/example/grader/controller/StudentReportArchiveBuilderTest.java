@@ -32,15 +32,15 @@ class StudentReportArchiveBuilderTest {
                                "engine_version":"v9"},
              "test_cases":[
                {"test_id":"TC_01","name":"App khởi động","status":"passed","max_score":2,
-                "group_id":"G_THEM","group_name":"Thêm khoản chi"},
+                "scenario_code":"THEM","scenario_name":"Thêm khoản chi"},
                {"test_id":"TC_02","name":"Thêm sinh viên","status":"failed","max_score":2,
-                "group_id":"G_THEM","group_name":"Thêm khoản chi",
+                "scenario_code":"THEM","scenario_name":"Thêm khoản chi",
                 "error_code":"WIDGET_NOT_FOUND","actual":"không thấy nút nào"},
                {"test_id":"TC_03","name":"Xoá sinh viên","status":"not_run","max_score":2,
-                "group_id":"G_XOA","group_name":"Xóa khoản chi",
+                "scenario_code":"XOA","scenario_name":"Xóa khoản chi",
                 "actual":"chưa chạy vì bộ test không khởi động được"},
                {"test_id":"TC_04","name":"Sửa sinh viên","status":"passed","max_score":2,
-                "group_id":"G_SUA","group_name":"Sửa khoản chi"}
+                "scenario_code":"SUA","scenario_name":"Sửa khoản chi"}
              ]}
             """;
 
@@ -215,7 +215,7 @@ class StudentReportArchiveBuilderTest {
     }
 
     @Test
-    void matchesReferenceProfileAndFourColumnSummaryWithoutChangingDetailLayout() throws Exception {
+    void matchesReferenceProfileAndFiveColumnSummaryWithoutChangingDetailLayout() throws Exception {
         ExamResult student = row();
         student.setStudentName("Nguyễn Văn An");
         student.setResultJson(RESULT_JSON.replace("không thấy nút nào", "first\\nsecond\\nthird"));
@@ -239,26 +239,29 @@ class StudentReportArchiveBuilderTest {
             assertEquals("6.5", sheet.getRow(score).getCell(2).toString());
             int summary = findRow(sheet, "ĐIỂM THEO NHÓM TIÊU CHÍ");
             assertTrue(sheet.getMergedRegions().stream().anyMatch(region -> region.getFirstRow() == summary
-                    && region.getFirstColumn() == 0 && region.getLastColumn() == 2));
+                    && region.getFirstColumn() == 0 && region.getLastColumn() == 3));
             assertEquals(org.apache.poi.ss.usermodel.BorderStyle.NONE, sheet.getRow(summary).getCell(0).getCellStyle().getBorderTop());
-            assertEquals("FFEEF2FF", sheet.getRow(summary).getCell(3).getCellStyle().getFillForegroundXSSFColor().getARGBHex());
+            assertEquals("FFEEF2FF", sheet.getRow(summary).getCell(4).getCellStyle().getFillForegroundXSSFColor().getARGBHex());
             var head = sheet.getRow(summary + 1);
-            assertEquals(List.of("STT", "Nhóm", "Check point", "Điểm"),
-                    java.util.stream.IntStream.range(0, 4).mapToObj(col -> head.getCell(col).toString()).toList());
+            // Năm cột từ 21/9/2026: mỗi dòng là một LUỒNG, cột "Nhóm" chỉ ghi ở dòng đầu nhóm.
+            assertEquals(List.of("STT", "Nhóm", "Luồng", "Check point", "Điểm"),
+                    java.util.stream.IntStream.range(0, 5).mapToObj(col -> head.getCell(col).toString()).toList());
             assertEquals("Aptos Narrow", head.getCell(0).getCellStyle().getFont().getFontName());
             assertEquals(org.apache.poi.ss.usermodel.FillPatternType.NO_FILL, head.getCell(1).getCellStyle().getFillPattern());
             var first = sheet.getRow(summary + 2);
             assertEquals(1, first.getCell(0).getNumericCellValue());
-            assertEquals("Thêm khoản chi", first.getCell(1).toString());
-            assertEquals("1/2", first.getCell(2).toString());
-            assertEquals("2/4", first.getCell(3).toString());
-            assertNull(first.getCell(4));
+            // Hồ sơ dựng từ kết quả CŨ (không có scenario_code/scenario_name): nhóm cũ thành
+            // luồng, ô Nhóm ghi "—" để không ai tưởng nó nối tiếp nhóm phía trên.
+            assertEquals("—", first.getCell(1).toString());
+            assertEquals("Thêm khoản chi", first.getCell(2).toString());
+            assertEquals("1/2", first.getCell(3).toString());
+            assertEquals("2/4", first.getCell(4).toString());
             assertEquals(14.5f, first.getHeightInPoints());
             int total = findRow(sheet, "TỔNG");
             assertEquals(org.apache.poi.ss.usermodel.BorderStyle.THIN, sheet.getRow(total).getCell(0).getCellStyle().getBorderLeft());
-            assertEquals("4/8", sheet.getRow(total).getCell(2).toString());
+            assertEquals("4/8", sheet.getRow(total).getCell(3).toString());
             assertTrue(sheet.getMergedRegions().stream().anyMatch(region -> region.getFirstRow() == total
-                    && region.getFirstColumn() == 2 && region.getLastColumn() == 3));
+                    && region.getFirstColumn() == 3 && region.getLastColumn() == 4));
             int details = findRow(sheet, "CHI TIẾT TIÊU CHÍ");
             assertEquals(List.of("Check point", "Prerequisite", "Status", "Score", "Observation"),
                     java.util.stream.IntStream.range(1, 6).mapToObj(col -> sheet.getRow(details + 1).getCell(col).toString()).toList());
@@ -325,5 +328,66 @@ class StudentReportArchiveBuilderTest {
         }
         assertEquals(false, out.isEmpty());
         return out;
+    }
+
+    /**
+     * Bảng điểm gộp ô Nhóm theo chiều DỌC: nhóm CRUD có ba luồng thì chữ CRUD nằm giữa cả ba
+     * dòng. Luồng chưa xếp nhóm thì không gộp và không tô nền — nền kem nghĩa là "có nhóm".
+     */
+    @Test
+    void gopONhomTheoChieuDocVaToNenChoNhom(@TempDir Path tmp) throws Exception {
+        String json = """
+                {"schema_version":"2",
+                 "student":{"id":"HE180037"},
+                 "grading_result":{"score":10,"passed_tests":4,"failed_tests":0,"total_tests":4},
+                 "test_cases":[
+                   {"test_id":"A1","name":"a","status":"passed","max_score":4.9666666666666666,
+                    "group_id":"CRUD","scenario_code":"CRUD_THEM","scenario_name":"thêm chi tiêu"},
+                   {"test_id":"A2","name":"b","status":"passed","max_score":4.9666666666666666,
+                    "group_id":"CRUD","scenario_code":"CRUD_THEM","scenario_name":"thêm chi tiêu"},
+                   {"test_id":"A3","name":"c","status":"passed","max_score":4.9666666666666666,
+                    "group_id":"CRUD","scenario_code":"CRUD_THEM","scenario_name":"thêm chi tiêu"},
+                   {"test_id":"B1","name":"d","status":"passed","max_score":2,
+                    "group_id":"CRUD","scenario_code":"CRUD_XOA","scenario_name":"xóa chi tiêu"},
+                   {"test_id":"ARCH_1","name":"Tách Model thành file riêng","status":"passed",
+                    "max_score":6,"group_id":"Architecture"},
+                   {"test_id":"C1","name":"e","status":"passed","max_score":3,
+                    "scenario_code":"SAP_XEP","scenario_name":"sắp xếp"}
+                 ]}
+                """;
+        ExamResult student = row();
+        student.setExamId("PE_X");
+        student.setScore(10f);
+        student.setResultJson(json);
+
+        Map<String, byte[]> entries = readAll(new StudentReportArchiveBuilder(null, r -> null, r -> tmp)
+                .build("PE_X", List.of(student)));
+        try (XSSFWorkbook wb = new XSSFWorkbook(
+                new ByteArrayInputStream(entries.get("Result_of_PE_X/HE180037/HE180037.xlsx")))) {
+            XSSFSheet sheet = wb.getSheetAt(0);
+            int head = findRow(sheet, "ĐIỂM THEO NHÓM TIÊU CHÍ") + 1;
+            int dau = head + 1;   // dòng luồng đầu tiên
+
+            // CRUD gồm hai luồng ⇒ ô nhóm gộp đúng hai dòng.
+            assertTrue(sheet.getMergedRegions().stream().anyMatch(v ->
+                            v.getFirstRow() == dau && v.getLastRow() == dau + 1
+                                    && v.getFirstColumn() == 1 && v.getLastColumn() == 1),
+                    "ô Nhóm phải gộp dọc hết các luồng của nhóm");
+            assertEquals("CRUD", sheet.getRow(dau).getCell(1).toString());
+            assertEquals(13, sheet.getRow(dau).getCell(1).getCellStyle().getFont().getFontHeightInPoints());
+            assertEquals("FFFFF2CC",
+                    sheet.getRow(dau).getCell(1).getCellStyle().getFillForegroundXSSFColor().getARGBHex());
+
+            // Luồng không nhóm: dồn xuống cuối, ghi "—", KHÔNG tô nền kem.
+            var khongNhom = sheet.getRow(dau + 3);
+            assertEquals("—", khongNhom.getCell(1).toString());
+            assertEquals("sắp xếp", khongNhom.getCell(2).toString());
+            assertNull(khongNhom.getCell(1).getCellStyle().getFillForegroundXSSFColor());
+            assertTrue(sheet.getMergedRegions().stream().noneMatch(v ->
+                    v.getFirstRow() == dau + 3 && v.getFirstColumn() == 1));
+
+            // 4,9666…×3 cộng dồn ra 14.899999999999999 — bảng điểm không được in rác đó.
+            assertEquals("14.9/14.9", sheet.getRow(dau).getCell(4).toString());
+        }
     }
 }

@@ -1,33 +1,20 @@
 package com.example.grader.service;
 
 import java.util.LinkedHashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.regex.Pattern;
 
 /**
- * TRỤC PHÂN LOẠI TESTCASE cho `result.json` v2 — nguồn sự thật DUY NHẤT của {@code layer},
- * {@code rubric} và {@code expected} của testcase GROUP. Dùng chung cho lúc SINH đề
- * Dùng lúc ghép kết quả cũ trong {@link BatchGradingService}; Golden suite mới ghi layer trực tiếp
- * trong testcase definition nên không còn phụ thuộc thư viện template.
- * bên không lệch nhau.
+ * BẢNG RUNNER CỦA ENGINE CHUNG — dùng để bộ fixture nghiệm thu đối chiếu ĐỘ PHỦ: runner nào
+ * chưa có testcase nào trong bộ đo thì đó là năng lực chưa từng chạy, không được công bố như
+ * đã kiểm chứng. Xem {@code FixtureResultAssemblyTest}.
  *
- * <p><b>layer</b> — tầng kiểm thử. Tiêu chí phân tầng là ĐIỀU ĐƯỢC KHẲNG ĐỊNH, không phải
- * cách dựng widget: trong engine chung mọi runner đều khởi động ứng dụng thật nên không thể
- * phân tầng theo cách pump.
- * <ul>
- *   <li>{@code widget} — mở màn hình rồi khẳng định trạng thái TĨNH (có/không, thuộc tính, kích thước)</li>
- *   <li>{@code integration} — có THAO TÁC (chạm/nhập) rồi khẳng định HỆ QUẢ</li>
- *   <li>{@code responsive} — khẳng định bố cục theo KÍCH THƯỚC màn hình</li>
- * </ul>
- *
- * <p><b>rubric</b> — nhóm CHỨC NĂNG theo cách sinh viên hiểu bài ("Thêm người dùng"), lấy từ
- * nhóm giáo viên đã gom trên UI. Lưu ý {@code testcase_group} (LOGIC/WIDGET/BEHAVIOR) KHÔNG
- * phải rubric: nó phân theo bản chất kiểm tra, cùng trục với {@code layer} — chỉ dùng làm
- * phương án chống rỗng.
- *
- * <p>Hợp đồng đầy đủ: {@code SPEC_grader_result_json/SPEC_result_json.md} mục 3.1 và 3.3.
+ * <p>Ngày 21/9/2026 lớp này bị cắt còn một phần ba. Phần bỏ đi là tầng SUY RA phân loại cho
+ * `result.json` — {@code layerOf}, {@code rubricOf}, {@code rubricLabelOf}, {@code groupExpected}
+ * cùng hai bảng tra legacy. Chúng đọc {@code layer}, {@code testcase_group}, {@code group_name}
+ * của skills_matrix.json, mà ba field đó đã gỡ khỏi bảng (nay bảng chỉ còn sáu field có người
+ * đọc — xem {@link BehaviorSuiteMaterializer}). Không một dòng nào trong hệ thống gọi tới chúng,
+ * nên để lại chỉ khiến người sau tưởng ba field kia vẫn sống.
  */
 public final class TestCaseTaxonomy {
 
@@ -38,11 +25,6 @@ public final class TestCaseTaxonomy {
             "contract", "unit", "widget", "integration", "responsive",
             "persist", "architecture", "visual");
 
-    /** Thang so sánh tầng — dùng khi testcase GROUP lấy tầng cao nhất của các con. */
-    private static final Map<String, Integer> LAYER_RANK = Map.of(
-            "contract", 0, "unit", 1, "widget", 2,
-            "integration", 3, "responsive", 4, "persist", 5);
-
     /**
      * Runner "cửa sau" cho testcase giáo viên tự viết code. Có layer như mọi runner khác, nhưng
      * KHÔNG phải một năng lực của engine (hành vi là do code giáo viên quyết định) nên bị loại
@@ -51,9 +33,8 @@ public final class TestCaseTaxonomy {
     public static final String CUSTOM_RUNNER = "CUSTOM_CODE";
 
     /**
-     * 8 runner Ch.7 (bản 3.6.0, widget bố cục và hiển thị nâng cao) — có layer trong
-     * {@link #RUNNER_LAYER} để {@link #layerForRunner} vẫn tra được ngay khi soạn đề dùng chúng,
-     * nhưng CỐ Ý loại khỏi {@link #commonRunners()}: bộ fixture nghiệm thu
+     * 8 runner Ch.7 (bản 3.6.0, widget bố cục và hiển thị nâng cao) — có mặt trong
+     * {@link #RUNNER_LAYER} nhưng CỐ Ý loại khỏi {@link #commonRunners()}: bộ fixture nghiệm thu
      * ({@code fixtures/result-json-v2}) chưa có testcase nào dùng 8 runner này, nên "chứng nhận"
      * chúng trên fixture lúc này sẽ nói dối về độ phủ — đúng lỗ hổng mà {@link #commonRunners()}
      * sinh ra để bịt (xem javadoc ở đó). Gỡ khỏi tập này ngay khi fixture có testcase thật cho cả
@@ -110,29 +91,6 @@ public final class TestCaseTaxonomy {
             Map.entry(CUSTOM_RUNNER, "integration"));
 
     /**
-     * Suy layer từ tiền tố test_id cho ĐỀ LEGACY (matrix không có runner).
-     * Thứ tự quan trọng: UI_RESPONSIVE_/UI_LAYOUT_ phải đứng TRƯỚC luật UI_ chung.
-     */
-    private static final List<String[]> LEGACY_PREFIX_LAYER = List.of(
-            new String[]{"CONTRACT_", "contract"},
-            new String[]{"UI_RESPONSIVE_", "responsive"},
-            new String[]{"UI_LAYOUT_", "responsive"},
-            new String[]{"MODEL_", "unit"},
-            new String[]{"REPOSITORY_", "unit"},
-            new String[]{"VIEWMODEL_", "unit"},
-            new String[]{"SQLITE_", "unit"},
-            new String[]{"SCREEN_", "widget"},
-            new String[]{"PERSIST_", "persist"},
-            new String[]{"ARCH_", "architecture"},
-            new String[]{"VISUAL_", "visual"},
-            new String[]{"UI_", "integration"});
-
-    /** Layer của một runner đơn lẻ; {@code null} nếu runner lạ hoặc là GROUP. */
-    public static String layerForRunner(String runner) {
-        return runner == null ? null : RUNNER_LAYER.get(runner.trim().toUpperCase());
-    }
-
-    /**
      * Tên mọi runner của engine chung, TRỪ {@code GROUP} (dẫn xuất, tầng lấy theo con) và
      * {@link #CUSTOM_RUNNER}.
      *
@@ -150,154 +108,5 @@ public final class TestCaseTaxonomy {
         out.remove(CUSTOM_RUNNER);
         out.removeAll(CH7_PENDING_FIXTURE_COVERAGE);
         return out;
-    }
-
-    /**
-     * Layer của một testcase, theo thứ tự ưu tiên: giá trị đã ghi sẵn trong matrix →
-     * suy từ {@code runner} (GROUP lấy tầng cao nhất của các con) → tiền tố test_id (legacy).
-     *
-     * @param row     dòng cấu hình trong skills_matrix.json; có thể null
-     * @param testId  dùng cho nhánh legacy
-     * @return một giá trị trong {@link #LAYERS}, hoặc null nếu không suy được
-     */
-    public static String layerOf(Map<String, ?> row, String testId) {
-        if (row != null) {
-            // Chỉ nhận giá trị đã theo enum của SPEC. Template cũ ghi layer dạng
-            // SCREEN/BLACKBOX (trục khác) nên phải bỏ qua, không được nhận nhầm.
-            String declared = text(row.get("layer"));
-            if (declared != null && LAYERS.contains(declared.toLowerCase())) {
-                return declared.toLowerCase();
-            }
-            String runner = text(row.get("runner"));
-            if (runner != null) {
-                if ("GROUP".equalsIgnoreCase(runner.trim())) return groupLayer(row);
-                String byRunner = layerForRunner(runner);
-                if (byRunner != null) return byRunner;
-            }
-        }
-        return legacyLayer(testId);
-    }
-
-    /** Testcase GROUP mang tầng CAO NHẤT trong các testcase con. */
-    private static String groupLayer(Map<String, ?> row) {
-        Object children = row.get("children");
-        if (!(children instanceof List<?> list)) return null;
-        String best = null;
-        int bestRank = -1;
-        for (Object child : list) {
-            if (!(child instanceof Map<?, ?> childRow)) continue;
-            String layer = layerForRunner(text(childRow.get("runner")));
-            Integer rank = layer == null ? null : LAYER_RANK.get(layer);
-            if (rank != null && rank > bestRank) {
-                bestRank = rank;
-                best = layer;
-            }
-        }
-        return best;
-    }
-
-    private static String legacyLayer(String testId) {
-        if (testId == null) return null;
-        String id = testId.trim().toUpperCase();
-        for (String[] rule : LEGACY_PREFIX_LAYER) {
-            if (id.startsWith(rule[0])) return rule[1];
-        }
-        return null;
-    }
-
-    /**
-     * Rubric của một testcase: nhóm giáo viên đã gom → {@code testcase_group} (chống rỗng) →
-     * field {@code rubric} có sẵn của đề legacy.
-     */
-    public static String rubricOf(Map<String, ?> row) {
-        if (row == null) return null;
-        for (String key : new String[]{"group_id", "testcase_group", "rubric"}) {
-            String value = text(row.get(key));
-            if (value != null) return value;
-        }
-        return null;
-    }
-
-    /**
-     * NHÃN HIỂN THỊ của {@link #rubricOf} — tên nhóm chức năng giáo viên đặt trên UI.
-     *
-     * <p>`rubric` là MÃ (`THEM_USER`), không đưa cho sinh viên đọc được. Nhãn phải do phía **sở
-     * hữu dữ liệu** phát ra: bên đọc tự dựng bảng `THEM_USER → "Thêm người dùng"` là tạo ra nguồn
-     * sự thật thứ hai, đúng loại lỗi hai bên đã bỏ ở chỗ khác.
-     *
-     * @return `group_name`; {@code null} nếu chưa có (đề legacy, hoặc nhóm chưa được đặt tên) —
-     *         cố ý KHÔNG trả về mã, vì mã đã nằm ở `rubric` rồi
-     */
-    public static String rubricLabelOf(Map<?, ?> row) {
-        if (row == null) return null;
-        String label = text(row.get("group_name"));
-        if (label == null) return null;
-        // Chưa đặt tên thì UI để group_name = group_id; đó là mã, không phải nhãn.
-        return label.equalsIgnoreCase(text(row.get("group_id"))) ? null : label;
-    }
-
-    // ── expected của testcase GROUP ───────────────────────────────
-
-    /** Câu `expected` mà bản cũ tự sinh cho testcase GROUP — phải thay khi gặp lại. */
-    private static final Pattern LEGACY_GROUP_EXPECTED =
-            Pattern.compile("^Tất cả\\s+\\d+\\s+assert trong nhóm phải đạt\\.?$", Pattern.CASE_INSENSITIVE);
-
-    /**
-     * `expected` của testcase GROUP — DẪN XUẤT từ tên nhóm ghép với `expected` của các
-     * testcase con, vì một nhóm chỉ có MỘT kết quả nên yêu cầu của nó là hợp của các con.
-     *
-     * <p>Trả về {@code null} khi KHÔNG cần thay: row không phải GROUP, hoặc `expected` hiện tại
-     * là nội dung đáng giữ (giáo viên viết tay lúc ra đề — bao giờ cũng sát đề hơn bản ghép máy).
-     * Chỉ dựng câu mới khi `expected` còn trống, hoặc còn là câu tự sinh của bản cũ
-     * ({@code "Tất cả N assert trong nhóm phải đạt."}): câu đó đếm số testcase và dùng chữ
-     * "assert" — đều là từ vựng nội bộ của hệ thống chấm, sinh viên không kiểm chứng được trên
-     * bài của mình, mà `expected` thì đi thẳng tới sinh viên qua bản nhận xét.
-     *
-     * <p>Gọi ở CẢ HAI đầu — lúc sinh matrix và lúc ghép result.json — nên đề đã publish trước
-     * bản sửa cũng không còn phát ra câu cũ, giáo viên không phải publish lại.
-     *
-     * <p>Lưu ý: UI hiện KHÔNG có ô cho giáo viên nhập `expected` của nhóm. Nếu sau này thêm,
-     * phải phân biệt "trống vì chưa nhập" với "giáo viên xoá có ý" ngay tại đây.
-     */
-    public static String groupExpected(Map<?, ?> row) {
-        if (row == null) return null;
-        if (!"GROUP".equalsIgnoreCase(String.valueOf(row.get("runner")).trim())) return null;
-
-        String current = text(row.get("expected"));
-        if (current != null && !LEGACY_GROUP_EXPECTED.matcher(current).matches()) return null;
-
-        // Trùng nội dung thì chỉ lấy một lần, giữ nguyên thứ tự giáo viên xếp testcase.
-        Set<String> parts = new LinkedHashSet<>();
-        if (row.get("children") instanceof List<?> list) {
-            for (Object child : list) {
-                if (!(child instanceof Map<?, ?> childRow)) continue;
-                String childExpected = text(childRow.get("expected"));
-                if (childExpected != null) parts.add(sentence(childExpected));
-            }
-        }
-
-        String title = groupTitle(row);
-        if (parts.isEmpty()) {
-            return title == null ? null : "Phải thực hiện đúng yêu cầu \"" + title + "\".";
-        }
-        String body = String.join(" ", parts);
-        return title == null ? body : title + ": " + body;
-    }
-
-    /** Tên nhóm giáo viên đặt; null khi chỉ là mã kỹ thuật, để không ghép mã vào câu cho SV đọc. */
-    private static String groupTitle(Map<?, ?> row) {
-        String name = text(row.get("name"));
-        return name == null || name.equalsIgnoreCase(text(row.get("group_id"))) ? null : name;
-    }
-
-    /** Bảo đảm mỗi vế là câu trọn vẹn trước khi nối nhiều `expected` lại với nhau. */
-    private static String sentence(String s) {
-        return ".!?…:".indexOf(s.charAt(s.length() - 1)) >= 0 ? s : s + ".";
-    }
-
-    private static String text(Object value) {
-        if (value == null) return null;
-        String s = String.valueOf(value).trim();
-        return s.isEmpty() ? null : s;
     }
 }

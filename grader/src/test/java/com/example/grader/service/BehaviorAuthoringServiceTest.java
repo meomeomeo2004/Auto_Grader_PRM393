@@ -10,6 +10,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
 
+import org.springframework.test.util.ReflectionTestUtils;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -839,5 +843,311 @@ class BehaviorAuthoringServiceTest {
         assertEquals(1, service.applyCapturedLayout(scenarioId, Map.of(
                 String.valueOf(chots.get(0).get("id")), Map.of("observed", true))));
         assertEquals(true, ((Map<?, ?>) docChots(scenarioId).get(0).get("expect")).get("value"));
+    }
+
+    // ── Thừa kế điểm khi sinh lại testcase (chốt 20/9) ──────────────────────────────────
+    // Sửa một dòng giao diện trong Golden là phải upload lại rồi sinh lại testcase cho từng
+    // luồng. Trước đây lượt sinh lại ghi đè trắng checkpointsJson nên công chia điểm mất sạch.
+
+    @Test
+    void giuDiemVaRangBuocKhiCheckpointKhongDoi() {
+        List<Map<String, Object>> cu = List.of(
+                chot("cp_1", "ui_state", "them", 8.0, null),
+                chot("cp_2", "ui_state", "danh_sach", 2.5, "cp_1"));
+        List<Map<String, Object>> moi = new ArrayList<>(List.of(
+                chot("database_diff_1", "ui_state", "them", 1.0, null),
+                chot("database_diff_2", "ui_state", "danh_sach", 1.0, null)));
+
+        assertTrue(thuaKe(cu, moi));
+        assertEquals(8.0, moi.get(0).get("weight"));
+        assertEquals(2.5, moi.get(1).get("weight"));
+        assertEquals("cp_1", moi.get(1).get("requires"));
+        // id cũ phải theo sang: `requires` của tiêu chí con đang trỏ vào đúng chuỗi này.
+        assertEquals("cp_1", moi.get(0).get("id"));
+    }
+
+    @Test
+    void resetKhiGiaTriMongDoiDoi() {
+        List<Map<String, Object>> cu = List.of(chot("cp_1", "ui_state", "them", 8.0, null));
+        Map<String, Object> khac = chot("database_diff_1", "ui_state", "them", 1.0, null);
+        khac.put("expect", Map.of("visible", false));
+        List<Map<String, Object>> moi = new ArrayList<>(List.of(khac));
+
+        assertFalse(thuaKe(cu, moi));
+        assertEquals(1.0, moi.get(0).get("weight"), "nội dung đổi thì reset, không đoán điểm cũ thuộc về ai");
+    }
+
+    @Test
+    void themMotCheckpointLaResetCaScenario() {
+        List<Map<String, Object>> cu = List.of(chot("cp_1", "ui_state", "them", 8.0, null));
+        List<Map<String, Object>> moi = new ArrayList<>(List.of(
+                chot("database_diff_1", "ui_state", "them", 1.0, null),
+                chot("database_diff_2", "ui_state", "sua", 1.0, null)));
+
+        assertFalse(thuaKe(cu, moi), "được ăn cả ngã về không: khác số lượng là reset sạch");
+        assertEquals(1.0, moi.get(0).get("weight"));
+    }
+
+    /** Bên cũ đọc từ JSON đã lưu, bên mới vừa dựng trong bộ nhớ — 5 và 5.0 là một giá trị. */
+    @Test
+    void soSanhKhongPhanBietIntegerVaDouble() {
+        Map<String, Object> cuChot = chot("cp_1", "layout_relation", "danh_sach", 4.0, null);
+        cuChot.put("tolerance_pct", 5);
+        Map<String, Object> moiChot = chot("database_diff_1", "layout_relation", "danh_sach", 1.0, null);
+        moiChot.put("tolerance_pct", 5.0);
+        List<Map<String, Object>> moi = new ArrayList<>(List.of(moiChot));
+
+        assertTrue(thuaKe(List.of(cuChot), moi));
+        assertEquals(4.0, moi.get(0).get("weight"));
+    }
+
+    /**
+     * Checkpoint CSDL tự sinh chỉ xuất hiện SAU lượt replay Docker, nên lúc so nó chưa có trong
+     * danh sách mới. Tính nó vào phép so thì lần nào cũng ra "khác" và cơ chế thừa kế chết cứng.
+     */
+    @Test
+    void checkpointCsdlTuSinhKhongLamLechPhepSo() {
+        Map<String, Object> csdl = chot("database_diff_9", "database_observation", "", 3.0, null);
+        csdl.put("generated_from", "hidden_output_diff");
+        List<Map<String, Object>> cu = List.of(chot("cp_1", "ui_state", "them", 8.0, null), csdl);
+        List<Map<String, Object>> moi = new ArrayList<>(List.of(chot("x", "ui_state", "them", 1.0, null)));
+
+        assertTrue(thuaKe(cu, moi));
+        assertEquals(8.0, moi.get(0).get("weight"));
+    }
+
+    private Map<String, Object> chot(String id, String kind, String target, double weight, String requires) {
+        Map<String, Object> ra = new LinkedHashMap<>();
+        ra.put("id", id);
+        ra.put("kind", kind);
+        ra.put("target", Map.of("semantic_id", target));
+        ra.put("expect", Map.of("visible", true));
+        ra.put("weight", weight);
+        if (requires != null) ra.put("requires", requires);
+        return ra;
+    }
+
+    private boolean thuaKe(List<Map<String, Object>> cu, List<Map<String, Object>> moi) {
+        return Boolean.TRUE.equals(
+                ReflectionTestUtils.invokeMethod(service, "thuaKeDiemNeuKhongDoi", cu, moi));
+    }
+
+    /**
+     * Ca thật của người soạn: bấm "Sửa thao tác" rồi bấm thẳng "Sinh lại testcase", không đụng
+     * vào action hay checkpoint nào. Điểm và ràng buộc phải còn nguyên.
+     *
+     * Vì sao phải có tiêu chí VỊ TRÍ trong ca này: giá trị chuẩn của nó do engine đo trên Golden
+     * rồi nướng vào sau capture, KHÔNG nằm trong raw_trace — nên bản dựng lại từ trace không thể
+     * có. Đo thật 20/9: bên cũ mang expect{center_x…}, bên mới không có khoá expect nào, và chỉ
+     * một tiêu chí lệch kiểu đó là đủ kéo cả scenario về reset.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void suaThaoTacRoiSinhLaiNgayThiGiuNguyenDiemVaRangBuoc() throws Exception {
+        Map<String, Object> golden = service.registerGoldenApp(Map.of(
+                "name", "G", "runtime_url", "http://localhost:9010", "ready", true));
+        Map<String, Object> suite = service.createSuite(Map.of(
+                "suite_code", "REVISE_KEEP", "name", "Giu diem", "golden_app_id", golden.get("id")));
+        Map<String, Object> rec = service.startRecording(String.valueOf(suite.get("id")), Map.of(
+                "name", "Validate so am",
+                "viewport", Map.of("width", 390, "height", 844, "device_pixel_ratio", 1)));
+        String recId = String.valueOf(rec.get("id"));
+        service.appendEvent(recId, Map.of("kind", "action", "action", "enter_text",
+                "target", Map.of("semanticId", "form.so_tien"), "value", "-5"));
+        service.appendEvent(recId, Map.of("kind", "action", "action", "tap",
+                "target", Map.of("semanticId", "form.luu")));
+        service.appendEvent(recId, Map.of("kind", "checkpoint", "action", "observe_ui",
+                "expect", Map.of("visible_texts", List.of("So tien phai lon hon 0"), "no_exception", true)));
+        service.appendEvent(recId, Map.of("kind", "component_position",
+                "target", Map.of("semanticId", "form.canh_bao")));
+        service.stopRecording(recId, Map.of());
+        Map<String, Object> scenario = service.abstractRecording(recId, Map.of(
+                "scenario_code", "VALIDATE_AM", "name", "Validate so am", "weight", 3.0,
+                "viewports", List.of(Map.of("name", "phone", "width", 390, "height", 844,
+                        "device_pixel_ratio", 1))));
+        String scenarioId = String.valueOf(scenario.get("id"));
+
+        // Capture nướng toạ độ chuẩn vào tiêu chí vị trí.
+        List<Map<String, Object>> chots = docChots(scenarioId);
+        String idViTri = chots.stream().filter(c -> "component_position".equals(c.get("kind")))
+                .map(c -> String.valueOf(c.get("id"))).findFirst().orElseThrow();
+        assertEquals(1, service.applyCapturedLayout(scenarioId, Map.of(idViTri, Map.of(
+                "center_x", 50.0, "center_y", 30.0, "width", 80.0, "height", 6.0))));
+
+        // Giảng viên chia điểm và ràng tiêu chí vị trí vào tiêu chí chữ.
+        chots = docChots(scenarioId);
+        String idChu = chots.stream().filter(c -> !idViTri.equals(String.valueOf(c.get("id"))))
+                .map(c -> String.valueOf(c.get("id"))).findFirst().orElseThrow();
+        for (Map<String, Object> c : chots) {
+            c.put("weight", 7.5);
+            if (idViTri.equals(String.valueOf(c.get("id")))) c.put("requires", idChu);
+        }
+        service.updateScenario(scenarioId, Map.of("checkpoints", chots, "weight", 15.0));
+
+        // Bấm "Sửa thao tác" rồi bấm thẳng "Sinh lại testcase".
+        Map<String, Object> revision = service.startScenarioRevision(scenarioId);
+        String revId = String.valueOf(revision.get("id"));
+        service.stopRecording(revId, Map.of());
+        service.abstractRecording(revId, Map.of());
+
+        List<Map<String, Object>> sau = docChots(scenarioId);
+        assertEquals(2, sau.size());
+        for (Map<String, Object> c : sau) {
+            assertEquals(7.5, ((Number) c.get("weight")).doubleValue(),
+                    "điểm checkpoint phải sống qua lượt sinh lại không đổi gì");
+        }
+        Map<String, Object> viTri = sau.stream()
+                .filter(c -> "component_position".equals(c.get("kind"))).findFirst().orElseThrow();
+        assertEquals(idChu, viTri.get("requires"), "ràng buộc cha–con phải còn");
+        assertEquals(idViTri, viTri.get("id"), "id cũ phải giữ, requires của người khác trỏ vào nó");
+        assertEquals(15.0, scenarioRepository.findById(scenarioId).orElseThrow().getWeight(),
+                "điểm cấp hàm test cũng phải còn khi không truyền weight");
+    }
+
+    /**
+     * "Duyệt lại scenario" phải báo ĐÚNG thứ publish sẽ chặn, không nghiêm hơn cũng không nhẹ
+     * hơn — nếu lệch thì nó thành một cổng thứ hai, người soạn sửa xong vẫn không publish được.
+     */
+    @Test
+    void duyetLaiScenarioBaoDungThuPublishSeChan() throws Exception {
+        String sha = "a".repeat(64);
+        Map<String, Object> golden = service.registerGoldenApp(Map.of(
+                "name", "G", "runtime_url", "http://localhost:9010", "ready", true,
+                "artifact_sha256", sha));
+        Map<String, Object> suite = service.createSuite(Map.of(
+                "suite_code", "SOAT_VS_PUBLISH", "name", "Soat", "golden_app_id", golden.get("id")));
+        String suiteId = String.valueOf(suite.get("id"));
+        Map<String, Object> rec = service.startRecording(suiteId, Map.of(
+                "name", "Them", "viewport", Map.of("width", 390, "height", 844, "device_pixel_ratio", 1)));
+        String recId = String.valueOf(rec.get("id"));
+        service.appendEvent(recId, Map.of("kind", "action", "action", "tap",
+                "target", Map.of("semanticId", "form.luu")));
+        service.appendEvent(recId, Map.of("kind", "checkpoint", "action", "observe_ui",
+                "expect", Map.of("visible_texts", List.of("Da luu"), "no_exception", true)));
+        service.stopRecording(recId, Map.of());
+        service.abstractRecording(recId, Map.of(
+                "scenario_code", "THEM", "name", "Them", "weight", 5.0,
+                "output_database_sha256", "b".repeat(64),
+                "viewports", List.of(Map.of("name", "phone", "width", 390, "height", 844,
+                        "device_pixel_ratio", 1))));
+
+        Map<String, Object> truoc = service.scenarioReadiness(suiteId);
+        assertEquals(List.of(), truoc.get("failed"), "oracle vừa sinh thì phải xanh");
+
+        // Upload LẠI ĐÚNG bản Golden cũ: sha không đổi một ký tự.
+        service.markGoldenSolutionReady(suiteId, Map.of("id", "art-1", "sha256", sha));
+        assertEquals(false, service.scenarioReadiness(suiteId).get("golden_ready"),
+                "vừa upload thì Golden App về REGISTERED — phải báo cần Build & mở Golden lại");
+        // Giả lập runtime build xong để soi riêng cổng oracle.
+        com.example.grader.entity.GoldenApp app =
+                goldenAppRepository.findById(String.valueOf(golden.get("id"))).orElseThrow();
+        app.setStatus(com.example.grader.entity.GoldenAppStatus.READY);
+        goldenAppRepository.save(app);
+
+        Map<String, Object> sau = service.scenarioReadiness(suiteId);
+        assertEquals(List.of("THEM"), sau.get("failed"),
+                "upload lại chính bản cũ vẫn làm mọi oracle STALE — đây là hành vi của hệ thống, "
+                + "không phải của phép duyệt");
+        // Và publish chặn y hệt: phép duyệt không nghiêm hơn publish.
+        IllegalStateException loi = assertThrows(IllegalStateException.class, () -> service.publish(suiteId));
+        assertTrue(loi.getMessage().contains("oracle READY"), loi.getMessage());
+    }
+
+    /**
+     * Hai ô người soạn gõ nay là MÃ NHÓM + TÊN LUỒNG (chốt 21/9/2026). Mã luồng — khoá sinh ra
+     * test_id — do máy dựng, và phải duy nhất dù sáu luồng cùng một nhóm.
+     */
+    @Test
+    void maLuongSinhTuMaNhomVaTenLuongVaLuonDuyNhat() {
+        Map<String, Object> golden = service.registerGoldenApp(Map.of(
+                "name", "G", "runtime_url", "http://localhost:9010", "ready", true));
+        Map<String, Object> suite = service.createSuite(Map.of(
+                "suite_code", "NHOM_MA", "name", "Nhom", "golden_app_id", golden.get("id")));
+        String suiteId = String.valueOf(suite.get("id"));
+
+        Map<String, Object> a = taoLuong(suiteId, "filter", "lọc học tập");
+        Map<String, Object> b = taoLuong(suiteId, "FILTER", "lọc đi lại");
+
+        // Bỏ dấu trước khi dựng mã: để nguyên thì "lọc học tập" ra "L_C_H_C_T_P".
+        assertEquals("FILTER_LOC_HOC_TAP", a.get("scenario_code"));
+        assertEquals("FILTER_LOC_DI_LAI", b.get("scenario_code"));
+        assertEquals("FILTER", a.get("group_code"));
+        assertEquals("FILTER", b.get("group_code"));
+
+        // Không khai mã nhóm thì luồng không thuộc nhóm nào — trạng thái hợp lệ, không phải lỗi.
+        Map<String, Object> c = taoLuong(suiteId, "", "sắp xếp");
+        assertEquals("SAP_XEP", c.get("scenario_code"));
+        assertEquals("", c.get("group_code"));
+
+        // Trùng cả nhóm lẫn tên thì máy phải tự tách mã, vì trùng mã là chung một lượt replay.
+        Map<String, Object> d = taoLuong(suiteId, "FILTER", "lọc học tập");
+        assertEquals("FILTER_LOC_HOC_TAP_2", d.get("scenario_code"));
+    }
+
+    private Map<String, Object> taoLuong(String suiteId, String maNhom, String ten) {
+        Map<String, Object> rec = service.startRecording(suiteId, Map.of(
+                "name", ten, "viewport", Map.of("width", 390, "height", 844, "device_pixel_ratio", 1)));
+        String recId = String.valueOf(rec.get("id"));
+        service.appendEvent(recId, Map.of("kind", "action", "action", "tap",
+                "target", Map.of("semanticId", "nut.loc")));
+        service.appendEvent(recId, Map.of("kind", "checkpoint", "action", "observe_ui",
+                "expect", Map.of("visible_texts", List.of(ten), "no_exception", true)));
+        service.stopRecording(recId, Map.of());
+        return service.abstractRecording(recId, Map.of(
+                "group_code", maNhom, "name", ten, "weight", 2.0,
+                "viewports", List.of(Map.of("name", "phone", "width", 390, "height", 844,
+                        "device_pixel_ratio", 1))));
+    }
+
+    /**
+     * Bước đi bằng ĐỊNH DANH phải nhận đường lui đo trên Golden: nhãn cho nút có chữ, hình
+     * dạng (kiểu widget + mã icon) cho nút chỉ có icon.
+     *
+     * Vì sao cần: recorder chốt đúng một khoá rồi dừng nên target không mang nhãn nào; bài
+     * quên gắn định danh là bước hỏng và cả lượt thành `not_run`. Đo trên PE_PRM393_FA26
+     * ngày 21/9/2026: riêng `chi_tieu.them` đứng đầu năm lượt, gánh 38/94 điểm.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void buocDiBangDinhDanhNhanDuocDuongLui() throws Exception {
+        Map<String, Object> golden = service.registerGoldenApp(Map.of(
+                "name", "G", "runtime_url", "http://localhost:9010", "ready", true));
+        Map<String, Object> suite = service.createSuite(Map.of(
+                "suite_code", "DUONG_LUI", "name", "Duong lui", "golden_app_id", golden.get("id")));
+        String suiteId = String.valueOf(suite.get("id"));
+        String scenarioId = String.valueOf(taoLuong(suiteId, "CRUD", "thêm chi tiêu").get("id"));
+
+        assertEquals(1, service.applyCapturedTargets(scenarioId, Map.of(), Map.of(
+                "nut.loc", Map.of(
+                        "label", "Thêm khoản chi",
+                        "shape", Map.of("type", "FloatingActionButton", "icon", 57415)))));
+
+        Map<String, Object> target = docTargetBuocDau(scenarioId);
+        assertEquals("nut.loc", target.get("semanticId"), "định danh vẫn là khoá chính");
+        assertEquals("Thêm khoản chi", target.get("label"));
+        List<Map<String, Object>> lui = (List<Map<String, Object>>) target.get("fallback");
+        assertEquals("FloatingActionButton", lui.get(0).get("type"));
+
+        // Không có mục nào khớp định danh thì để nguyên, không dựng target rỗng.
+        assertEquals(0, service.applyCapturedTargets(scenarioId, Map.of(),
+                Map.of("dinh.danh.khac", Map.of("label", "X"))));
+
+        // Bước mang CẢ hai khoá (nhãn ghi hình trước, định danh nướng vào sau) vẫn phải nhận
+        // đường lui theo NHÃN khi bảng theo định danh không có mục — đây là đường của mọi bộ
+        // đề đã nâng cấp định danh bằng applyCapturedIdentifiers.
+        assertEquals(1, service.applyCapturedTargets(scenarioId,
+                Map.of("Thêm khoản chi", Map.of("type", "ElevatedButton")),
+                Map.of()));
+        List<Map<String, Object>> luiTheoNhan =
+                (List<Map<String, Object>>) docTargetBuocDau(scenarioId).get("fallback");
+        assertEquals("ElevatedButton", luiTheoNhan.get(0).get("type"));
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> docTargetBuocDau(String scenarioId) throws Exception {
+        List<Map<String, Object>> steps = new ObjectMapper().readValue(
+                scenarioRepository.findById(scenarioId).orElseThrow().getStepsJson(),
+                new TypeReference<List<Map<String, Object>>>() {});
+        return (Map<String, Object>) steps.get(0).get("target");
     }
 }

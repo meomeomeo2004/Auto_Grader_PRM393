@@ -978,8 +978,15 @@ public class BatchGradingService {
         for (Map<String, Object> tc : tcs) {
             Object meta = matrix.get(String.valueOf(tc.get("test_id")));
             if (meta instanceof Map<?, ?> m) {
-                putIfAbsent(tc, "skill_code", m.get("skill_code"));
-                putIfAbsent(tc, "difficulty", m.get("difficulty"));
+                // Tên luồng điền TỪ PHÍA JAVA, không sửa merge_grade_results.dart: script đó
+                // nướng trong ảnh Docker, đổi một dòng là phải dựng lại cả ảnh chấm. Bảng điểm
+                // cần cột "Luồng", mà script chỉ chép group_id/group_name/scenario_code.
+                putIfAbsent(tc, "scenario_name", m.get("scenario_name"));
+                putIfAbsent(tc, "group_id", m.get("group_id"));
+                // KHÔNG đọc group_name/skill_code/difficulty nữa: skills_matrix.json không còn
+                // sinh chúng, và hệ thống chưa đưa vào dùng thật nên không có đề cũ nào cần đỡ.
+                // Giữ đường đọc cho một hình dữ liệu không còn tồn tại chỉ làm người sau tưởng
+                // mấy field đó vẫn sống.
             }
         }
     }

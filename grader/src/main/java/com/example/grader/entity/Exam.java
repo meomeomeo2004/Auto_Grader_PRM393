@@ -31,9 +31,6 @@ public class Exam {
     private String examName;
 
     @Lob
-    @Column(name = "teacher_note")
-    private String teacherNote;     // ghi chú/đề bài để đối chiếu khi xem kết quả
-
     @Column(name = "image_name", length = 100)
     private String imageName;
 

@@ -800,7 +800,7 @@ public class GoldenRuntimeService {
                     if (!a || !b) return false;
                     const ta = a.target || {};
                     const tb = b.target || {};
-                    for (const key of ['semanticId', 'valueKey', 'key']) {
+                    for (const key of ['semanticId']) {
                       if (ta[key] && tb[key]) return ta[key] === tb[key];
                     }
                     if (ta.label && tb.label) return ta.label === tb.label;

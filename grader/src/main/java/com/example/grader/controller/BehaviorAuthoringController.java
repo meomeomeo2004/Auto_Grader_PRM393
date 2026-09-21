@@ -477,9 +477,62 @@ public class BehaviorAuthoringController {
                 .body(resource);
     }
 
-    @GetMapping("/suites/{id}/golden-value-keys")
-    public ResponseEntity<?> goldenValueKeys(@PathVariable String id) {
-        return call(() -> Map.of("keys", artifactService.scanGoldenValueKeys(id)));
+    /** Duyệt toàn bộ scenario xem cái nào còn khớp Golden hiện tại; không chạy Docker. */
+    @GetMapping("/suites/{id}/scenario-readiness")
+    public ResponseEntity<?> scenarioReadiness(@PathVariable String id) {
+        return call(() -> service.scenarioReadiness(id));
+    }
+
+    /**
+     * Capture lại TOÀN BỘ scenario đang bật, thay cho việc người soạn phải bấm "Sửa thao tác"
+     * rồi "Sinh lại testcase" từng luồng một — bộ mười hai luồng là hai mươi bốn cú click.
+     *
+     * Đi bằng capture chứ KHÔNG dựng lại từ raw_trace. Capture đã làm đủ mọi việc mà lượt sinh
+     * lại làm: đo lại giá trị chuẩn trên Golden mới, tách lại checkpoint CSDL, nướng định danh
+     * vào bước, sinh Output DB, đóng dấu oracle theo Golden hiện tại. Khác một điều quan trọng:
+     * nó KHÔNG đụng vào danh sách checkpoint, nên điểm đã chia và ràng buộc đã gắn không có cửa
+     * nào để mất — trong khi đường dựng lại từ trace thì phải so từng vân tay mới giữ được.
+     *
+     * Mỗi scenario là một lượt chạy Docker nên bộ nhiều luồng mất vài phút. Một luồng hỏng
+     * không được làm đổ cả lượt: gom lỗi lại rồi trả tên về cho màn soạn tô đỏ.
+     */
+    @PostMapping("/suites/{id}/scenarios/recapture-all")
+    public ResponseEntity<?> recaptureAllScenarios(@PathVariable String id) {
+        return call(() -> {
+            Map<String, Object> soat = service.scenarioReadiness(id);
+            if (!Boolean.TRUE.equals(soat.get("golden_ready"))) {
+                throw new IllegalStateException(
+                        "Golden App chưa READY — bấm “Build & mở Golden” rồi chạy lại.");
+            }
+            List<Map<String, Object>> rows = new ArrayList<>();
+            List<String> hong = new ArrayList<>();
+            for (Object raw : list(soat.get("scenarios"))) {
+                Map<String, Object> row = new LinkedHashMap<>(map(raw));
+                List<String> lyDo = new ArrayList<>();
+                try {
+                    Map<String, Object> capture = captureService.capture(id, String.valueOf(row.get("id")));
+                    writeTestcaseDefinition(id, map(capture.get("scenario")).get("scenario_code"));
+                    // Capture "thành công nhưng có mùi" vẫn phải đỏ: đây là lượt chạy hàng loạt,
+                    // không ai đọc log từng luồng, cảnh báo im lặng là cảnh báo mất.
+                    if (capture.get("capture_warning") != null) {
+                        lyDo.add(String.valueOf(capture.get("capture_warning")));
+                    }
+                } catch (RuntimeException e) {
+                    lyDo.add(e.getMessage() == null ? e.toString() : e.getMessage());
+                }
+                row.put("ok", lyDo.isEmpty());
+                row.put("reasons", lyDo);
+                rows.add(row);
+                if (!lyDo.isEmpty()) hong.add(String.valueOf(row.get("scenario_code")));
+            }
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("suite_id", id);
+            out.put("golden_ready", true);
+            out.put("total", rows.size());
+            out.put("failed", hong);
+            out.put("scenarios", rows);
+            return out;
+        });
     }
 
     @GetMapping("/suites/{id}/execution-plan")
@@ -488,10 +541,8 @@ public class BehaviorAuthoringController {
     }
 
     @GetMapping("/suites/{id}/code-preview")
-    public ResponseEntity<?> codePreview(
-            @PathVariable String id,
-            @RequestParam(value = "scenarioCode", required = false) String scenarioCode) {
-        return call(() -> materializer.previewCode(id, scenarioCode));
+    public ResponseEntity<?> codePreview(@PathVariable String id) {
+        return call(() -> materializer.previewCode(id));
     }
 
     @GetMapping("/suites/{id}/determinism")

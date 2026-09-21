@@ -62,9 +62,12 @@ public class StaticRuleService {
         return out;
     }
 
+    /** Nhóm điểm mặc định của mọi luật tĩnh — người soạn không phải khai (chốt 21/9/2026). */
+    private static final String NHOM_MAC_DINH = "Architecture";
+
     private static Map<String, Object> preset(String id, String name, String kind, String lintCode,
                                               Map<String, Object> config, double weight,
-                                              String groupId, String groupName, String skillCode,
+                                              String groupId, String skillCode,
                                               String moTa) {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("id", id);
@@ -74,7 +77,6 @@ public class StaticRuleService {
         if (config != null) out.put("config", config);
         out.put("weight", weight);
         out.put("group_id", groupId);
-        out.put("group_name", groupName);
         out.put("skill_code", skillCode);
         out.put("description", moTa);
         return out;
@@ -89,7 +91,7 @@ public class StaticRuleService {
                                 "lib/**_model.dart", "lib/**.model.dart",
                                 "lib/entity/**", "lib/entities/**", "lib/**/entity/**", "lib/**/entities/**"),
                         null, 1, null))),
-                5, "G_KIENTRUC", "Kiến trúc mã nguồn", "PROJ_FOLDER_STRUCTURE",
+                5, NHOM_MAC_DINH, "PROJ_FOLDER_STRUCTURE",
                 "Có file/thư mục model riêng (models/, entity/, *_model.dart) thay vì khai class lẫn trong màn hình."));
         out.add(preset("ARCH_DATA", "Tách tầng dữ liệu khỏi giao diện", KIND_SOURCE_PATTERN, null,
                 Map.of("require", List.of(req("Tách tầng dữ liệu khỏi giao diện",
@@ -100,7 +102,7 @@ public class StaticRuleService {
                                 "lib/**_repository.dart", "lib/**_service.dart", "lib/**_store.dart",
                                 "lib/**_dao.dart", "lib/**_helper.dart", "lib/**_db.dart", "lib/**_database.dart"),
                         null, 1, null))),
-                5, "G_KIENTRUC", "Kiến trúc mã nguồn", "PROJ_FOLDER_STRUCTURE",
+                5, NHOM_MAC_DINH, "PROJ_FOLDER_STRUCTURE",
                 "Truy cập DB/API nằm trong lớp riêng (data/, repository/, *_service.dart, db_helper...) chứ không viết thẳng trong widget."));
         out.add(preset("ARCH_SCREEN", "Tách màn hình thành file riêng", KIND_SOURCE_PATTERN, null,
                 Map.of("require", List.of(req("Tách màn hình thành file riêng",
@@ -110,7 +112,7 @@ public class StaticRuleService {
                                 "lib/ui/**", "lib/**/ui/**",
                                 "lib/**_screen.dart", "lib/**_page.dart", "lib/**_view.dart"),
                         null, 1, null))),
-                5, "G_KIENTRUC", "Kiến trúc mã nguồn", "PROJ_FOLDER_STRUCTURE",
+                5, NHOM_MAC_DINH, "PROJ_FOLDER_STRUCTURE",
                 "Mỗi màn hình một file (screens/, pages/, *_screen.dart) thay vì dồn hết vào main.dart."));
         out.add(preset("ARCH_LOGIC", "Tách logic/ViewModel khỏi màn hình", KIND_SOURCE_PATTERN, null,
                 Map.of("require", List.of(req("Tách logic/ViewModel khỏi màn hình",
@@ -126,7 +128,7 @@ public class StaticRuleService {
                                 "lib/**_provider.dart", "lib/**_notifier.dart", "lib/**_bloc.dart",
                                 "lib/**_cubit.dart", "lib/**_logic.dart", "lib/**_calculator.dart", "lib/**_usecase.dart"),
                         null, 1, null))),
-                5, "G_KIENTRUC", "Kiến trúc mã nguồn", "PROJ_FOLDER_STRUCTURE",
+                5, NHOM_MAC_DINH, "PROJ_FOLDER_STRUCTURE",
                 "Xử lý nghiệp vụ nằm trong lớp riêng (logic/, viewmodels/, controllers/, providers/...) chứ không trộn vào build()."));
         out.add(preset("STATE_RIVERPOD", "Dùng Riverpod quản lý state", KIND_SOURCE_PATTERN, null,
                 Map.of("require", List.of(
@@ -136,10 +138,10 @@ public class StaticRuleService {
                                 "(ConsumerWidget|ConsumerStatefulWidget|ProviderScope|ref\\.watch|ref\\.read"
                                         + "|StateNotifierProvider|NotifierProvider|StateProvider|FutureProvider"
                                         + "|StreamProvider|ChangeNotifierProvider)", 1, null))),
-                10, "G_KIENTRUC", "Kiến trúc mã nguồn", "STATE_RIVERPOD",
+                10, NHOM_MAC_DINH, "STATE_RIVERPOD",
                 "Bài phải import flutter_riverpod VÀ thực sự dùng (ConsumerWidget, ref.watch, ...Provider). Chỉ tick khi Golden cũng dùng Riverpod."));
         out.add(preset("LINT_EMPTY_CATCHES", "Không nuốt lỗi — cấm khối catch rỗng", KIND_LINT, "empty_catches",
-                null, 5, "G_MA_SACH", "Chất lượng mã nguồn", "CODE_QUALITY_LINT",
+                null, 5, NHOM_MAC_DINH, "CODE_QUALITY_LINT",
                 "Luật dart analyze empty_catches trong lib/. Chỉ chấm được khi bài biên dịch."));
         return out;
     }
@@ -260,19 +262,13 @@ public class StaticRuleService {
             String instanceId = ExamService.safeId(suiteCode + "_STATIC_" + rule.get("id"), "tiêu chí tĩnh")
                     .toUpperCase(Locale.ROOT);
             boolean lint = KIND_LINT.equals(rule.get("kind"));
+            // Cùng bộ field với dòng hành vi (xem BehaviorSuiteMaterializer.buildMatrix): chỉ
+            // giữ thứ có người đọc. Riêng static_rule/static_config là ruột của runner tĩnh
+            // (grader-base/scripts/static_checks.dart) nên phải ở lại.
             Map<String, Object> row = new LinkedHashMap<>();
-            row.put("instance_id", instanceId);
             row.put("runner", "STATIC_ANALYSIS");
-            row.put("scenario_code", null);
-            row.put("execution_code", null);
-            row.put("checkpoint_id", null);
-            row.put("skill_code", rule.get("skill_code"));
-            row.put("testcase_group", "STATIC");
-            row.put("layer", "static");
             row.put("group_id", rule.get("group_id"));
-            row.put("group_name", rule.get("group_name"));
             row.put("name", rule.get("name"));
-            row.put("difficulty", "basic");
             row.put("weight", rule.get("weight"));
             row.put("static_rule", lint ? rule.get("lint_code") : KIND_SOURCE_PATTERN);
             if (!lint) row.put("static_config", rule.get("config"));
@@ -298,11 +294,10 @@ public class StaticRuleService {
         if (weight <= 0 || weight > 100) {
             throw new IllegalArgumentException("Luật " + id + " phải có trọng số trong (0, 100]");
         }
+        // Luật tĩnh mặc định thuộc nhóm "Architecture" (chốt 21/9/2026) — không bắt khai nữa.
+        // `group_name` đã gỡ hẳn: nó luôn trùng group_id nên không mang tin gì.
         String groupId = text(raw, "group_id");
-        String groupName = text(raw, "group_name");
-        if (groupId.isBlank() || groupName.isBlank()) {
-            throw new IllegalArgumentException("Luật " + id + " thiếu nhóm điểm (group_id/group_name)");
-        }
+        if (groupId.isBlank()) groupId = NHOM_MAC_DINH;
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("id", id);
@@ -310,7 +305,6 @@ public class StaticRuleService {
         out.put("kind", kind);
         out.put("weight", weight);
         out.put("group_id", groupId);
-        out.put("group_name", groupName);
         out.put("skill_code", text(raw, "skill_code").isBlank() ? "CODE_QUALITY_LINT" : text(raw, "skill_code"));
         if (!text(raw, "description").isBlank()) out.put("description", text(raw, "description"));
 
