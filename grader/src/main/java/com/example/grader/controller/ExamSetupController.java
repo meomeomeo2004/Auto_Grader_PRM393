@@ -232,8 +232,10 @@ public class ExamSetupController {
             java.util.List<Map<String, String>> mockups = rawMockups instanceof java.util.List
                     ? (java.util.List<Map<String, String>>) rawMockups : java.util.List.of();
             Object deBai = body == null ? null : body.get("de_bai");
+            Object rawName = body == null ? null : body.get("exam_name");
             java.util.List<String> written = examService.saveDeBaiWithMockups(
-                    examId, deBai == null ? null : String.valueOf(deBai), mockups);
+                    examId, deBai == null ? null : String.valueOf(deBai),
+                    rawName == null ? null : String.valueOf(rawName).trim(), mockups);
             return ResponseEntity.ok(Map.of("exam_id", examId, "files", written));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
@@ -261,8 +263,19 @@ public class ExamSetupController {
     @PostMapping(value = "/{examId}/handout/original", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<?> uploadOriginalHandout(@PathVariable String examId,
                                                    @RequestParam(value = "examName", required = false) String examName,
+                                                   @RequestParam(value = "moi", defaultValue = "false") boolean moi,
                                                    @RequestPart("file") MultipartFile file) {
         try {
+            // Cờ `moi` do HỘP "TẠO ĐỀ" gửi: đây là đề mới tinh, trùng mã là từ chối. Không có cờ
+            // thì đây là "tải đè" ở màn chi tiết — đường đó BẮT BUỘC phải ghi được lên đề đang
+            // có, nên không được chặn cứng ở đây cho cả hai.
+            //
+            // Chặn ở máy chủ chứ không chỉ ở ô nhập: hàm dưới xoá file gốc cũ rồi mới ghi file
+            // mới, nên một lần gõ trùng mã là mất hẳn bản Word của đề cũ, không có đường lùi.
+            if (moi && examService.deDaTonTai(examId))
+                return ResponseEntity.status(409).body(Map.of("error",
+                        "Mã đề " + examId + " đã có rồi. Mở đề đó ra để sửa, hoặc dùng "
+                                + "\"Nhân bản sang mã mới\" nếu muốn một bản riêng."));
             // KHÔNG bóc chữ ngầm nữa (20/9): xem chú thích ở saveOriginalHandoutFile. Muốn đưa
             // nội dung vào hệ thống thì gọi /handout/chuyen-vao-he-thong — một thao tác có tên,
             // có xác nhận, và ĐỔI LOẠI ĐỀ chứ không lặng lẽ đẻ ra một bản thứ hai.

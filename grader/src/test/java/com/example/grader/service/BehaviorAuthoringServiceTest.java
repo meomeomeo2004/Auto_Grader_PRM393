@@ -388,11 +388,11 @@ class BehaviorAuthoringServiceTest {
                 "target", Map.of("semanticId", "tay.luu", "label", "Thêm khoản chi")));
         // Nhãn HAI DÒNG của dòng danh sách (title⏎subtitle) — đúng ca đã làm HE230112 mất
         // 2.9 điểm; định danh phải nướng được qua chuỗi có ký tự xuống dòng đi qua JSON + DB.
-        String nhanDong = "Trà sữa cuối tuần\n62.000 ₫ · ANUONG · 2026-08-20";
+        String nhanDong = "Trà sữa cuối tuần\n62.000 VND · ANUONG · 2026-08-20";
         service.appendEvent(recordingId, Map.of("kind", "action", "action", "tap",
                 "target", Map.of("label", nhanDong)));
         service.appendEvent(recordingId, Map.of("kind", "checkpoint", "action", "observe_ui",
-                "expect", Map.of("visible_texts", List.of("Tổng tháng: 0 ₫"), "no_exception", true)));
+                "expect", Map.of("visible_texts", List.of("Tổng tháng: 0 VND"), "no_exception", true)));
         service.stopRecording(recordingId, Map.of());
         Map<String, Object> scenario = service.abstractRecording(recordingId, Map.of(
                 "scenario_code", "ADD_EXPENSE",

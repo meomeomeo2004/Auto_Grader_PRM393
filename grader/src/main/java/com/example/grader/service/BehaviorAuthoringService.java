@@ -1082,7 +1082,7 @@ public class BehaviorAuthoringService {
         // Trước đây chỗ này gom JSON của mọi tiêu chí thành một chuỗi rồi lọc bằng
         // `contains` — khớp CON. Nhưng lúc chấm, engine dùng `find.text(value)` khớp
         // TUYỆT ĐỐI cả widget Text. Hai khái niệm khác nhau nên sinh ra tiêu chí không
-        // bao giờ đạt được: "KHAC" lọt vì nó là một đoạn của "29.300 ₫ · KHAC ·
+        // bao giờ đạt được: "KHAC" lọt vì nó là một đoạn của "29.300 VND · KHAC ·
         // 2026-09-09", còn "6" lọt vì bất kỳ chuỗi nào có chữ số 6 cũng chứa nó.
         Set<String> chuUiKhangDinh = new LinkedHashSet<>();
         for (Map<String, Object> item : checkpoints) {

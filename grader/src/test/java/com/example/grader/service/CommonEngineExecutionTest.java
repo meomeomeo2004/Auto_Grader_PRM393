@@ -115,6 +115,35 @@ class CommonEngineExecutionTest {
         assertTrue(exam.contains("tableRow.children.length"));
     }
 
+    @Test
+    void readCheckpointRequiresProofThatSubmissionQueriedTheTable() throws Exception {
+        String exam = resource("/behavior-replay-engine/exam_test.dart");
+
+        // Bo cham chep hidden.db vao app.db TRUOC khi mo app, nen checkpoint
+        // `database_observation` + `operation: READ` dung san ke ca voi bai chua tung
+        // cham SQLite. Do 22/9/2026 tren lo PE_PRM393_FA26: 4 bai co repository rong
+        // hoan toan van an tron 7.5/100 diem cua ba luong validate. Ba khang dinh duoi
+        // day la ba manh cua cai cong da bit lo do; mat manh nao la lo mo lai.
+
+        // 1. Bien toan cuc `databaseFactory` — thu duy nhat bai lam cham toi — phai di
+        //    qua lop boc co dem, khong duoc gan thang factory ffi.
+        assertTrue(exam.contains("databaseFactory = _factorySqlCoDem();"),
+                "bai lam phai chay qua factory co dem thi moi biet no co doc bang khong");
+        assertFalse(exam.contains("databaseFactory = databaseFactoryFfiNoIsolate;"),
+                "gan thang factory ffi la bo dem khong thay gi, checkpoint READ lai dung san");
+
+        // 2. Engine tu truy cap DB thi phai goi THANG factory ffi, neu khong chinh cau
+        //    SELECT cua engine se tu lam chung cho bai lam.
+        assertTrue(exam.contains("databaseFactoryFfiNoIsolate.openDatabase(path)"));
+        assertTrue(exam.contains("_ghiNhanSqlBaiLam(arguments)"));
+
+        // 3. Cong chi ap cho READ (INSERT/UPDATE/DELETE tu chung minh bang du lieu doi),
+        //    va nguoi soan de tat duoc cho luong khong di qua man nao doc bang.
+        assertTrue(exam.contains("operation == 'READ'"));
+        assertTrue(exam.contains("_bool(checkpoint['require_student_read'], true)"));
+        assertTrue(exam.contains("!_bangBaiLamDaDoc.contains(table.toLowerCase())"));
+    }
+
     private String resource(String path) throws Exception {
         try (InputStream in = getClass().getResourceAsStream(path)) {
             assertNotNull(in, "Không tìm thấy resource " + path);

@@ -15,6 +15,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shared_preferences_platform_interface/in_memory_shared_preferences_async.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_async_platform_interface.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+// ignore: implementation_imports
+import 'package:sqflite_common_ffi/src/sqflite_import.dart'
+    show buildDatabaseFactory, SqfliteInvokeHandler;
 
 import '../lib/main.dart' as student_app;
 
@@ -207,7 +210,12 @@ Future<void> _runBehaviorScenario(
     // delegates work to a background isolate, which can remain pending forever
     // in constrained Docker environments. Keep all SQLite calls in the test
     // isolate so Golden and student replays have deterministic timeouts.
-    databaseFactory = databaseFactoryFfiNoIsolate;
+    //
+    // Bọc thêm một lớp ĐẾM quanh factory đó: biến toàn cục `databaseFactory` là thứ
+    // duy nhất bài làm chạm tới, còn engine luôn gọi thẳng `databaseFactoryFfiNoIsolate`
+    // nên bộ đếm chỉ thấy lưu lượng của bài nộp. Xem `_bangBaiLamDaDoc`.
+    _bangBaiLamDaDoc.clear();
+    databaseFactory = _factorySqlCoDem();
     _applyViewport(tester, _asMap(testCase['viewport']));
     tester.platformDispatcher.defaultRouteNameTestValue = initialUri;
     addTearDown(() {
@@ -1076,6 +1084,56 @@ bool? _semanticChecked(List<Widget> widgets) {
   return null;
 }
 
+// ============ DEM LUU LUONG SQL CUA BAI LAM ============
+// Vi sao phai dem: bo cham chep hidden.db (da du so hang cua de) vao app.db TRUOC
+// khi mo app, nen checkpoint `database_observation` + `operation: READ` — von chi
+// khang dinh "sau thao tac nay bang van con dung ngan ay hang" — dung san ke ca khi
+// bai lam chua tung cham SQLite. Do 22/9/2026 tren lo PE_PRM393_FA26: 4 bai co
+// ExpenseRepository rong hoan toan (khong mot lan goi DatabaseHelper.moKho) van an
+// tron 7.5/100 diem cua ba luong validate. Dem cau SELECT la cach phan biet "app doc
+// dung roi quen ghi" (van dang duoc diem doc) voi "app chua noi du lieu" (khong dang).
+//
+// Vi sao moc o factory chu khong o tung Database: moi lenh query/rawQuery/insert/
+// update/execute/batch cua sqflite deu chui qua dung mot ham
+// `factory.invokeMethod(method, arguments)`, va `arguments['sql']` la nguyen van cau
+// lenh — `db.query('expenses')` cung da duoc dich thanh `SELECT * FROM expenses`
+// truoc khi toi day. Do la nut co chai duy nhat.
+//
+// Vi sao khong dem nham lenh cua chinh engine: `_resetDatabase`, `_assertDatabase`,
+// `_databasePath` va `_captureOutputDatabase` deu goi thang `databaseFactoryFfiNoIsolate`,
+// khong doc bien toan cau `databaseFactory`, nen khong di qua lop boc nay.
+final Set<String> _bangBaiLamDaDoc = <String>{};
+
+/// Bat ten bang sau FROM/JOIN. Chap nhan ca `"expenses"`, `[expenses]`,
+/// `` `expenses` `` va tien to schema kieu `main.expenses`.
+final RegExp _bangTrongSql = RegExp(
+  r'\b(?:from|join)\s+[`"\[]?(?:\w+[`"\]]?\s*\.\s*[`"\[]?)?(\w+)',
+  caseSensitive: false,
+);
+
+final RegExp _batDauBangSelect = RegExp(r'^\s*select\b', caseSensitive: false);
+
+void _ghiNhanSqlBaiLam(Object? arguments) {
+  if (arguments is! Map) return;
+  // 'sql' la paramSql cua sqflite_common; xem src/constant.dart.
+  final sql = arguments['sql']?.toString() ?? '';
+  if (!_batDauBangSelect.hasMatch(sql)) return;
+  for (final khop in _bangTrongSql.allMatches(sql)) {
+    final ten = khop.group(1);
+    if (ten != null) _bangBaiLamDaDoc.add(ten.toLowerCase());
+  }
+}
+
+DatabaseFactory _factorySqlCoDem() {
+  final goc = databaseFactoryFfiNoIsolate as SqfliteInvokeHandler;
+  return buildDatabaseFactory(
+    invokeMethod: (String method, [Object? arguments]) {
+      _ghiNhanSqlBaiLam(arguments);
+      return goc.invokeMethod<Object?>(method, arguments);
+    },
+  );
+}
+
 Future<void> _assertDatabase(
   Map<String, dynamic> checkpoint,
   Map<String, dynamic> contract,
@@ -1095,13 +1153,30 @@ Future<void> _assertDatabase(
     if (table.isEmpty || !RegExp(r'^[A-Za-z_][A-Za-z0-9_]*$').hasMatch(table)) {
       throw ArgumentError('Tên bảng SQLite không hợp lệ: $table');
     }
+    final operation = _text(checkpoint, 'operation').toUpperCase();
+    // READ chi khang dinh "sau thao tac nay bang van nhu the nay". Khang dinh do dung
+    // san nho hidden.db ma bo cham vua chep vao TRUOC khi mo app, nen phai co bang
+    // chung bai lam that su doc bang thi moi cham; khong thi no thanh diem cho khong
+    // cho ca nhung bai chua noi du lieu. INSERT/UPDATE/DELETE khong can cong nay vi
+    // ban than du lieu doi da la bang chung. Nguoi soan de van tat duoc bang cach dat
+    // "require_student_read": false tren checkpoint — danh cho luong khong di qua man
+    // nao doc bang (vi du vao thang man nhap bang deep link).
+    if (operation == 'READ' &&
+        _bool(checkpoint['require_student_read'], true) &&
+        !_bangBaiLamDaDoc.contains(table.toLowerCase())) {
+      throw StateError(
+        'Bài làm không đọc bảng $table lần nào trong luồng này '
+        '(không thấy câu SELECT nào trên bảng) nên không có căn cứ chấm tiêu chí '
+        'đọc dữ liệu. Các bảng bài làm có đọc: '
+        '${_bangBaiLamDaDoc.isEmpty ? "(không có)" : _bangBaiLamDaDoc.join(", ")}.',
+      );
+    }
     final expected = <String, dynamic>{
       for (final entry in _asMap(checkpoint['row']).entries)
         entry.key: entry.value,
     };
     final rows = await database.query(table);
     final matches = rows.where((row) => _rowContains(row, expected)).toList();
-    final operation = _text(checkpoint, 'operation').toUpperCase();
     if (operation == 'DELETE' || _bool(checkpoint['absent'], false)) {
       expect(
         matches,
@@ -4296,7 +4371,7 @@ Finder _finder(Map<String, dynamic> target, {bool duPhong = false}) {
     return _timDocNhu(text);
   }
   // TIỀN TỐ VĂN BẢN. Hợp đồng nhãn của đề khai `text_prefix` cho những dòng mà phần
-  // đuôi thay đổi theo dữ liệu — ví dụ "Tổng tháng: 608.000 ₫". find.text so khớp
+  // đuôi thay đổi theo dữ liệu — ví dụ "Tổng tháng: 608.000 VND". find.text so khớp
   // TUYỆT ĐỐI nên không dùng được ở đây; thiếu nhánh này thì đúng những mục hợp đồng
   // ấy không có cách nào kiểm.
   final textPrefix = _text(target, 'text_prefix');

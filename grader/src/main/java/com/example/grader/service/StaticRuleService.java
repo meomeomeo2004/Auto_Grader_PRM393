@@ -82,54 +82,122 @@ public class StaticRuleService {
         return out;
     }
 
+    /**
+     * Từ vựng TÊN THƯ MỤC của một tầng → danh sách glob. Mỗi tên sinh đúng hai mẫu:
+     * {@code lib/<ten>/**} (thư mục đặt ngay dưới lib) và {@code lib/**}{@code /<ten>/**}
+     * (thư mục lồng trong feature/module). KHÔNG sinh mẫu hậu tố tên file — xem lý do ở
+     * khối chú thích của {@link #presets()}.
+     */
+    private static List<String> thuMuc(String... ten) {
+        List<String> out = new ArrayList<>();
+        for (String t : ten) {
+            out.add("lib/" + t + "/**");
+            out.add("lib/**/" + t + "/**");
+        }
+        return out;
+    }
+
+    // ── DẤU HIỆU NỘI DUNG CỦA TỪNG TẦNG ────────────────────────────────────────────────────
+    // Chỉ xét tên thư mục thì đặt nhầm file vào đúng thư mục vẫn ăn điểm: đo thật 22/9/2026,
+    // để `book.dart` vào lib/data và `database_helper.dart` vào lib/model thì CẢ HAI luật đều
+    // đạt. Nên mỗi tầng phải có thêm dấu hiệu đọc từ NỘI DUNG file (`contains` của engine).
+
+    /**
+     * Truy cập dữ liệu THÔ — dấu hiệu mạnh, đủ chắc để dùng làm vế CẤM.
+     * Cố ý KHÔNG có {@code .insert(} ở đây: `list.insert(0, x)` là API List của Dart, cấm theo
+     * nó thì một model quản lý danh sách sẽ trượt oan.
+     */
+    private static final String DAU_HIEU_DU_LIEU_THO =
+            "sqflite|openDatabase|getDatabasesPath|rawQuery|rawInsert|rawUpdate|rawDelete"
+                    + "|http\\s*\\.|Dio\\s*\\(|SharedPreferences|[Hh]ive\\.|[Ff]irebase|cloud_firestore"
+                    + "|[Dd]rift|Isar|Realm|ObjectBox";
+
+    /**
+     * Rộng hơn: thêm lời gọi CRUD qua đối tượng kho ({@code db.insert(...)},
+     * {@code repo.query(...)}). Chỉ dùng cho vế KHẲNG ĐỊNH, nơi bắt hụt thì thiệt cho đề chứ
+     * không oan cho sinh viên.
+     */
+    private static final String DAU_HIEU_DU_LIEU =
+            DAU_HIEU_DU_LIEU_THO + "|\\.(insert|update|delete|query)\\s*\\(";
+
+    private static final String DAU_HIEU_WIDGET =
+            "extends\\s+(StatelessWidget|StatefulWidget|ConsumerWidget|ConsumerStatefulWidget|State<)"
+                    + "|Widget\\s+build\\s*\\(";
+
+    /** Regex chạy ở chế độ MULTILINE cả hai bên (Java và Dart) nên `^` là đầu DÒNG. */
+    private static final String DAU_HIEU_CLASS = "^\\s*(abstract\\s+)?class\\s+\\w+";
+
     /** Preset bất biến — FE chỉ hiển thị và tick, không tự chế cấu hình. */
     public List<Map<String, Object>> presets() {
         List<Map<String, Object>> out = new ArrayList<>();
-        out.add(preset("ARCH_MODEL", "Tách Model thành file riêng", KIND_SOURCE_PATTERN, null,
-                Map.of("require", List.of(req("Tách Model thành file riêng",
-                        List.of("lib/model/**", "lib/models/**", "lib/**/model/**", "lib/**/models/**",
-                                "lib/**_model.dart", "lib/**.model.dart",
-                                "lib/entity/**", "lib/entities/**", "lib/**/entity/**", "lib/**/entities/**"),
-                        null, 1, null))),
+        // VÌ SAO CHỈ CÒN MẪU THƯ MỤC, KHÔNG CÒN MẪU HẬU TỐ TÊN FILE (sửa 22/9/2026):
+        //
+        // Mẫu cũ có `lib/**_helper.dart`, dịch ra regex là `^lib/.*_helper\.dart$`, nên
+        // `lib/database_helper.dart` NẰM PHẲNG ở gốc cũng khớp. Mà chính khung phát đặt file
+        // cho sẵn phẳng ở gốc (ExamService.zipKhungPhat: `tep.put("lib/" + ten, noiDung)`),
+        // nên MỌI bài chỉ cần giải nén khung là đã "đạt" ARCH_DATA: tiêu chí không thể trượt.
+        // Đo thật trên 13 bài QLCT: HE231604 và HE230429 dồn phẳng toàn bộ lib/ (8 file, không
+        // một thư mục nào) — trượt ARCH_MODEL/SCREEN/LOGIC nhưng vẫn ĐẠT ARCH_DATA, chỉ nhờ
+        // đúng một file mà đề phát cho họ và còn ghi "CHO SAN — KHONG SUA".
+        //
+        // Ba luật kia trượt cũng chỉ vì hai bài đó tình cờ đặt tên tiếng Việt (trang_chinh.dart,
+        // tinh_toan.dart, expense.dart). Cùng cấu trúc phẳng ấy mà đặt `home_screen.dart` +
+        // `expense_model.dart` + `expense_controller.dart` thì ĐẠT CẢ BỐN mà vẫn không có thư
+        // mục nào: luật cũ chấm THÓI QUEN ĐẶT TÊN chứ không chấm kiến trúc.
+        //
+        // TỪ VỰNG BỐN TẦNG RỜI NHAU: không tên thư mục nào xuất hiện ở hai tầng, nên yêu cầu
+        // "mỗi tầng một thư mục riêng" thành đúng theo CẤU TẠO, không cần engine biết khái niệm
+        // đó. Dồn cả bốn tầng vào `lib/app/` là trượt cả bốn; `lib/data/book.dart` không bao giờ
+        // được tính là Model vì `data` không nằm trong từ vựng của tầng Model.
+        //
+        // ĐÁNH ĐỔI đã biết: bố cục feature-first (`lib/features/expense/expense_repository.dart`)
+        // nay trượt. Chấp nhận được vì phiếu chấm của đề này đòi chia theo TẦNG; muốn chấm
+        // feature-first thì phải thêm preset khác chứ không nới bốn luật này.
+        List<String> tmModel = thuMuc("model", "models", "entity", "entities", "dto", "dtos");
+        out.add(preset("ARCH_MODEL", "Tách Model thành thư mục riêng", KIND_SOURCE_PATTERN, null,
+                Map.of("require", List.of(
+                        req("Thư mục Model riêng", tmModel, null, 1, null),
+                        req("Thư mục Model phải có khai báo class", tmModel, DAU_HIEU_CLASS, 1, null),
+                        req("Thư mục Model không được chứa mã truy cập dữ liệu hay widget",
+                                tmModel, DAU_HIEU_DU_LIEU_THO + "|" + DAU_HIEU_WIDGET, null, 0))),
                 5, NHOM_MAC_DINH, "PROJ_FOLDER_STRUCTURE",
-                "Có file/thư mục model riêng (models/, entity/, *_model.dart) thay vì khai class lẫn trong màn hình."));
+                "Class dữ liệu nằm trong thư mục riêng: models/, entity/, dto/ (được lồng trong thư mục con). "
+                        + "Trong đó phải có khai báo class, và KHÔNG được chứa mã DB/API hay widget — "
+                        + "nhét database_helper.dart vào models/ là không đạt."));
+        List<String> tmData = thuMuc("data", "datasource", "datasources", "repository", "repositories", "repo",
+                "service", "services", "db", "database", "dao", "storage", "api");
         out.add(preset("ARCH_DATA", "Tách tầng dữ liệu khỏi giao diện", KIND_SOURCE_PATTERN, null,
-                Map.of("require", List.of(req("Tách tầng dữ liệu khỏi giao diện",
-                        List.of("lib/data/**", "lib/**/data/**",
-                                "lib/repository/**", "lib/repositories/**", "lib/**/repository/**", "lib/**/repositories/**",
-                                "lib/service/**", "lib/services/**", "lib/**/service/**", "lib/**/services/**",
-                                "lib/db/**", "lib/**/db/**", "lib/database/**", "lib/**/database/**",
-                                "lib/**_repository.dart", "lib/**_service.dart", "lib/**_store.dart",
-                                "lib/**_dao.dart", "lib/**_helper.dart", "lib/**_db.dart", "lib/**_database.dart"),
-                        null, 1, null))),
+                Map.of("require", List.of(
+                        req("Thư mục tầng dữ liệu riêng", tmData, null, 1, null),
+                        req("Thư mục tầng dữ liệu phải có mã đọc/ghi dữ liệu thật",
+                                tmData, DAU_HIEU_DU_LIEU, 1, null))),
                 5, NHOM_MAC_DINH, "PROJ_FOLDER_STRUCTURE",
-                "Truy cập DB/API nằm trong lớp riêng (data/, repository/, *_service.dart, db_helper...) chứ không viết thẳng trong widget."));
-        out.add(preset("ARCH_SCREEN", "Tách màn hình thành file riêng", KIND_SOURCE_PATTERN, null,
-                Map.of("require", List.of(req("Tách màn hình thành file riêng",
-                        List.of("lib/screen/**", "lib/screens/**", "lib/**/screen/**", "lib/**/screens/**",
-                                "lib/view/**", "lib/views/**", "lib/**/view/**", "lib/**/views/**",
-                                "lib/page/**", "lib/pages/**", "lib/**/page/**", "lib/**/pages/**",
-                                "lib/ui/**", "lib/**/ui/**",
-                                "lib/**_screen.dart", "lib/**_page.dart", "lib/**_view.dart"),
-                        null, 1, null))),
+                "Truy cập DB/API nằm trong thư mục riêng: data/, repository/, service/, db/, dao/, api/. "
+                        + "Thư mục đó phải chứa mã đọc/ghi thật (sqflite, http, SharedPreferences...) — "
+                        + "để database_helper.dart phẳng ở gốc lib/, hoặc chỉ ném file model vào data/, đều không đạt."));
+        List<String> tmScreen = thuMuc("screen", "screens", "view", "views", "page", "pages", "ui");
+        out.add(preset("ARCH_SCREEN", "Tách màn hình thành thư mục riêng", KIND_SOURCE_PATTERN, null,
+                Map.of("require", List.of(
+                        req("Thư mục màn hình riêng", tmScreen, null, 1, null),
+                        req("Thư mục màn hình phải có widget màn hình",
+                                tmScreen, DAU_HIEU_WIDGET, 1, null))),
                 5, NHOM_MAC_DINH, "PROJ_FOLDER_STRUCTURE",
-                "Mỗi màn hình một file (screens/, pages/, *_screen.dart) thay vì dồn hết vào main.dart."));
+                "Màn hình nằm trong thư mục riêng: screens/, pages/, views/, ui/ — thay vì dồn vào main.dart "
+                        + "hoặc rải phẳng ở gốc lib/. Trong đó phải thật sự có widget màn hình."));
+        List<String> tmLogic = thuMuc("logic", "viewmodel", "viewmodels", "view_model", "view_models",
+                "controller", "controllers", "provider", "providers",
+                "bloc", "blocs", "cubit", "cubits",
+                "usecase", "usecases", "use_case", "use_cases", "notifier", "notifiers");
         out.add(preset("ARCH_LOGIC", "Tách logic/ViewModel khỏi màn hình", KIND_SOURCE_PATTERN, null,
-                Map.of("require", List.of(req("Tách logic/ViewModel khỏi màn hình",
-                        List.of("lib/logic/**", "lib/**/logic/**",
-                                "lib/viewmodel/**", "lib/viewmodels/**", "lib/**/viewmodel/**", "lib/**/viewmodels/**",
-                                "lib/view_model/**", "lib/view_models/**", "lib/**/view_model/**", "lib/**/view_models/**",
-                                "lib/controller/**", "lib/controllers/**", "lib/**/controller/**", "lib/**/controllers/**",
-                                "lib/provider/**", "lib/providers/**", "lib/**/provider/**", "lib/**/providers/**",
-                                "lib/bloc/**", "lib/blocs/**", "lib/**/bloc/**", "lib/**/blocs/**",
-                                "lib/cubit/**", "lib/**/cubit/**",
-                                "lib/usecase/**", "lib/usecases/**", "lib/**/usecases/**",
-                                "lib/**_viewmodel.dart", "lib/**_view_model.dart", "lib/**_controller.dart",
-                                "lib/**_provider.dart", "lib/**_notifier.dart", "lib/**_bloc.dart",
-                                "lib/**_cubit.dart", "lib/**_logic.dart", "lib/**_calculator.dart", "lib/**_usecase.dart"),
-                        null, 1, null))),
+                Map.of("require", List.of(
+                        req("Thư mục logic/ViewModel riêng", tmLogic, null, 1, null),
+                        // Không cấm `.insert(` ở tầng này: controller gọi `repo.insert(...)` là ĐÚNG
+                        // kiến trúc. Chỉ cấm nói chuyện thẳng với DB/HTTP.
+                        req("Thư mục logic không được chứa widget hay gọi DB/API trực tiếp",
+                                tmLogic, DAU_HIEU_DU_LIEU_THO + "|" + DAU_HIEU_WIDGET, null, 0))),
                 5, NHOM_MAC_DINH, "PROJ_FOLDER_STRUCTURE",
-                "Xử lý nghiệp vụ nằm trong lớp riêng (logic/, viewmodels/, controllers/, providers/...) chứ không trộn vào build()."));
+                "Xử lý nghiệp vụ nằm trong thư mục riêng: logic/, viewmodels/, controllers/, providers/, bloc/ "
+                        + "— không trộn vào build(), không để chung thư mục với màn hình, và không gọi thẳng DB/API."));
         out.add(preset("STATE_RIVERPOD", "Dùng Riverpod quản lý state", KIND_SOURCE_PATTERN, null,
                 Map.of("require", List.of(
                         req("Import Riverpod", List.of("lib/**.dart"),
@@ -523,11 +591,38 @@ public class StaticRuleService {
         try {
             Map<String, Object> root = map(mapper.readValue(json, Map.class));
             List<Map<String, Object>> out = new ArrayList<>();
-            for (Object raw : list(root.get("rules"))) out.add(map(raw));
+            for (Object raw : list(root.get("rules"))) out.add(theoPresetMoiNhat(map(raw)));
             return out;
         } catch (Exception e) {
             throw new IllegalStateException("static_rules_json của suite hỏng: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Luật mang mã của một preset thì ĐỊNH NGHĨA luôn lấy từ preset hiện tại, không lấy bản
+     * đã đóng băng trong DB.
+     *
+     * <p>Vì sao: giáo viên không sửa được cấu hình preset ở giao diện — họ chỉ tick và chia
+     * điểm — nên bản trong DB chỉ là ảnh chụp của preset lúc bấm Lưu. Giữ ảnh chụp đó nghĩa là
+     * mọi đề đã soạn vẫn republish ra luật LỎNG cũ (mẫu hậu tố `lib/**_helper.dart`) dù code đã
+     * siết, mà chẳng có dấu hiệu gì trên màn hình. Đúng bẫy này từng làm FA26 chấm sai.
+     *
+     * <p>Giữ nguyên thứ THUỘC VỀ NGƯỜI SOẠN: trọng số, nhóm điểm và tiên quyết. Luật tự khai
+     * (mã không trùng preset nào) thì không đụng tới.
+     */
+    private Map<String, Object> theoPresetMoiNhat(Map<String, Object> rule) {
+        String id = text(rule, "id");
+        Map<String, Object> preset = presets().stream()
+                .filter(p -> id.equals(text(p, "id")))
+                .findFirst().orElse(null);
+        if (preset == null || !text(preset, "kind").equals(text(rule, "kind"))) return rule;
+        Map<String, Object> out = new LinkedHashMap<>(rule);
+        out.put("name", preset.get("name"));
+        out.put("description", preset.get("description"));
+        out.put("skill_code", preset.get("skill_code"));
+        if (preset.get("config") != null) out.put("config", preset.get("config"));
+        if (preset.get("lint_code") != null) out.put("lint_code", preset.get("lint_code"));
+        return out;
     }
 
     private BehaviorSuite require(String suiteId) {
