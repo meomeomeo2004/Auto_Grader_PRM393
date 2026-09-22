@@ -731,6 +731,26 @@ public class ExamService {
     }
 
     /**
+     * Mã đề này đã có người dùng chưa? Xét CẢ HAI nguồn giống {@link #listExams}: hàng trong
+     * DB và thư mục {@code exams/<mã đề>} trên đĩa.
+     *
+     * <p>Chỉ hỏi DB là hụt: đề soạn qua đường AI trước 22/9/2026 không có hàng nào cả, nó
+     * sống hoàn toàn bằng thư mục {@code handout/} trên đĩa. Hỏi hụt thì "chặn trùng" hoá ra
+     * chỉ chặn được một nửa số đề đang có — mà nửa lọt lưới lại đúng là nửa không có gì
+     * trong DB để mà khôi phục nếu bị ghi đè.
+     */
+    public boolean deDaTonTai(String examId) {
+        safeId(examId, "đề");
+        if (examRepository.existsByExamId(examId)) return true;
+        try {
+            return Files.isDirectory(examsRoot().resolve(examId));
+        } catch (Exception e) {
+            log.warn("Không đọc được thư mục đề {}: {}", examId, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
      * Lưu NGUYÊN file đề bài gốc (.docx/.pdf) giáo viên tự soạn ở ngoài — khác {@code de_bai.md}
      * (văn bản do AI soạn/giáo viên gõ tay). Luôn tối đa 1 file mỗi đề, ghi đè khi upload lại.
      */
@@ -946,9 +966,27 @@ public class ExamService {
      */
     public List<String> saveDeBaiWithMockups(String examId, String deBai,
                                              List<Map<String, String>> mockups) throws Exception {
+        return saveDeBaiWithMockups(examId, deBai, null, mockups);
+    }
+
+    /**
+     * @param examName tên đề — chỉ dùng khi đề CHƯA có hàng nào trong DB.
+     *
+     * <p>Đường "Nhờ AI soạn" không đi qua {@link #saveOriginalHandoutFile}, nên trước
+     * 22/9/2026 nó chỉ ghi file xuống {@code handout/} mà không dựng hàng {@code Exam} nào cả.
+     * Đề vẫn hiện ra ở danh sách — nhưng hiện bằng nhánh QUÉT ĐĨA của {@link #listExams},
+     * mà nhánh đó không có chỗ nào để lưu tên nên nó đặt {@code examName = examId}. Đó là
+     * lý do tên giáo viên gõ ở hộp "Tạo đề" biến mất và cột Đề bài in ra "(chưa đặt tên)".
+     */
+    public List<String> saveDeBaiWithMockups(String examId, String deBai, String examName,
+                                             List<Map<String, String>> mockups) throws Exception {
         safeId(examId, "đề");
         if ((deBai == null || deBai.isBlank()) && (mockups == null || mockups.isEmpty()))
             throw new IllegalArgumentException("Không có nội dung đề bài để lưu.");
+
+        // Dựng hàng Exam SAU khi đã qua hai cửa chặn trên: bỏ qua mã đề xấu và bỏ qua lần lưu
+        // rỗng, để không để lại một đề trống trong danh sách vì một cú bấm hỏng.
+        ensureExamStub(examId, examName);
 
         Path handout = handoutDirOf(examId);
         Files.createDirectories(handout);

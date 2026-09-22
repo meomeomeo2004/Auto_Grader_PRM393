@@ -38,7 +38,14 @@ export default function RootLayout({
           }}
         />
       </head>
-      <body className="min-h-full flex flex-col">
+      {/* suppressHydrationWarning: vai tro nao cung bao "1 Issue" hydration vi tien ich
+          mo rong cua trinh duyet gan them thuoc tinh __processed_<uuid>__ vao <body>
+          TRUOC khi React hydrate. Do 22/9/2026: HTML may chu tra ve chi co
+          <body class="min-h-full flex flex-col">, mo cung trang bang trinh duyet sach
+          thi <body> cung chi co mot thuoc tinh class — nen lech nay khong den tu ma nguon
+          va khong the sua o phia may chu. Co suppress thi <html> da co san (cho script
+          theme), nhung co do khong lan xuong con nen <body> phai tu khai. */}
+      <body className="min-h-full flex flex-col" suppressHydrationWarning>
         {children}
       </body>
     </html>

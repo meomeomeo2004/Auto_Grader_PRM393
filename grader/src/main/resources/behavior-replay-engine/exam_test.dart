@@ -4371,7 +4371,7 @@ Finder _finder(Map<String, dynamic> target, {bool duPhong = false}) {
     return _timDocNhu(text);
   }
   // TIỀN TỐ VĂN BẢN. Hợp đồng nhãn của đề khai `text_prefix` cho những dòng mà phần
-  // đuôi thay đổi theo dữ liệu — ví dụ "Tổng tháng: 608.000 ₫". find.text so khớp
+  // đuôi thay đổi theo dữ liệu — ví dụ "Tổng tháng: 608.000 VND". find.text so khớp
   // TUYỆT ĐỐI nên không dùng được ở đây; thiếu nhánh này thì đúng những mục hợp đồng
   // ấy không có cách nào kiểm.
   final textPrefix = _text(target, 'text_prefix');

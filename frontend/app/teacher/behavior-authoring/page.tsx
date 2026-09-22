@@ -924,9 +924,6 @@ function BehaviorAuthoringEditor() {
   // bài lưu thật với bài chỉ đổi giao diện bằng setState.
   const [prefsKey, setPrefsKey] = useState("");
   const [prefsAbsent, setPrefsAbsent] = useState(false);
-  // Bộ nhớ ĐÃ CÓ SẴN lúc mở app, khai theo dòng "khoá=giá trị". Dùng cho luồng kiểu
-  // "mở app khi người dùng đã bật chế độ tối từ lần trước".
-  const [prefsBanDau, setPrefsBanDau] = useState("");
   const [databaseTable, setDatabaseTable] = useState("");
   const [databaseOperation, setDatabaseOperation] = useState("READ");
   const [databaseRow, setDatabaseRow] = useState("{}");
@@ -958,7 +955,13 @@ function BehaviorAuthoringEditor() {
   // luồng": mã đó nay do máy dựng từ mã nhóm + tên luồng, xem BehaviorAuthoringService.
   const [groupCode, setGroupCode] = useState("");
   const [scenarioName, setScenarioName] = useState("");
-  const [scenarioWeight, setScenarioWeight] = useState<DiemNhap>(10);
+  // KHONG dien san so diem (22/9/2026, theo yeu cau).
+  //
+  // Dien san 10 thi moi luong khong ai sua deu thanh 10 diem, va nguoi soan khong he
+  // biet minh "chon" con so do luc nao — ngan sach 100 diem cua bo cham bi chia boi mot
+  // gia tri mac dinh chu khong boi mot quyet dinh. De trong thi `docDiem` chan ngay o
+  // khau sinh testcase voi dung cau "Ham test chua nhap diem."
+  const [scenarioWeight, setScenarioWeight] = useState<DiemNhap>("");
   // Bảng tick thành phần giao diện — đổ về từ lệnh quét màn hình của bridge.
   // null = chưa quét; mảng = đang mở bảng tick.
   const [uiInventory, setUiInventory] = useState<{ attribute: string; value: string; role: string; identifier: string; count: number; checked: boolean }[] | null>(null);
@@ -991,15 +994,22 @@ function BehaviorAuthoringEditor() {
   // theo % chiều rộng/cao), nên mật độ không đổi một điểm nào — nó chỉ quyết định ảnh
   // bằng chứng nét tới đâu và nặng bao nhiêu. Để cố định 1 cho ảnh gọn.
   const viewportWidth = KHUNG_RONG;
-  // Chấm ở chế độ tối: cờ nằm TRONG object viewport nên đi qua mọi tầng như rộng/cao màn.
-  const [cheDoToi, setCheDoToi] = useState(false);
   const viewportHeight = KHUNG_CAO;
   // Chỉ là cỡ NHÌN của khung xem thử, không đi vào bộ chấm.
   const [thuNho, setThuNho] = useState(0.75);
   // KĨ NĂNG RESPONSIVE. khungDesktop chỉ đổi cỡ khung XEM THỬ; tiêu chí thường vẫn soạn ở
   // khung điện thoại, còn tiêu chí sinh từ bảng dò luôn mang cờ khung desktop.
   const [khungDesktop, setKhungDesktop] = useState(false);
-  const [respScenario, setRespScenario] = useState<{ id: string; ma: string; checkpoints: JsonMap[] } | null>(null);
+  /**
+   * KẾT QUẢ PHÉP DÒ RESPONSIVE — nay nằm TRONG phiên record (22/9/2026, theo yêu cầu).
+   *
+   * <p>Không còn giữ scenario nào: màn đang mở trong Golden CHÍNH LÀ màn ở bước đó của
+   * trace. Trước đây nút "Dò responsive" nằm ở thẻ scenario và chỉ dùng `item` để lấy id,
+   * còn số đo thì lấy từ iframe đang sống — không replay lại luồng, không kiểm preview đang
+   * ở màn nào. Bấm trên luồng A trong khi preview đang ở màn của luồng B là checkpoint gắn
+   * vào A nhưng mô tả bố cục của B, và không có gì báo. Nó chạy đúng chủ yếu vì preview
+   * thường còn nằm ở màn cuối của luồng vừa record — tức là may, không phải bảo đảm.
+   */
   const [respKq, setRespKq] = useState<KetQuaDoCoGian | null>(null);
   const [respDiem, setRespDiem] = useState<DiemNhap>(8);
   const khungRongXem = khungDesktop ? KHUNG_DESKTOP_RONG : KHUNG_RONG;
@@ -1104,12 +1114,18 @@ function BehaviorAuthoringEditor() {
         const suaId = dangSoan.revision_scenario_id || "";
         setEditingScenarioId(suaId || null);
         const scenarioCu = (suiteData.scenarios || []).find((s) => String(s.id || "") === suaId);
+        // CHI khoi phuc khi dang SUA mot scenario da co: ba o nay la ban sao cua chinh
+        // scenario do, F5 giua chung ma mat thi nguoi soan go lai ma khac roi de ra mot
+        // scenario thu hai thay vi sua cai cu.
+        //
+        // Phien record MOI (khong gan scenario nao) thi KHONG dien gi ca (22/9/2026, theo
+        // yeu cau): truoc day nhanh `else` lay `dangSoan.name` — ten cua mot phien record
+        // con sot lai — do vao o Ten luong. Nguoi soan vao man thay san mot cai ten minh
+        // khong go, khong biet no tu dau ra, va de nhat la cu the ma sinh testcase.
         if (scenarioCu) {
           setGroupCode(String(scenarioCu.group_code || ""));
           setScenarioName(String(scenarioCu.name || scenarioCu.scenario_code || ""));
           setScenarioWeight(Number(scenarioCu.weight || 1));
-        } else if (dangSoan.name) {
-          setScenarioName(dangSoan.name);
         }
       }
     }
@@ -1308,7 +1324,7 @@ function BehaviorAuthoringEditor() {
       resetRecorderTransport();
       await napLaiGolden();
       const created = await api<Recording>(`/behavior-authoring/suites/${suite.id}/recordings`, {
-        method: "POST", body: JSON.stringify({ name: scenarioName, viewport: { width: viewportWidth, height: viewportHeight, device_pixel_ratio: 1, brightness: cheDoToi ? "dark" : "light" }, initial_state: { reset_storage: true, preferences: docBoNhoBanDau(prefsBanDau) } }),
+        method: "POST", body: JSON.stringify({ name: scenarioName, viewport: { width: viewportWidth, height: viewportHeight, device_pixel_ratio: 1 }, initial_state: { reset_storage: true } }),
       });
       activeRecordingId.current = created.id;
       acceptsRecorderEvents.current = created.status === "ACTIVE";
@@ -1660,22 +1676,6 @@ function BehaviorAuthoringEditor() {
     });
   };
 
-  // "khoa=gia tri" moi dong mot cap. true/false/so nhan dung kieu, con lai la chuoi —
-  // de nguoi ra de khong phai biet JSON.
-  const docBoNhoBanDau = (chuoi: string): JsonMap => {
-    const ra: JsonMap = {};
-    chuoi.split(/\r?\n/).forEach((dong) => {
-      const cat = dong.indexOf("=");
-      if (cat <= 0) return;
-      const khoa = dong.slice(0, cat).trim();
-      const tho = dong.slice(cat + 1).trim();
-      if (!khoa) return;
-      if (tho === "true" || tho === "false") ra[khoa] = tho === "true";
-      else if (tho !== "" && !Number.isNaN(Number(tho))) ra[khoa] = Number(tho);
-      else ra[khoa] = tho;
-    });
-    return ra;
-  };
 
   // Danh sách đề đã publish testcase, để chọn đề cần bàn giao.
   useEffect(() => {
@@ -1811,6 +1811,9 @@ function BehaviorAuthoringEditor() {
     + (viTriOn ? diemSo(viTriWeight) : 0)
     + (mauOn ? diemSo(mauWeight) : 0);
   const vuotMucUi = tongCacMuc - diemUiConLai > 1e-9;
+  // O diem ham de trong thi "con lai" la 0, va bao VUOT o bang tick la do loi nham cho:
+  // nguoi soan chua nhap diem ham chu khong phai chia qua tay.
+  const chuaNhapDiemHam = !String(scenarioWeight).trim();
 
   // Mo bang quet la chia deu phan con lai cho cac muc dang bat — KHONG fix cung con so
   // nao; nguoi soan chinh tay tuy y, mien tong khong vuot phan con lai cua ham.
@@ -1850,8 +1853,12 @@ function BehaviorAuthoringEditor() {
    * Vì sao chỉ giữ cặp đổi: đó chính là bằng chứng app có co giãn. Cặp không đổi thì bài bố cục
    * cứng cũng đạt, tick vào là cho không điểm.
    */
-  const doCoGian = (item: JsonMap) => {
+  const doCoGian = () => {
     if (!previewUrl) { setError("Chưa build Golden nên chưa đo được."); return; }
+    if (!recording || !recorderReady) {
+      setError("Phép dò responsive chạy trong phiên record: hãy bắt đầu record rồi thao tác tới đúng màn cần chấm.");
+      return;
+    }
     run("resp-scan", async () => {
       setRespKq(null);
       setKhungDesktop(false);
@@ -1863,11 +1870,6 @@ function BehaviorAuthoringEditor() {
       setKhungDesktop(false);
 
       const kq = phanTichCoGian(dienThoai, desktop);
-      setRespScenario({
-        id: String(item.id || ""),
-        ma: String(item.scenario_code || item.name || ""),
-        checkpoints: Array.isArray(item.checkpoints) ? (item.checkpoints as JsonMap[]) : [],
-      });
       setRespKq(kq);
       const manh = kq.bangChung.length + kq.doiCot.length;
       if (manh === 0) {
@@ -1878,61 +1880,92 @@ function BehaviorAuthoringEditor() {
     });
   };
 
-  /** Biến các cặp đã tick thành checkpoint layout_relation mang cờ khung desktop. */
+  /**
+   * Biến các mục đã tick thành checkpoint event mang cờ khung desktop, ghi THẲNG vào phiên record.
+   *
+   * <p>Đi cùng đường với `saveUiCriteria`: POST /recordings/{id}/events. Backend đã đỡ sẵn —
+   * `appendEvent` validate cờ `khung`, còn `abstractRecording` copy nguyên event thành checkpoint
+   * (chỉ bỏ recorded_at/sequence), nên `khung: "desktop"` đi thẳng vào scenario mà không cần
+   * thêm một dòng Java nào.
+   *
+   * <p>KHÔNG tự đánh số id nữa: abstract tự đặt `checkpoint_N` theo thứ tự trong trace.
+   */
   const luuTieuChiResponsive = () => {
-    if (!suite || !respScenario || !respKq) return;
+    const recordingId = activeRecordingId.current;
+    if (!respKq || !suite) return;
     const manh = respKq.bangChung.filter((b) => b.checked);
     const yeu = respKq.capReflow.filter((c) => c.checked);
     if (manh.length + yeu.length === 0) { setError("Chưa tick mục nào."); return; }
+    // GOLDEN PHẢI THẬT SỰ CÓ MÃ RESPONSIVE MỚI ĐƯỢC CHẤM KĨ NĂNG NÀY.
+    //
+    // Cửa chặn cứng chứ không phải lời nhắc: cặp "đổi quan hệ" ở rổ dưới thì Wrap tự xếp lại,
+    // chữ hết xuống dòng hay Expanded nở ra đều tạo ra được — bài không viết một dòng
+    // responsive nào vẫn đổi. Golden mà không có lấy một dấu hiệu co giãn thật thì mọi thứ
+    // trong rổ đó là reflow miễn phí, tick vào là cho điểm một kĩ năng không tồn tại.
+    if (respKq.bangChung.length + respKq.doiCot.length === 0) {
+      setError("Golden này KHÔNG có dấu hiệu co giãn thật nào nên không chấm được kĩ năng responsive: không thành phần nào hiện thêm hay biến mất, nội dung vẫn nở hết bề ngang, không nhóm nào đổi số cột. Mọi cặp đổi quan hệ ở dưới chỉ là Wrap tự xếp lại.");
+      return;
+    }
+    if (!recordingId) { setError("Không còn phiên record nào gắn với trang — hãy tải lại trang."); return; }
+    if (recording?.status !== "ACTIVE" || !acceptsRecorderEvents.current) {
+      setError(`Phiên record đang ở trạng thái ${recording?.status || "không rõ"}, không nhận thêm tiêu chí. Hãy tải lại trang để nối lại phiên.`);
+      return;
+    }
     run("resp-save", async () => {
+      docDiem(scenarioWeight, "Hàm test", true);
       const score = docDiem(respDiem, "Tiêu chí responsive");
-      const cu = respScenario.checkpoints;
-      let so = cu.reduce((m, c) => Math.max(m, Number(String(c.id || "").replace(/\D+/g, "")) || 0), 0);
+      // Cùng ngân sách với tiêu chí hiện diện/vị trí/màu: tổng ruột phải bằng trọng số hàm.
+      // Trước đây khoản này khai riêng và không bị ràng gì, nên khai quá tay là hàm phình
+      // vượt điểm đã chia — mâu thuẫn với thẻ ngân sách 100.
+      if (score - diemUiConLai > 1e-9) {
+        throw new Error(`Điểm tiêu chí responsive (${score}đ) vượt phần điểm còn lại của hàm test (${diemUiConLai}đ).`);
+      }
+      // Checkpoint phải đứng sau giá trị cuối của ô đang nhập — giống saveUiCriteria.
+      await requestRecorderFlush();
+      await awaitRecorderEvents();
       const diemDong = chiaDeu(score, manh.length + yeu.length);
-      // Nền chung của mọi tiêu chí responsive. Cờ `khung` là thứ materializer đọc để đẩy case
-      // sang 1280×800; thiếu nó là tiêu chí âm thầm chạy ở khung điện thoại và luôn đạt.
-      // KHÔNG gắn ui_group nữa (21/9/2026): nhóm điểm chỉ đến từ MÃ NHÓM của luồng. Nhãn cũ
-      // lấy tên MÀN làm nhãn, nên hai màn cùng tên bị gộp một rọ, kéo tiêu chí của nhiều luồng
-      // khác nhau vào chung một dòng điểm.
+      // Cờ `khung` là thứ materializer đọc để đẩy case sang 1280×800; thiếu nó là tiêu chí
+      // âm thầm chạy ở khung điện thoại và luôn đạt.
       const nen = {
         checkpoint: true, scope: "ui", stage: "ASSERT", action: "observe_ui",
         browser: "flutter_tester", khung: "desktop",
       };
-      const them: JsonMap[] = [];
-      manh.forEach((b, i) => {
-        so += 1;
+      const ghi = (body: JsonMap) => api(`/behavior-authoring/recordings/${recordingId}/events`, {
+        method: "POST", body: JSON.stringify(body),
+      });
+
+      let daLuu = 0;
+      for (let i = 0; i < manh.length; i++) {
+        const b = manh[i];
         const ten = b.it.label || b.it.identifier;
-        if (b.loai === "vi_tri_kim") {
-          them.push({
-            ...nen, id: `checkpoint_${so}`, kind: "component_position",
+        await ghi(b.loai === "vi_tri_kim"
+          ? {
+            ...nen, kind: "component_position",
             target: dichCuaThanhPhan(b.it), tolerance_pct: 5, weight: diemDong[i],
             name: `Responsive — ${ten} đúng chỗ khi nội dung bị kìm bề ngang`,
+          }
+          : {
+            ...nen, kind: "component_present",
+            target: dichCuaThanhPhan(b.it), visible: b.loai === "hien_them", weight: diemDong[i],
+            name: `Responsive — ${ten} ${b.loai === "hien_them" ? "phải hiện" : "phải ẩn"} ở khung desktop`,
           });
-          return;
-        }
-        them.push({
-          ...nen, id: `checkpoint_${so}`, kind: "component_present",
-          target: dichCuaThanhPhan(b.it), visible: b.loai === "hien_them", weight: diemDong[i],
-          name: `Responsive — ${ten} ${b.loai === "hien_them" ? "phải hiện" : "phải ẩn"} ở khung desktop`,
-        });
-      });
-      yeu.forEach((c, i) => {
-        so += 1;
-        them.push({
-          ...nen, id: `checkpoint_${so}`, kind: "layout_relation",
+        daLuu++;
+      }
+      for (let i = 0; i < yeu.length; i++) {
+        const c = yeu[i];
+        await ghi({
+          ...nen, kind: "layout_relation",
           // auto = lấy chuẩn từ chính Golden lúc capture, ở đúng khung desktop.
           relation: "auto",
           target: dichCuaThanhPhan(c.a), relative_to: dichCuaThanhPhan(c.b),
           weight: diemDong[manh.length + i],
           name: `Responsive — ${c.a.label || c.a.identifier} và ${c.b.label || c.b.identifier} đổi từ "${TEN_QUAN_HE[c.dienThoai] || c.dienThoai}" sang "${TEN_QUAN_HE[c.desktop] || c.desktop}"`,
         });
-      });
-      await api(`/behavior-authoring/scenarios/${respScenario.id}`, {
-        method: "PUT", body: JSON.stringify({ checkpoints: [...cu, ...them] }),
-      });
+        daLuu++;
+      }
+
       setRespKq(null);
-      setRespScenario(null);
-      setNotice(`Đã thêm ${them.length} tiêu chí responsive (${respDiem}đ chia đều). Phải capture lại oracle: lượt capture sẽ chạy thêm một lần ở khung desktop.`);
+      setNotice(`Đã thêm ${daLuu} tiêu chí responsive (${score}đ chia đều) vào phiên record. Sinh testcase xong thì lượt capture sẽ chạy thêm một lần ở khung desktop 1280×800.`);
       await refresh(suite.id);
     });
   };
@@ -2186,7 +2219,7 @@ function BehaviorAuthoringEditor() {
             viewports: [
               // device_pixel_ratio để cố định 1: chấm bố cục đo bằng dp nên mật độ không
               // đổi điểm, chỉ làm ảnh bằng chứng nặng thêm.
-              { width: viewportWidth, height: viewportHeight, device_pixel_ratio: 1, name: "phone", brightness: cheDoToi ? "dark" : "light" },
+              { width: viewportWidth, height: viewportHeight, device_pixel_ratio: 1, name: "phone" },
             ],
           }),
         });
@@ -2195,6 +2228,15 @@ function BehaviorAuthoringEditor() {
         resetRecorderTransport();
         await refresh(suite.id);
         setEditingScenarioId(null);
+        // DON SACH BA O SAU KHI SINH XONG (22/9/2026, theo yeu cau).
+        //
+        // Luong vua sinh la luong DA XONG. Giu lai ma nhom, ten va diem cua no la moi
+        // nguoi soan bam tiep "Bat dau record" roi de ra mot luong thu hai trung ten,
+        // hoac lang le an dung so diem cua luong truoc — ca hai deu chi lo ra luc
+        // publish. Luong sau la luong KHAC, no phai bat dau tu o trong.
+        setGroupCode("");
+        setScenarioName("");
+        setScenarioWeight("");
             // Số bước vừa nhận định danh từ Golden (Gói 2): 0 nghĩa là Golden chưa gắn
             // Semantics(identifier:) hoặc mọi bước đã có sẵn — cả hai đều không phải lỗi.
             const soDinhDanh = Number(sinhXong.identifier_step_count || 0);
@@ -2687,7 +2729,11 @@ function BehaviorAuthoringEditor() {
 
 
 
-          <section className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)]">
+          {/* 54% cho Golden — 46% cho khung soạn (22/9/2026, theo yêu cầu).
+              Đơn vị fr viết thẳng thành 54/46 để đọc ra ngay phần trăm, khỏi phải quy đổi.
+              minmax(0,…) giữ nguyên: thiếu nó thì một ô nội dung dài sẽ nới cột rộng ra
+              vượt tỉ lệ và đẩy cả trang sinh thanh cuộn ngang. */}
+          <section className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,54fr)_minmax(0,46fr)]">
             <div className="min-w-0 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
                 <h1 className="text-xl font-bold">Thao tác trên Golden App</h1>
               <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -2703,7 +2749,7 @@ function BehaviorAuthoringEditor() {
                       <input type="text" inputMode="decimal" value={uiGroupWeight} onChange={(e) => setUiGroupWeight(e.target.value)} className="w-20 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-600" />
                     </label>
                     <input value={uiScreenName} onChange={(e) => setUiScreenName(e.target.value)} placeholder="Tên màn (vd: Màn danh sách)" className="rounded-lg border border-slate-300 px-2 py-1 text-sm dark:border-slate-600 dark:bg-slate-800" />
-                    <span className={`text-xs font-bold ${vuotMucUi ? "text-rose-600" : "text-slate-500"}`}>Đã chia {tongCacMuc}/{diemUiConLai}đ của hàm{vuotMucUi ? " — VƯỢT, hạ bớt mới lưu được" : ""}</span>
+                    <span className={`text-xs font-bold ${vuotMucUi || chuaNhapDiemHam ? "text-rose-600" : "text-slate-500"}`}>{chuaNhapDiemHam ? "Chưa nhập điểm cho luồng (ô ở khung soạn bên dưới) nên chưa chia được" : `Đã chia ${tongCacMuc}/${diemUiConLai}đ của hàm${vuotMucUi ? " — VƯỢT, hạ bớt mới lưu được" : ""}`}</span>
                     <button onClick={saveUiCriteria} disabled={Boolean(busy) || !uiInventory.some((it) => it.checked)} className="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-bold text-white disabled:opacity-40">
                       Lưu {uiInventory.filter((it) => it.checked).length * (1 + (viTriOn ? 1 : 0) + (mauOn ? 1 : 0))} tiêu chí
                     </button>
@@ -2742,18 +2788,6 @@ function BehaviorAuthoringEditor() {
                 </div>
               )}
               {previewUrl ? <div className="mt-4 w-full overflow-auto rounded-xl border border-slate-300 bg-slate-100 p-3 dark:border-slate-700 dark:bg-slate-950">
-                <div className="mb-2 flex flex-wrap items-center justify-center gap-3 text-xs">
-                  <label className="flex items-center gap-1.5 font-bold text-slate-700 dark:text-slate-200">Ratio
-                    <select value={thuNho} onChange={(e) => setThuNho(Number(e.target.value))} disabled={khungDesktop} title={khungDesktop ? "Khung desktop thu cố định cho vừa cột" : undefined} className="rounded border border-slate-400 bg-transparent px-1.5 py-0.5 font-bold text-slate-800 disabled:opacity-40 dark:border-slate-500 dark:text-slate-100">
-                      {MUC_THU_NHO.map(([ti, nhan]) => <option key={ti} value={ti}>{nhan}</option>)}
-                    </select>
-                  </label>
-                  <div className="flex overflow-hidden rounded border border-slate-400 font-bold dark:border-slate-500">
-                    <button onClick={() => setKhungDesktop(false)} className={`px-2 py-0.5 ${!khungDesktop ? "bg-indigo-600 text-white" : "text-slate-600 dark:text-slate-300"}`}>Điện thoại</button>
-                    <button onClick={() => setKhungDesktop(true)} title="Chỉ để xem app co giãn thế nào. Tiêu chí thường vẫn soạn ở khung điện thoại; tiêu chí responsive sinh từ nút Dò responsive ở danh sách luồng." className={`px-2 py-0.5 ${khungDesktop ? "bg-indigo-600 text-white" : "text-slate-600 dark:text-slate-300"}`}>Desktop</button>
-                  </div>
-                  {khungDesktop && <span className="font-bold text-indigo-600 dark:text-indigo-400">1280×800 — khung chấm responsive</span>}
-                </div>
                 {/* Hộp ngoài mang cỡ ĐÃ thu nhỏ để chiếm đúng chỗ trên trang; iframe bên trong
                     vẫn là 412×838 thật rồi mới scale, nên app dàn bố cục y như lúc chấm. */}
                 <div className="mx-auto overflow-hidden rounded-lg border border-slate-300 bg-white dark:border-slate-700" style={{ width: khungRongXem * tiLeXem, height: khungCaoXem * tiLeXem }}>
@@ -2806,12 +2840,33 @@ function BehaviorAuthoringEditor() {
                 <p className="mt-2 text-[11px] text-slate-500">Với ảnh cho sẵn, nên để <b>tắt</b> phần màu: sinh viên không vẽ ra tấm ảnh đó nên màu của nó không phản ánh bài làm. Lưu xong hệ thống tự capture lại để đo giá trị chuẩn.</p>
                 </div>
               )}
-              <div className="mt-4 grid gap-3 sm:grid-cols-3"><div><input value={groupCode} onChange={(e) => setGroupCode(e.target.value)} list="ma-nhom-co-san" title="Gõ mã nhóm mới hoặc chọn một mã đã dùng. Để trống nếu luồng này không thuộc nhóm nào." placeholder="Mã nhóm (vd: FILTER — để trống nếu không nhóm)" className="w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><datalist id="ma-nhom-co-san">{maNhomCoSan.map((ma) => <option key={ma} value={ma} />)}</datalist></div><input value={scenarioName} onChange={(e) => setScenarioName(e.target.value)} placeholder="Tên luồng (vd: Thêm khoản chi)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><input type="text" inputMode="decimal" value={scenarioWeight} onChange={(e) => setScenarioWeight(e.target.value)} aria-label="Trọng số scenario" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /></div>
+              <div className="mt-4 grid gap-3 sm:grid-cols-3"><div><input value={groupCode} onChange={(e) => setGroupCode(e.target.value)} list="ma-nhom-co-san" title="Gõ mã nhóm mới hoặc chọn một mã đã dùng. Để trống nếu luồng này không thuộc nhóm nào." placeholder="Mã nhóm (vd: FILTER — để trống nếu không nhóm)" className="w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><datalist id="ma-nhom-co-san">{maNhomCoSan.map((ma) => <option key={ma} value={ma} />)}</datalist></div><input value={scenarioName} onChange={(e) => setScenarioName(e.target.value)} placeholder="Tên luồng (vd: Thêm khoản chi)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><input type="text" inputMode="decimal" value={scenarioWeight} onChange={(e) => setScenarioWeight(e.target.value)} placeholder="Nhập điểm" aria-label="Điểm của luồng" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /></div>
               <div className="mt-2 grid gap-2 sm:grid-cols-2">
                   <div className="rounded-lg border border-blue-800 bg-blue-800 px-3 py-2 text-xs font-bold text-white sm:col-span-2 dark:border-blue-600 dark:bg-blue-730">
   Khung app: {KHUNG_RONG} × {KHUNG_CAO} dp — máy Pixel 7 (màn 412×915 dp, đã trừ 77 dp thanh trạng thái và thanh cử chỉ)
 </div>
-                  <label className="flex items-center gap-2 text-xs font-semibold text-slate-500 sm:col-span-2"><input type="checkbox" checked={cheDoToi} onChange={() => setCheDoToi((v) => !v)} /> Chấm hàm này ở chế độ tối <span className="font-normal">— engine đặt platformBrightness = dark trước khi boot; bài có darkTheme sẽ tự đổi, giá trị chuẩn màu/kiểu chữ đo ở chế độ tối. Khung Golden bên trên vẫn hiện sáng.</span></label><label className="text-xs font-semibold text-slate-500 sm:col-span-2">Bộ nhớ app đã có sẵn khi mở (SharedPreferences)<textarea value={prefsBanDau} onChange={(e) => setPrefsBanDau(e.target.value)} rows={2} placeholder="che_do_toi=true" className="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-xs text-slate-800 dark:border-slate-700 dark:text-slate-100" /><span className="font-normal">Mỗi dòng một cặp <code>khoá=giá trị</code>. Dùng cho luồng kiểu &ldquo;mở app khi người dùng đã bật chế độ tối từ lần trước&rdquo;. Để trống thì app mở với bộ nhớ rỗng.</span></label></div>
+                  </div>
+              {/* KHUNG XEM GOLDEN — dời từ panel Golden sang đây (22/9/2026, theo yêu cầu).
+                  Ratio và Điện thoại/Desktop chỉ đổi CỠ KHUNG XEM, mà người soạn đụng tới
+                  chúng đúng lúc đang ghi thao tác, nên chỗ của chúng là ngay trên nút record
+                  chứ không phải lẫn trong panel build ở cột bên.
+
+                  Chỉ hiện khi recorder ĐÃ KẾT NỐI: trước đó chưa có khung nào để thu phóng,
+                  bày ra chỉ là hai nút bấm không làm gì. */}
+              {previewUrl && recorderReady && (
+                <div className="mt-2 flex flex-wrap items-center gap-3 text-xs">
+                  <label className="flex items-center gap-1.5 font-bold text-slate-700 dark:text-slate-200">Ratio
+                    <select value={thuNho} onChange={(e) => setThuNho(Number(e.target.value))} disabled={khungDesktop} title={khungDesktop ? "Khung desktop thu cố định cho vừa cột" : undefined} className="rounded border border-slate-400 bg-transparent px-1.5 py-0.5 font-bold text-slate-800 disabled:opacity-40 dark:border-slate-500 dark:text-slate-100">
+                      {MUC_THU_NHO.map(([ti, nhan]) => <option key={ti} value={ti}>{nhan}</option>)}
+                    </select>
+                  </label>
+                  <div className="flex overflow-hidden rounded border border-slate-400 font-bold dark:border-slate-500">
+                    <button onClick={() => setKhungDesktop(false)} className={`px-2 py-0.5 ${!khungDesktop ? "bg-indigo-600 text-white" : "text-slate-600 dark:text-slate-300"}`}>Điện thoại</button>
+                    <button onClick={() => setKhungDesktop(true)} title="Chỉ để xem app co giãn thế nào — KHÔNG sinh tiêu chí nào. Tiêu chí responsive sinh từ nút Responsive ở tab Bố cục, trong phiên record." className={`px-2 py-0.5 ${khungDesktop ? "bg-indigo-600 text-white" : "text-slate-600 dark:text-slate-300"}`}>Desktop</button>
+                  </div>
+                  {khungDesktop && <span className="font-bold text-indigo-600 dark:text-indigo-400">1280×800 — khung chấm responsive</span>}
+                </div>
+              )}
               {!recording ? <><button onClick={startRecording} disabled={!recordingInputsReady || Boolean(busy)} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-rose-600 px-4 py-2.5 font-bold text-white disabled:opacity-40"><Radio size={18} /> Bắt đầu record</button>{!recordingInputsReady && <p className="mt-2 text-xs text-amber-600">Cần đủ Database ẩn và Golden Solution.</p>}</> : <>
                 <div className="mt-5 rounded-xl border border-slate-200 dark:border-slate-700">
                   <button onClick={() => setMoThemAction((v) => !v)} className="flex w-full items-center gap-2 px-4 py-2.5 text-left">
@@ -2855,8 +2910,11 @@ function BehaviorAuthoringEditor() {
                         <option value="no_exception">Luồng không phát sinh exception</option>
                       </select>
                       {uiCheckpointType === "text" && <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
-                        <div className="flex min-w-0 gap-1"><input value={checkpointText} onChange={(e) => setCheckpointText(e.target.value)} placeholder="Text phải xuất hiện, cách nhau dấu phẩy" className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><button type="button" onClick={() => setCheckpointText((t) => t + "₫")} title="Chèn ký hiệu đồng (₫) — bàn phím Việt không gõ được U+20AB, mà engine so text tuyệt đối" className="shrink-0 rounded-lg border border-slate-300 px-2.5 text-sm font-bold text-slate-600 hover:border-indigo-400 dark:border-slate-600 dark:text-slate-300">₫</button></div>
-                        <div className="flex min-w-0 gap-1"><input value={hiddenCheckpointText} onChange={(e) => setHiddenCheckpointText(e.target.value)} placeholder="Text không được xuất hiện (tùy chọn)" className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><button type="button" onClick={() => setHiddenCheckpointText((t) => t + "₫")} title="Chèn ký hiệu đồng (₫)" className="shrink-0 rounded-lg border border-slate-300 px-2.5 text-sm font-bold text-slate-600 hover:border-indigo-400 dark:border-slate-600 dark:text-slate-300">₫</button></div>
+                        {/* Hai nút "chèn ký hiệu đồng" đã bỏ (22/9/2026, theo yêu cầu): chúng là
+                            vết của thời đề chỉ có một bài Quản lý chi tiêu. Ô này nhận mọi ký tự dán
+                            vào, nên bỏ nút không mất khả năng nào. */}
+                        <input value={checkpointText} onChange={(e) => setCheckpointText(e.target.value)} placeholder="Text phải xuất hiện, cách nhau dấu phẩy" className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />
+                        <input value={hiddenCheckpointText} onChange={(e) => setHiddenCheckpointText(e.target.value)} placeholder="Text không được xuất hiện (tùy chọn)" className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" />
                         <button onClick={appendUiCheckpoint} title="Lưu checkpoint UI" className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white"><Check size={16} /></button>
                       </div>}
                       {uiCheckpointType === "component" && <div className="space-y-2">
@@ -2945,6 +3003,82 @@ function BehaviorAuthoringEditor() {
                     </div>
                   ) : (
                     <div className="mt-3 space-y-2">
+                      {/* PHÉP DÒ RESPONSIVE — đặt ở ĐẦU tab và NGOÀI mọi nhánh loại.
+                          Thứ gì nằm trong nhánh Ch.7 thì ở loại mặc định không ai thấy — đúng
+                          cái bẫy đã làm nút "Đọc lại định danh" biến mất trước đây. */}
+                      <div className="rounded-xl border border-sky-200 bg-sky-50/60 p-3 dark:border-sky-900 dark:bg-sky-950/30">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button onClick={doCoGian} disabled={Boolean(busy) || !recording || !recorderReady || !previewUrl} title="Đo bố cục màn đang mở ở khung điện thoại rồi đo lại ở 1280×800, chỉ giữ dấu hiệu co giãn THẬT." className="inline-flex items-center gap-1.5 rounded-lg border border-sky-300 px-2.5 py-1.5 text-xs font-bold text-sky-700 hover:bg-sky-100 disabled:opacity-40 dark:border-sky-800 dark:text-sky-300 dark:hover:bg-sky-900">
+                            {busy === "resp-scan" ? <Loader2 className="animate-spin" size={14} /> : <MonitorPlay size={14} />} Responsive
+                          </button>
+                          <label className="flex items-center gap-1 text-xs font-bold text-slate-600 dark:text-slate-300">Điểm kĩ năng
+                            <input type="text" inputMode="decimal" value={respDiem} onChange={(e) => setRespDiem(e.target.value)} className="w-14 rounded border border-slate-300 bg-transparent px-1.5 py-0.5 dark:border-slate-600" />đ
+                          </label>
+                          {respKq && <button onClick={() => setRespKq(null)} className="ml-auto rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-bold text-slate-600 dark:border-slate-600 dark:text-slate-300">Đóng</button>}
+                        </div>
+                        <p className="mt-1.5 text-xs leading-relaxed text-slate-500">
+                          Đo màn ĐANG mở trong Golden. Engine chạy hết bước rồi mới kiểm checkpoint, nên tiêu chí này
+                          được chấm trên màn CUỐI của luồng — chỉ dò khi bạn đã thao tác tới đúng màn đó.
+                          {!recording && " Phải đang trong phiên record mới dò được."}
+                        </p>
+                        {respKq && (() => {
+                          const soManh = respKq.bangChung.length + respKq.doiCot.length;
+                          const daTick = respKq.bangChung.filter((b) => b.checked).length + respKq.capReflow.filter((c) => c.checked).length;
+                          return (
+                          <div className="mt-2 space-y-2 border-t border-sky-200 pt-2 dark:border-sky-900">
+                            {soManh === 0 ? (
+                              <p className="rounded-lg bg-rose-50 p-2 text-xs leading-relaxed text-rose-700 dark:bg-rose-950 dark:text-rose-300">
+                                Golden này <b>KHÔNG có mã responsive</b> — không thành phần nào hiện thêm hay biến mất, nội dung vẫn nở hết bề ngang,
+                                không nhóm nào đổi số cột. {respKq.capReflow.length} cặp đổi quan hệ bên dưới chỉ là <b>Wrap tự xếp lại</b>, app không
+                                viết một dòng responsive nào cũng có. Kĩ năng này bị khoá cho tới khi Golden thật sự có mã responsive.
+                              </p>
+                            ) : (
+                              <div className="space-y-1">
+                                <p className="text-xs font-bold text-emerald-700 dark:text-emerald-300">RESPONSIVE THẬT — {soManh} dấu hiệu. Reflow tự nhiên không tạo ra được những thứ này.</p>
+                                {respKq.doiCot.map((d) => (
+                                  <p key={d.key} className="text-xs text-emerald-700 dark:text-emerald-300">· Nhóm &ldquo;{d.nhan}&rdquo; đổi từ {d.dienThoai} cột sang {d.desktop} cột — list thành grid</p>
+                                ))}
+                                <div className="max-h-40 space-y-1 overflow-y-auto">
+                                  {respKq.bangChung.map((b, i) => (
+                                    <label key={`${b.loai}|${b.it.key}`} className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-white px-2 py-1 text-xs dark:border-emerald-900 dark:bg-slate-900">
+                                      <input type="checkbox" checked={b.checked} onChange={() => setRespKq((prev) => prev ? { ...prev, bangChung: prev.bangChung.map((x, j) => (j === i ? { ...x, checked: !x.checked } : x)) } : prev)} />
+                                      <span className="shrink-0 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
+                                        {b.loai === "hien_them" ? "hiện thêm" : b.loai === "bien_mat" ? "biến mất" : "kìm bề ngang"}
+                                      </span>
+                                      <span className="truncate text-slate-600 dark:text-slate-300">{b.moTa}</span>
+                                    </label>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                            <p className="text-xs leading-relaxed text-amber-700 dark:text-amber-300">
+                              REFLOW TỰ NHIÊN — {respKq.capReflow.length} cặp đổi quan hệ. Wrap tự xếp lại, chữ hết xuống dòng, Expanded nở ra đều tạo ra được,
+                              nên tick vào là chấm &ldquo;bài có dùng cùng widget với Golden không&rdquo;, không phải chấm kĩ năng responsive.
+                            </p>
+                            <p className="text-xs text-slate-500">
+                              Nội dung chiếm {Math.round(respKq.beNgang.dienThoai * 100)}% bề ngang ở khung điện thoại và {Math.round(respKq.beNgang.desktop * 100)}% ở khung desktop.
+                              Điểm khai ở trên chia đều cho MỌI mục đã tick ở cả hai phần, lấy từ phần điểm còn lại của hàm ({diemUiConLai}đ).
+                            </p>
+                            <div className="max-h-40 space-y-1 overflow-y-auto">
+                              {respKq.capReflow.map((c, i) => (
+                                <label key={`${c.a.key}|${c.b.key}`} className={`flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs dark:border-slate-700 dark:bg-slate-900 ${soManh === 0 ? "opacity-40" : ""}`}>
+                                  <input type="checkbox" disabled={soManh === 0} checked={c.checked} onChange={() => setRespKq((prev) => prev ? { ...prev, capReflow: prev.capReflow.map((x, j) => (j === i ? { ...x, checked: !x.checked } : x)) } : prev)} />
+                                  <span className="truncate font-bold text-slate-700 dark:text-slate-200">{c.a.label || c.a.identifier}</span>
+                                  <span className="shrink-0 text-slate-400">↔</span>
+                                  <span className="truncate font-bold text-slate-700 dark:text-slate-200">{c.b.label || c.b.identifier}</span>
+                                  <span className="ml-auto shrink-0 rounded bg-slate-200 px-1.5 py-0.5 text-[10px] font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">{TEN_QUAN_HE[c.dienThoai] || c.dienThoai}</span>
+                                  <span className="shrink-0 text-slate-400">→</span>
+                                  <span className="shrink-0 rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-bold text-amber-800 dark:bg-amber-900 dark:text-amber-200">{TEN_QUAN_HE[c.desktop] || c.desktop}</span>
+                                </label>
+                              ))}
+                            </div>
+                            <button onClick={luuTieuChiResponsive} disabled={Boolean(busy) || daTick === 0 || soManh === 0} className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white disabled:opacity-40">
+                              Thêm {daTick} tiêu chí responsive
+                            </button>
+                          </div>
+                          );
+                        })()}
+                      </div>
                       <select value={ch7Kind} onChange={(e) => doiLoaiCh7(e.target.value)} className="w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700">
                         <option value="quan_he">Quan hệ vị trí giữa hai thành phần (trên / dưới / trái / phải…)</option>
                         {CH7_LOAI.map((l) => <option key={l.ma} value={l.ma}>{l.ten}</option>)}
@@ -3303,70 +3437,7 @@ function BehaviorAuthoringEditor() {
                     </button>
                   </div>;
                 })()}
-                <div className="mt-3 flex flex-wrap gap-2"><button onClick={() => moChiaDiem(item)} disabled={Boolean(busy) || Boolean(recording)} title="Sửa trọng số hàm và điểm từng checkpoint đã lưu" className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 px-2.5 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-50 disabled:opacity-40 dark:border-emerald-800 dark:text-emerald-300 dark:hover:bg-emerald-950"><Database size={14} /> Chia điểm</button><button onClick={() => openScenarioEditor(item)} disabled={Boolean(busy) || Boolean(recording)} title={recording ? "Hãy kết thúc phiên đang soạn trước" : "Nạp lại các bước vào khung record để chỉnh sửa"} className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-300 px-2.5 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50 disabled:opacity-40 dark:border-indigo-800 dark:text-indigo-300 dark:hover:bg-indigo-950"><Pencil size={14} /> Sửa thao tác</button><button onClick={() => doCoGian(item)} disabled={Boolean(busy) || Boolean(recording) || !previewUrl} title="Đo bố cục ở khung điện thoại rồi đo lại ở khung desktop 1280×800, chỉ ra cặp thành phần ĐỔI quan hệ — đó là chỗ app thật sự co giãn." className="inline-flex items-center gap-1.5 rounded-lg border border-sky-300 px-2.5 py-1.5 text-xs font-bold text-sky-700 hover:bg-sky-50 disabled:opacity-40 dark:border-sky-800 dark:text-sky-300 dark:hover:bg-sky-950">{busy === "resp-scan" ? <Loader2 className="animate-spin" size={14} /> : <MonitorPlay size={14} />} Dò responsive</button><button onClick={() => deleteScenario(item)} disabled={Boolean(busy) || Boolean(recording)} className="inline-flex items-center gap-1.5 rounded-lg border border-rose-300 px-2.5 py-1.5 text-xs font-bold text-rose-600 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-900 dark:hover:bg-rose-950"><Trash2 size={14} /> Xóa</button></div></div>])}
-              {respKq && respScenario && (() => {
-                const soManh = respKq.bangChung.length + respKq.doiCot.length;
-                const daTick = respKq.bangChung.filter((b) => b.checked).length + respKq.capReflow.filter((c) => c.checked).length;
-                return (
-                <div className="mt-3 rounded-xl border border-sky-300 bg-sky-50/40 p-3 dark:border-sky-800 dark:bg-sky-950/20">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-bold">Responsive — luồng {respScenario.ma}</span>
-                    <label className="flex items-center gap-1 text-sm">Điểm kĩ năng
-                      <input type="text" inputMode="decimal" value={respDiem} onChange={(e) => setRespDiem(e.target.value)} className="w-16 rounded border border-slate-300 bg-transparent px-1.5 py-0.5 dark:border-slate-600" />đ
-                    </label>
-                    <button onClick={luuTieuChiResponsive} disabled={Boolean(busy) || daTick === 0} className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-bold text-white disabled:opacity-40">Thêm {daTick} tiêu chí</button>
-                    <button onClick={() => { setRespKq(null); setRespScenario(null); }} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-bold text-slate-600 dark:border-slate-600 dark:text-slate-300">Đóng</button>
-                  </div>
-
-                  {soManh === 0 ? (
-                    <p className="mt-2 rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700 dark:border-rose-800 dark:bg-rose-950/40 dark:text-rose-300">
-                      Golden này KHÔNG có dấu hiệu co giãn thật nào — không thành phần nào hiện thêm hay biến mất, nội dung vẫn nở hết bề ngang, không nhóm nào đổi số cột.
-                      Mọi thứ đổi chỗ ở danh sách dưới chỉ là <b>Wrap tự xếp lại</b>, app không viết một dòng responsive nào cũng có. Chấm chúng là cho điểm một kĩ năng không tồn tại.
-                    </p>
-                  ) : (
-                    <div className="mt-2">
-                      <p className="text-xs font-bold text-emerald-700 dark:text-emerald-400">CO GIÃN THẬT — {soManh} dấu hiệu. Reflow tự nhiên không tạo ra được những thứ này.</p>
-                      {respKq.doiCot.map((d) => (
-                        <p key={d.key} className="mt-1 text-[11px] text-emerald-700 dark:text-emerald-400">· Nhóm &ldquo;{d.nhan}&rdquo; đổi từ {d.dienThoai} cột sang {d.desktop} cột — list thành grid</p>
-                      ))}
-                      <div className="mt-1 grid max-h-44 gap-1 overflow-auto pr-1">
-                        {respKq.bangChung.map((b, i) => (
-                          <label key={`${b.loai}|${b.it.key}`} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 text-sm hover:bg-emerald-100/60 dark:hover:bg-emerald-900/30">
-                            <input type="checkbox" checked={b.checked} onChange={() => setRespKq((prev) => prev ? { ...prev, bangChung: prev.bangChung.map((x, j) => (j === i ? { ...x, checked: !x.checked } : x)) } : prev)} />
-                            <span className="shrink-0 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
-                              {b.loai === "hien_them" ? "hiện thêm" : b.loai === "bien_mat" ? "biến mất" : "kìm bề ngang"}
-                            </span>
-                            <span className="truncate">{b.moTa}</span>
-                          </label>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  <p className="mt-3 text-xs font-bold text-amber-700 dark:text-amber-400">
-                    REFLOW TỰ NHIÊN — {respKq.capReflow.length} cặp đổi quan hệ. Wrap tự xếp lại, chữ hết xuống dòng, Expanded nở ra đều tạo ra được,
-                    nên tick vào là chấm &ldquo;bài có dùng cùng widget với Golden không&rdquo;, không phải chấm kĩ năng responsive.
-                  </p>
-                  <p className="mt-2 text-sm leading-relaxed text-slate-500">
-                    Nội dung chiếm {Math.round(respKq.beNgang.dienThoai * 100)}% bề ngang ở khung điện thoại và {Math.round(respKq.beNgang.desktop * 100)}% ở khung desktop.
-                    Điểm khai ở trên chia đều cho MỌI mục đã tick ở cả hai phần, lấy từ ngân sách của luồng {respScenario.ma}.
-                  </p>
-                  <div className="mt-1 grid max-h-44 gap-1 overflow-auto pr-1">
-                    {respKq.capReflow.map((c, i) => (
-                      <label key={`${c.a.key}|${c.b.key}`} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 text-sm hover:bg-amber-100/60 dark:hover:bg-amber-900/30">
-                        <input type="checkbox" checked={c.checked} onChange={() => setRespKq((prev) => prev ? { ...prev, capReflow: prev.capReflow.map((x, j) => (j === i ? { ...x, checked: !x.checked } : x)) } : prev)} />
-                        <span className="truncate font-medium">{c.a.label || c.a.identifier}</span>
-                        <span className="shrink-0 text-slate-400">↔</span>
-                        <span className="truncate font-medium">{c.b.label || c.b.identifier}</span>
-                        <span className="ml-auto shrink-0 rounded bg-slate-200 px-1.5 py-0.5 text-[10px] font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">{TEN_QUAN_HE[c.dienThoai] || c.dienThoai}</span>
-                        <span className="shrink-0 text-slate-400">→</span>
-                        <span className="shrink-0 rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-bold text-amber-800 dark:bg-amber-900 dark:text-amber-200">{TEN_QUAN_HE[c.desktop] || c.desktop}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-                );
-              })()}
+                <div className="mt-3 flex flex-wrap gap-2"><button onClick={() => moChiaDiem(item)} disabled={Boolean(busy) || Boolean(recording)} title="Sửa trọng số hàm và điểm từng checkpoint đã lưu" className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 px-2.5 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-50 disabled:opacity-40 dark:border-emerald-800 dark:text-emerald-300 dark:hover:bg-emerald-950"><Database size={14} /> Chia điểm</button><button onClick={() => openScenarioEditor(item)} disabled={Boolean(busy) || Boolean(recording)} title={recording ? "Hãy kết thúc phiên đang soạn trước" : "Nạp lại các bước vào khung record để chỉnh sửa"} className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-300 px-2.5 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50 disabled:opacity-40 dark:border-indigo-800 dark:text-indigo-300 dark:hover:bg-indigo-950"><Pencil size={14} /> Sửa thao tác</button><button onClick={() => deleteScenario(item)} disabled={Boolean(busy) || Boolean(recording)} className="inline-flex items-center gap-1.5 rounded-lg border border-rose-300 px-2.5 py-1.5 text-xs font-bold text-rose-600 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-900 dark:hover:bg-rose-950"><Trash2 size={14} /> Xóa</button></div></div>])}
               {!suite.scenarios?.length && <p className="text-sm text-slate-500">Chưa có scenario. Hãy record ít nhất một luồng và sinh testcase.</p>}
             </div>
           </section>

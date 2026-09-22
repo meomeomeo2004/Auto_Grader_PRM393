@@ -155,7 +155,9 @@ function DieuHuong() {
   const maDe = params.get("de");
   // Hai nhánh là hai component riêng chứ không phải hai khối JSX: mỗi nhánh có bộ hook của
   // mình, gộp lại thì nhánh này phải giữ hook của nhánh kia cho đủ thứ tự.
-  return maDe ? <ChiTietDe maDe={maDe} moiTao={params.get("moi") || ""} /> : <DanhSachDe />;
+  return maDe
+    ? <ChiTietDe maDe={maDe} moiTao={params.get("moi") || ""} tenMoi={params.get("ten") || ""} />
+    : <DanhSachDe />;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -251,12 +253,24 @@ function DanhSachDe() {
               </td></tr>
             )}
             {loc.map((e) => (
-              <tr key={e.examId} className="hover:bg-slate-50/60">
+              // CẢ DÒNG mở màn chi tiết, không riêng mấy chữ tên đề.
+              //
+              // Trước đây chỉ <button> tên đề bắt được cú bấm. Đo trên bản đang chạy: nút rộng
+              // 93×40 nằm trong một dòng 720×87 — 6% diện tích dòng. Bấm vào mã đề, vào chip
+              // "có bộ chấm", vào ô ngày cập nhật, hay chỉ lệch sang khoảng trống cạnh tên đều
+              // không có gì xảy ra; nên người dùng kết luận đúng theo những gì họ thấy là chỉ
+              // vào được bằng nút "Mở".
+              <tr key={e.examId}
+                onClick={() => router.push(`/teacher/exam-authoring?de=${encodeURIComponent(e.examId)}`)}
+                className="cursor-pointer hover:bg-slate-50/60">
                 <td className="px-5 py-3 text-center font-mono text-xs text-slate-600">{e.examId}</td>
                 <td className="px-5 py-3 text-center">
-                  <button onClick={() => router.push(`/teacher/exam-authoring?de=${encodeURIComponent(e.examId)}`)}
+                  {/* Vẫn giữ <button> chứ không hạ thành <span>: <tr> không Tab tới được, bỏ nút
+                      đi là màn này mất hẳn đường vào bằng bàn phím. Chặn nổi bọt cho khỏi push
+                      hai lần cùng một đường. */}
+                  <button onClick={(ev) => { ev.stopPropagation(); router.push(`/teacher/exam-authoring?de=${encodeURIComponent(e.examId)}`); }}
                     className="font-semibold text-slate-700 hover:text-indigo-600">
-                    {e.examName && e.examName !== e.examId ? e.examName : "(chưa đặt tên)"}
+                    {e.examName || e.examId}
                   </button>
                   <p className="mt-0.5 flex flex-wrap items-center justify-center gap-2 text-xs text-slate-400">
                     {e.hasTestcase && <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-medium text-emerald-700">có bộ chấm</span>}
@@ -266,7 +280,9 @@ function DanhSachDe() {
                 </td>
                 <td className="px-5 py-3 text-center"><ChipLoai dong={e} /></td>
                 <td className="px-5 py-3 text-center text-xs text-slate-500">{gioVN(e.updatedAt || e.createdAt)}</td>
-                <td className="px-5 py-3">
+                {/* Chặn nổi bọt ở đây, không phải ở từng nút: menu ⋯ tuy portal ra body nhưng
+                    sự kiện React vẫn nổi theo CÂY REACT, tức vẫn đi qua đúng ô này. */}
+                <td className="px-5 py-3" onClick={(ev) => ev.stopPropagation()}>
                   <div className="flex items-center justify-center gap-1">
                     <button onClick={() => router.push(`/teacher/exam-authoring?de=${encodeURIComponent(e.examId)}`)}
                       className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-600 hover:border-indigo-300 hover:text-indigo-600">
@@ -320,9 +336,15 @@ function DanhSachDe() {
       </div>
 
       {moTao && <HopTaoDe
+        maDeDaCo={ds.map((e) => e.examId)}
         onDong={() => setMoTao(false)}
-        onXong={(id, moi) => {
-          router.push(`/teacher/exam-authoring?de=${encodeURIComponent(id)}${moi ? `&moi=${moi}` : ""}`);
+        onXong={(id, ten, moi) => {
+          // Tên đi kèm trên URL vì lúc này đề CHƯ TỒN TẠI: đường "Nhờ AI soạn" chỉ tạo hàng
+          // trong DB ở lần Lưu đầu tiên (xem `luu`). Không mang theo thì tên vừa gõ rơi mất
+          // ngay khi chuyển màn, và đề sinh ra đã không tên.
+          const q = new URLSearchParams({ de: id, ten });
+          if (moi) q.set("moi", moi);
+          router.push(`/teacher/exam-authoring?${q.toString()}`);
         }}
         onDaTaiLen={(id) => { setMoTao(false); setBao(`Đã tạo đề ${id} từ file tải lên.`); void nap(); }}
       />}
@@ -387,9 +409,11 @@ function Hop({ tieuDe, onDong, children, rong }: {
  * Form soạn đề bằng AI KHÔNG nằm ở đây — nó dài, và nhét vào hộp thoại thì vừa chật vừa mất
  * chỗ xem lại kết quả. Chọn "Nhờ AI soạn" là sang thẳng màn chi tiết, nơi có cả trang.
  */
-function HopTaoDe({ onDong, onXong, onDaTaiLen }: {
+function HopTaoDe({ maDeDaCo, onDong, onXong, onDaTaiLen }: {
+  /** Mã đề đang có — để chặn trùng ngay tại ô nhập, không đợi đến lúc đã chọn file. */
+  maDeDaCo: string[];
   onDong: () => void;
-  onXong: (maDe: string, moi: string) => void;
+  onXong: (maDe: string, ten: string, moi: string) => void;
   /** Đường TẢI FILE: xong là về thẳng danh sách, không mở màn chi tiết. */
   onDaTaiLen: (maDe: string) => void;
 }) {
@@ -399,21 +423,39 @@ function HopTaoDe({ onDong, onXong, onDaTaiLen }: {
   const [loi, setLoi] = useState<string | null>(null);
   const oFile = useRef<HTMLInputElement>(null);
 
-  const kiemMa = () => {
+  /**
+   * Bắt buộc CẢ mã đề LẪN tên đề (22/9/2026, theo yêu cầu).
+   *
+   * <p>Tên đề là chữ hiện ở cột "Đề bài" của danh sách. Bỏ trống thì máy chủ lấy luôn mã đề
+   * làm tên (xem `ensureExamStub`), và danh sách in ra "(chưa đặt tên)" — một trạng thái không
+   * nói lên điều gì ngoài chuyện có người bấm bỏ qua một ô, nhưng lại nằm chình ình ở cột
+   * chính. Bắt nhập ngay tại đây thì trạng thái đó không còn đường nào sinh ra nữa.
+   */
+  const kiemTra = () => {
     if (!maDeHopLe(maDe.trim())) { setLoi("Mã đề chỉ gồm chữ, số, gạch dưới và gạch ngang (2–50 ký tự)."); return false; }
+    // So KHÔNG PHÂN BIỆT HOA THƯỜNG: thư mục trên Windows và cột mã đề trong MySQL đều
+    // không phân biệt, nên "pe213" và "PE213" là cùng một đề ở hai nơi chứa thật.
+    if (maDeDaCo.some((m) => m.toLowerCase() === maDe.trim().toLowerCase())) {
+      setLoi(`Mã đề ${maDe.trim()} đã có rồi. Mở đề đó ra để sửa, hoặc dùng "Nhân bản sang mã mới" nếu muốn một bản riêng.`);
+      return false;
+    }
+    if (!ten.trim()) { setLoi("Hãy đặt tên đề — đây là tên hiện ở danh sách."); return false; }
     setLoi(null);
     return true;
   };
 
   const taiLen = async (f: File) => {
-    if (!kiemMa()) return;
+    if (!kiemTra()) return;
     setBusy(true);
     try {
       const form = new FormData();
       form.append("file", f);
-      const q = ten.trim() ? `?examName=${encodeURIComponent(ten.trim())}` : "";
+      // moi=true: nói cho máy chủ biết đây là đề MỚI, trùng mã thì từ chối. Danh sách ở màn
+      // có thể đã cũ (mở từ lâu, hoặc đề sinh ra từ tab khác), nên cửa chặn thật phải nằm ở
+      // máy chủ — đường này GHI ĐÈ file Word của đề cũ, sai một lần là mất bản gốc.
       const res = await fetch(
-        `${API_BASE}/exam-setup/${encodeURIComponent(maDe.trim())}/handout/original${q}`,
+        `${API_BASE}/exam-setup/${encodeURIComponent(maDe.trim())}/handout/original`
+          + `?moi=true&examName=${encodeURIComponent(ten.trim())}`,
         { method: "POST", body: form });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error || "Không tải lên được file.");
@@ -435,7 +477,7 @@ function HopTaoDe({ onDong, onXong, onDaTaiLen }: {
         <Field label="Mã đề *">
           <input value={maDe} onChange={(e) => setMaDe(e.target.value)} placeholder="PE_PRM393_DEMO" className={inputClass} />
         </Field>
-        <Field label="Tên đề">
+        <Field label="Tên đề *">
           <input value={ten} onChange={(e) => setTen(e.target.value)} placeholder="Quản lý chi tiêu cá nhân" className={inputClass} />
         </Field>
       </div>
@@ -443,7 +485,7 @@ function HopTaoDe({ onDong, onXong, onDaTaiLen }: {
       <p className="mb-2 mt-5 text-xs font-bold uppercase tracking-wider text-slate-400">Chọn cách tạo</p>
       <div className="space-y-2">
         <button
-          onClick={() => { if (kiemMa()) oFile.current?.click(); }}
+          onClick={() => { if (kiemTra()) oFile.current?.click(); }}
           disabled={busy}
           className="flex w-full items-start gap-3 rounded-xl border border-slate-200 p-4 text-left transition-colors hover:border-sky-300 hover:bg-sky-50/50 disabled:opacity-50"
         >
@@ -460,7 +502,7 @@ function HopTaoDe({ onDong, onXong, onDaTaiLen }: {
           onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) void taiLen(f); }} />
 
         <button
-          onClick={() => { if (kiemMa()) onXong(maDe.trim(), "ai"); }}
+          onClick={() => { if (kiemTra()) onXong(maDe.trim(), ten.trim(), "ai"); }}
           disabled={busy}
           className="flex w-full items-start gap-3 rounded-xl border border-slate-200 p-4 text-left transition-colors hover:border-indigo-300 hover:bg-indigo-50/50 disabled:opacity-50"
         >
@@ -490,10 +532,12 @@ function HopNhanBan({ nguon, onDong, onXong }: { nguon: DongDe; onDong: () => vo
 
   const chay = async () => {
     if (!maDeHopLe(maMoi.trim())) { setLoi("Mã đề mới không hợp lệ."); return; }
+    // Cùng luật với hộp Tạo đề: không để đường nào đẻ ra một đề không tên.
+    if (!ten.trim()) { setLoi("Hãy đặt tên cho đề mới."); return; }
     setBusy(true); setLoi(null);
     try {
       await gui(`/exam-setup/${encodeURIComponent(nguon.examId)}/clone-handout`,
-        { target_exam_id: maMoi.trim(), exam_name: ten.trim() || undefined });
+        { target_exam_id: maMoi.trim(), exam_name: ten.trim() });
       onXong(maMoi.trim());
     } catch (e) {
       setLoi((e as Error).message);
@@ -513,7 +557,7 @@ function HopNhanBan({ nguon, onDong, onXong }: { nguon: DongDe; onDong: () => vo
         <Field label="Mã đề mới *">
           <input value={maMoi} onChange={(e) => setMaMoi(e.target.value)} className={inputClass} />
         </Field>
-        <Field label="Tên đề">
+        <Field label="Tên đề *">
           <input value={ten} onChange={(e) => setTen(e.target.value)} className={inputClass} />
         </Field>
       </div>
@@ -572,7 +616,7 @@ function HopXoaDe({ de, onDong, onXong }: { de: DongDe; onDong: () => void; onXo
 //  CHI TIẾT MỘT ĐỀ
 // ══════════════════════════════════════════════════════════════════════════════
 
-function ChiTietDe({ maDe, moiTao }: { maDe: string; moiTao: string }) {
+function ChiTietDe({ maDe, moiTao, tenMoi }: { maDe: string; moiTao: string; tenMoi: string }) {
   const router = useRouter();
   const [dangTai, setDangTai] = useState(true);
   const [loi, setLoi] = useState<string | null>(null);
@@ -580,7 +624,7 @@ function ChiTietDe({ maDe, moiTao }: { maDe: string; moiTao: string }) {
   const [busy, setBusy] = useState<string | null>(null);
 
   const [loaiDe, setLoaiDe] = useState<LoaiDe>("TRONG");
-  const [tenDe, setTenDe] = useState("");
+  const [tenDe, setTenDe] = useState(tenMoi);
   const [deBai, setDeBai] = useState("");
   const [daLuu, setDaLuu] = useState("");
   const [mockups, setMockups] = useState<Mockup[]>([]);
@@ -625,14 +669,16 @@ function ChiTietDe({ maDe, moiTao }: { maDe: string; moiTao: string }) {
       setFileGoc(goc as { exists: boolean });
       const dong = (Array.isArray(ds) ? (ds as DongDe[]) : []).find((e) => e.examId === maDe);
       setLoaiDe((dong?.loaiDe as LoaiDe) || "TRONG");
-      setTenDe(dong?.examName && dong.examName !== maDe ? dong.examName : "");
+      // Đề đã có hàng trong DB thì lấy tên ở đó; đề vừa tạo qua đường AI thì chưa có hàng nào,
+      // tên còn nằm trên URL — rơi về đó chứ không rơi về rỗng.
+      setTenDe(dong?.examName && dong.examName !== maDe ? dong.examName : tenMoi);
       setLoi(null);
     } catch (e) {
       setLoi((e as Error).message);
     } finally {
       setDangTai(false);
     }
-  }, [maDe]);
+  }, [maDe, tenMoi]);
 
   useEffect(() => { void nap(); }, [nap]);
 
@@ -688,7 +734,10 @@ function ChiTietDe({ maDe, moiTao }: { maDe: string; moiTao: string }) {
     setBusy("luu"); setLoi(null);
     try {
       await gui(`/exam-setup/${encodeURIComponent(maDe)}/handout`,
-        { de_bai: deBai, mockups: mockups.map((m) => ({ id: m.id, svg: m.svg })) });
+        // Gửi kèm tên đề: với đường "Nhờ AI soạn" thì đây chính là lần đầu đề có hàng trong
+        // DB, nên cũng là lần DUY NHẤT đặt được tên cho nó mà không phải qua màn đổi tên.
+        { de_bai: deBai, exam_name: tenDe.trim() || undefined,
+          mockups: mockups.map((m) => ({ id: m.id, svg: m.svg })) });
       setDaLuu(deBai);
       setBao("Đã lưu đề bài.");
       await nap();
