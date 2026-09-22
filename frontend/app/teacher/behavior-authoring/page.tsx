@@ -31,6 +31,31 @@ function docDiem(value: DiemNhap, label: string, phaiDuong = false): number {
   return score;
 }
 
+/**
+ * Dựng lại bảng tick luật tĩnh từ dữ liệu backend trả về.
+ * Preset là danh mục (mặc định chưa tick), `rules` là những luật đã lưu — luật đã lưu thắng.
+ */
+function chonLuatTinh(view: StaticRulesView): Record<string, { checked: boolean; weight: DiemNhap }> {
+  const sel: Record<string, { checked: boolean; weight: DiemNhap }> = {};
+  view.presets.forEach((p) => { sel[p.id] = { checked: false, weight: p.weight }; });
+  view.rules.forEach((r) => { sel[r.id] = { checked: true, weight: r.weight }; });
+  return sel;
+}
+
+/**
+ * Rút TÊN THƯ MỤC mà một luật source_pattern chấp nhận, để hiện thành chip cho người soạn
+ * thấy ngay "đặt thư mục tên gì thì đạt" — thay vì phải mở JSON cấu hình ra đọc.
+ * Chỉ nhặt mẫu dạng `lib/<ten>/**`; mẫu lồng `lib/**{'/'}<ten>/**` là bản sao nên bỏ qua.
+ */
+function thuMucCuaLuat(rule: StaticRule): string[] {
+  const config = rule.config as { require?: { paths?: string[] }[] } | undefined;
+  const paths = (config?.require || []).flatMap((r) => r.paths || []);
+  const ten = paths
+    .map((p) => /^lib\/([A-Za-z0-9_]+)\/\*\*$/.exec(p)?.[1])
+    .filter((t): t is string => Boolean(t));
+  return Array.from(new Set(ten));
+}
+
 function kiemTraChiaDiem(total: DiemNhap, checkpoints: DiemNhap[], budget: number): number[] {
   const score = docDiem(total, "Hàm test", true);
   const weights = checkpoints.map((value, index) => docDiem(value, `Checkpoint ${index + 1}`));
@@ -988,6 +1013,9 @@ function BehaviorAuthoringEditor() {
   // Luật chấm tĩnh (Kiến trúc/lint): preset do backend cung cấp kèm đối chứng Golden.
   const [staticRules, setStaticRules] = useState<StaticRulesView | null>(null);
   const [staticSel, setStaticSel] = useState<Record<string, { checked: boolean; weight: DiemNhap }>>({});
+  // Panel luật tĩnh đóng/mở. Mặc định MỞ khi chưa tick luật nào (người soạn mới cần thấy để
+  // biết có cái này), ĐÓNG khi đã lưu rồi — lúc đó nó chỉ chiếm chỗ giữa trang.
+  const [moLuatTinh, setMoLuatTinh] = useState(true);
   const goldenFrame = useRef<HTMLIFrameElement | null>(null);
   const authoringPanel = useRef<HTMLDivElement | null>(null);
   // Iframe có thể còn phát event chốt input ngay trước Stop. Guard imperative giữ
@@ -1089,10 +1117,8 @@ function BehaviorAuthoringEditor() {
     try {
       const rulesView = await api<StaticRulesView>(`/behavior-authoring/suites/${suiteId}/static-rules`);
       setStaticRules(rulesView);
-      const sel: Record<string, { checked: boolean; weight: number }> = {};
-      rulesView.presets.forEach((p) => { sel[p.id] = { checked: false, weight: p.weight }; });
-      rulesView.rules.forEach((r) => { sel[r.id] = { checked: true, weight: r.weight }; });
-      setStaticSel(sel);
+      setStaticSel(chonLuatTinh(rulesView));
+      setMoLuatTinh(rulesView.rules.length === 0);
     } catch {
       setStaticRules(null);
     }
@@ -2226,10 +2252,7 @@ function BehaviorAuthoringEditor() {
       body: JSON.stringify({ rules: chosen }),
     });
     setStaticRules(view);
-    const sel: Record<string, { checked: boolean; weight: number }> = {};
-    view.presets.forEach((p) => { sel[p.id] = { checked: false, weight: p.weight }; });
-    view.rules.forEach((r) => { sel[r.id] = { checked: true, weight: r.weight }; });
-    setStaticSel(sel);
+    setStaticSel(chonLuatTinh(view));
     const total = view.rules.reduce((sum, r) => sum + Number(r.weight || 0), 0);
     setNotice(`Đã lưu ${view.rules.length} luật tĩnh (${total} điểm). Publish lại bộ chấm để đưa vào đề.`);
   });
@@ -3063,50 +3086,92 @@ function BehaviorAuthoringEditor() {
             </div>
           </section>
 
-          {staticRules && <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <h2 className="text-xl font-bold">Luật Tĩnh: Mô hình kiến trúc </h2>  
-                <p className="mt-1 text-sm text-slate-500">Chấm bằng soi mã nguồn (cấu trúc thư mục, import, lint). Luật phải ĐẠT trên chính Golden Solution: badge đỏ nghĩa là đáp án mẫu không thỏa nên không thể đem luật đó chấm sinh viên.</p>
-              </div>
-              <div className="flex items-center gap-3">
-                <span className="rounded-full bg-indigo-100 px-3 py-1 text-sm font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">{(staticRules.presets || []).reduce((sum, p) => sum + (staticSel[p.id]?.checked ? diemSo(staticSel[p.id].weight) : 0), 0)} điểm</span>
-                <button onClick={saveStaticRules} disabled={Boolean(busy)} className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 font-bold text-white disabled:opacity-40">{busy === "static-rules" ? <Loader2 size={17} className="animate-spin" /> : <Check size={17} />} Lưu luật tĩnh</button>
-              </div>
-            </div>
-            {!staticRules.golden_available && <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">Chưa có Golden Solution — tải ZIP tại phần Dữ liệu đầu vào để hệ thống đối chứng luật.</p>}
-            <div className="mt-4 grid gap-2 md:grid-cols-2">
-              {(staticRules.presets || []).map((p) => {
-                const sel = staticSel[p.id] || { checked: false, weight: p.weight };
-                const goldenFailed = p.golden?.passed === false;
-                const disabled = goldenFailed || (!staticRules.golden_available && p.kind === "source_pattern");
-                return (
-                  <label key={p.id} className={`flex items-start gap-3 rounded-xl border px-4 py-3 ${sel.checked ? "border-indigo-400 bg-indigo-50/50 dark:border-indigo-700 dark:bg-indigo-950/30" : "border-slate-200 dark:border-slate-700"} ${disabled ? "opacity-60" : "cursor-pointer"}`}>
-                    <input type="checkbox" checked={sel.checked} disabled={disabled || Boolean(busy)}
+          {staticRules && (() => {
+            const dsLuat = staticRules.presets || [];
+            const daTick = dsLuat.filter((p) => staticSel[p.id]?.checked);
+            const tongDiemTinh = daTick.reduce((sum, p) => sum + diemSo(staticSel[p.id].weight), 0);
+            // Chia nhóm theo skill_code: đúng trục mà phiếu chấm tay đang dùng, và người soạn
+            // đọc "Kiến trúc theo tầng" dễ hơn là đọc một danh sách 6 ô lẫn lộn.
+            const NHOM: { ma: string; ten: string; moTa: string }[] = [
+              { ma: "PROJ_FOLDER_STRUCTURE", ten: "Kiến trúc theo tầng", moTa: "Mỗi tầng một thư mục RIÊNG. Từ vựng bốn tầng không giao nhau, nên dồn cả bốn vào một thư mục là trượt cả bốn." },
+              { ma: "STATE_RIVERPOD", ten: "Quản lý state", moTa: "Chỉ tick khi chính Golden dùng thư viện đó." },
+              { ma: "CODE_QUALITY_LINT", ten: "Chất lượng mã", moTa: "Cần dart analyze nên chỉ chấm được khi bài biên dịch." },
+            ];
+            const khac = dsLuat.filter((p) => !NHOM.some((n) => n.ma === p.skill_code));
+            const oLuat = (p: StaticRule) => {
+              const sel = staticSel[p.id] || { checked: false, weight: p.weight };
+              const goldenFailed = p.golden?.passed === false;
+              const disabled = goldenFailed || (!staticRules.golden_available && p.kind === "source_pattern");
+              const thuMuc = thuMucCuaLuat(p);
+              return (
+                <div key={p.id} className={`rounded-xl border px-4 py-3 ${sel.checked ? "border-indigo-400 bg-indigo-50/50 dark:border-indigo-700 dark:bg-indigo-950/30" : "border-slate-200 dark:border-slate-700"} ${disabled ? "opacity-60" : ""}`}>
+                  <div className="flex items-start gap-3">
+                    <input type="checkbox" id={`luat-${p.id}`} checked={sel.checked} disabled={disabled || Boolean(busy)}
                       onChange={(e) => setStaticSel((prev) => ({ ...prev, [p.id]: { checked: e.target.checked, weight: prev[p.id]?.weight ?? p.weight } }))}
-                      className="mt-1 h-4 w-4 accent-indigo-600" />
-                    <span className="min-w-0 flex-1">
-                      <span className="flex flex-wrap items-center gap-2">
-                        <span className="font-bold">{p.name}</span>
+                      className="mt-1 h-4 w-4 shrink-0 accent-indigo-600" />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <label htmlFor={`luat-${p.id}`} className={`font-bold ${disabled ? "" : "cursor-pointer"}`}>{p.name}</label>
                         {p.golden?.passed === true && <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-bold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300" title={p.golden.detail}>Golden ✓</span>}
                         {goldenFailed && <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-bold text-rose-700 dark:bg-rose-950 dark:text-rose-300" title={p.golden?.detail}>Golden ✗</span>}
                         {p.golden?.passed == null && <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-500 dark:bg-slate-800" title={p.golden?.detail}>Preflight kiểm</span>}
-                      </span>
-                      <span className="mt-1 block text-xs text-slate-500">{p.description}</span>
-                      {goldenFailed && <span className="mt-1 block text-xs text-rose-500">{p.golden?.detail}</span>}
-                    </span>
-                    <span className="flex shrink-0 items-center gap-1 text-sm">
+                      </div>
+                      <p className="mt-1 text-xs text-slate-500">{p.description}</p>
+                      {thuMuc.length > 0 && <div className="mt-1.5 flex flex-wrap gap-1">
+                        {thuMuc.map((t) => <code key={t} className="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">{t}/</code>)}
+                      </div>}
+                      {goldenFailed && <p className="mt-1 text-xs text-rose-500">{p.golden?.detail}</p>}
+                    </div>
+                    <div className="flex shrink-0 items-center gap-1 text-sm">
                       <input type="text" inputMode="decimal" value={sel.weight} disabled={!sel.checked || Boolean(busy)}
                         onChange={(e) => setStaticSel((prev) => ({ ...prev, [p.id]: { checked: prev[p.id]?.checked ?? false, weight: e.target.value } }))}
-                        onClick={(e) => e.preventDefault()}
                         className="w-16 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-right disabled:opacity-40 dark:border-slate-700" />
                       <span className="text-xs text-slate-500">điểm</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            };
+
+            return <section className="rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-900">
+              {/* Cả hàng tiêu đề là nút đóng/mở; nút Lưu nằm ngoài nút đó nên không bị nuốt sự kiện. */}
+              <div className="flex flex-wrap items-center justify-between gap-4 p-5">
+                <button onClick={() => setMoLuatTinh((v) => !v)} className="flex min-w-0 flex-1 items-start gap-3 text-left">
+                  <ChevronDown size={20} className={`mt-1 shrink-0 text-slate-400 transition-transform ${moLuatTinh ? "" : "-rotate-90"}`} />
+                  <span className="min-w-0">
+                    <span className="flex flex-wrap items-center gap-2">
+                      <span className="text-xl font-bold">Luật tĩnh</span>
+                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">{daTick.length}/{dsLuat.length} luật</span>
                     </span>
-                  </label>
-                );
-              })}
-            </div>
-          </section>}
+                    <span className="mt-1 block text-sm text-slate-500">
+                      {moLuatTinh
+                        ? "Luật phải ĐẠT trên chính Golden Solution — badge đỏ nghĩa là đáp án mẫu không thỏa nên không được đem luật đó chấm sinh viên."
+                        : daTick.length === 0 ? "Chưa tick luật nào — bấm để mở." : daTick.map((p) => p.name).join(" · ")}
+                    </span>
+                  </span>
+                </button>
+                <div className="flex items-center gap-3">
+                  <span className="rounded-full bg-indigo-100 px-3 py-1 text-sm font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">{tongDiemTinh} điểm</span>
+                  <button onClick={saveStaticRules} disabled={Boolean(busy)} className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 font-bold text-white disabled:opacity-40">{busy === "static-rules" ? <Loader2 size={17} className="animate-spin" /> : <Check size={17} />} Lưu </button>
+                </div>
+              </div>
+              {moLuatTinh && <div className="space-y-5 px-5 pb-5">
+                {!staticRules.golden_available && <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">Chưa có Golden Solution — tải ZIP tại phần Dữ liệu đầu vào để hệ thống đối chứng luật.</p>}
+                {NHOM.map((nhom) => {
+                  const cua = dsLuat.filter((p) => p.skill_code === nhom.ma);
+                  if (cua.length === 0) return null;
+                  return <div key={nhom.ma}>
+                    <div className="mb-2 flex flex-wrap items-baseline gap-2">
+                      <h3 className="text-sm font-bold uppercase tracking-wide text-slate-500">{nhom.ten}</h3>
+                      <span className="text-xs text-slate-400">{nhom.moTa}</span>
+                    </div>
+                    <div className="grid gap-2 xl:grid-cols-2">{cua.map(oLuat)}</div>
+                  </div>;
+                })}
+                {khac.length > 0 && <div className="grid gap-2 xl:grid-cols-2">{khac.map(oLuat)}</div>}
+              </div>}
+            </section>;
+          })()}
 
           <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
             <div className="flex flex-wrap items-center justify-between gap-4">
