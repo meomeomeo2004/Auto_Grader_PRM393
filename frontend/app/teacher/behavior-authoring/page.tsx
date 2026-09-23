@@ -2648,9 +2648,9 @@ function BehaviorAuthoringEditor() {
             </div>
             <div className="grid items-start gap-5 lg:grid-cols-2">
               <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
-                <p className="text-sm font-bold">Giao bộ chấm cho người chấm</p>
+                <p className="text-sm font-bold">Download Bộ Test</p>
                 <p className="mt-2 text-sm leading-relaxed text-slate-500">
-                  Tải bộ testcase đã xuất bản để nạp vào bản người chấm. Đề cần đạt kiểm đồng bộ khung phát trước khi bàn giao.
+                  Tải bộ chấm kèm khung code phát cho sinh viên.
                 </p>
                 <div className="mt-3 flex flex-wrap items-center gap-2">
                   <select aria-label="Đề cần xuất gói bàn giao" value={deGiao} onChange={(e) => setDeGiao(e.target.value)} className="min-w-0 rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700">
@@ -2678,7 +2678,7 @@ function BehaviorAuthoringEditor() {
                   <h3 className="text-sm font-bold">Lần đầu dựng Golden?</h3>
                 </div>
                 <p className="mt-2 text-sm leading-relaxed text-slate-500">
-                  Đây là file identifier mẫu đi kèm hướng dẫn. Bạn có thể tải về, copy vào Golden và sửa theo hướng dẫn để có thể tạo identifier đúng cách.
+                  Đây là file cách khai báo identifier mẫu đi kèm hướng dẫn. Bạn có thể tải về nếu cần thiết.
                 </p>
                 <div className="mt-3 flex flex-wrap items-center gap-2">
                   <a

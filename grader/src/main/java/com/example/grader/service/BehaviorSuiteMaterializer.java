@@ -555,7 +555,7 @@ public class BehaviorSuiteMaterializer {
             //   · description      — luôn null, màn soạn không có ô nhập mô tả luồng
             //   · expected         — một câu y hệt nhau ở mọi dòng, không mang tin gì
             //   · difficulty       — suy máy móc từ loại tiêu chí rồi tắc ở result.json
-            //   · layer, testcase_group — chỉ TestCaseTaxonomy đọc, mà lớp đó không ai gọi
+            //   · layer, testcase_group — chỉ TestCaseTaxonomy đọc, mà lớp đó không ai gọi (đã xoá 23/9)
             //   · group_name       — luôn bằng group_id kể từ khi nhóm do người soạn gõ
             // Thêm field mới vào đây thì phải chỉ ra được NGƯỜI ĐỌC, không thì nó lại nằm đó
             // mười tháng và người sau phải đi đo lại từ đầu.
