@@ -3173,13 +3173,33 @@ Future<Finder> _waitForTarget(
   Duration timeout,
 ) async {
   if (target.isEmpty) throw ArgumentError('Action thiếu semantic target.');
+  final maDinhDanh = _text(target, 'semantic_id').isNotEmpty
+      ? _text(target, 'semantic_id')
+      : _text(target, 'semanticId');
+  // TRÊN GOLDEN, BƯỚC ĐI BẰNG ĐỊNH DANH CHỈ ĐƯỢC TÌM BẰNG ĐỊNH DANH (24/9/2026).
+  //
+  // Nhãn, tooltip, hình dạng nướng vào bước là đường lui cho BÀI SINH VIÊN quên định danh.
+  // Để chúng chạy cả lúc thu oracle thì Golden đổi tên một định danh (chi_tieu.loc.TATCA →
+  // tat_ca) mà chữ trên nút giữ nguyên, capture vẫn xanh: bước tìm được nhờ nhãn, plan giữ
+  // định danh cũ trong khi dinh_danh.dart phát cho sinh viên — chép từ Golden — đã mang tên
+  // mới. Sinh viên làm đúng hợp đồng lại trượt bước. Chặn ở đây thì capture báo đỏ đúng
+  // luồng lệch, người soạn biết phải ghi hình lại.
+  final timTheo = (_dangThuOracle && maDinhDanh.isNotEmpty)
+      ? <String, dynamic>{
+          'semantic_id': maDinhDanh,
+          if (target.containsKey('index')) 'index': target['index'],
+        }
+      : target;
   await _waitUntil(
     tester,
-    () => _finder(target, duPhong: true).evaluate().isNotEmpty,
+    () => _finder(timTheo, duPhong: true).evaluate().isNotEmpty,
     timeout,
-    'Không tìm thấy semantic target: $target',
+    identical(timTheo, target)
+        ? 'Không tìm thấy semantic target: $target'
+        : 'Golden không có đúng một widget mang định danh "$maDinhDanh" — kịch bản lệch với '
+            'Golden hiện tại (đổi tên hoặc bỏ định danh?). Ghi hình lại luồng này.',
   );
-  final finder = _finder(target, duPhong: true);
+  final finder = _finder(timTheo, duPhong: true);
   if (_dangThuOracle) {
     final nhan = _text(target, 'label');
     if (nhan.isNotEmpty && !_moTaNhanDaThu.containsKey(nhan)) {
@@ -3202,18 +3222,19 @@ Future<Finder> _waitForTarget(
     //
     // Chỉ dùng cho BƯỚC, không cho tiêu chí: quên định danh vẫn phải trượt đúng tiêu chí
     // nhắm vào định danh, nhưng không được kéo sập phần chức năng phía sau.
-    final maDinhDanh = _text(target, 'semantic_id').isNotEmpty
-        ? _text(target, 'semantic_id')
-        : _text(target, 'semanticId');
     if (maDinhDanh.isNotEmpty && !_duPhongTheoDinhDanh.containsKey(maDinhDanh)) {
       final mo = <String, dynamic>{};
       try {
-        final nhanThat = tester.getSemantics(finder.first).label.trim();
-        // Nhãn phải DUY NHẤT trên màn mới dùng được: hai nút cùng chữ thì lui sang nhãn là
-        // bấm đại một cái, chấm nhầm còn tệ hơn không chấm.
-        if (nhanThat.isNotEmpty &&
-            find.bySemanticsLabel(nhanThat).evaluate().length == 1) {
-          mo['label'] = nhanThat;
+        final nodeDinhDanh = tester.getSemantics(finder.first);
+        final nhanThat = nodeDinhDanh.label.trim();
+        if (nhanThat.isNotEmpty) {
+          // Nhãn phải DUY NHẤT trên màn mới dùng được: hai nút cùng chữ thì lui sang nhãn là
+          // bấm đại một cái, chấm nhầm còn tệ hơn không chấm.
+          if (find.bySemanticsLabel(nhanThat).evaluate().length == 1) {
+            mo['label'] = nhanThat;
+          }
+        } else {
+          mo.addAll(_chuNodeConDungDuoc(tester, finder.first, nodeDinhDanh));
         }
       } catch (_) {
         // Không đọc được cây ngữ nghĩa thì bỏ qua, đừng làm hỏng lượt capture.
@@ -3312,9 +3333,92 @@ String _docDinhDanhTaiDich(Finder finder) {
 /// đi, nhãn của màn trước không còn trên cây nên đo ra rỗng.
 final Map<String, dynamic> _moTaNhanDaThu = <String, dynamic>{};
 
-/// Đường lui của các bước đi bằng ĐỊNH DANH: {mã định danh: {label?, shape?}}.
+/// Đường lui của các bước đi bằng ĐỊNH DANH: {mã định danh: {label?, tooltip?, shape?}}.
 /// Backend nướng vào target của bước để bài quên gắn định danh còn tìm được nút.
 final Map<String, dynamic> _duPhongTheoDinhDanh = <String, dynamic>{};
+
+/// Độ sâu tối đa đi xuống dưới node định danh để tìm chữ của CHÍNH widget được bọc.
+///
+/// Đo sa bàn 24/9/2026 trên 30 loại widget: node riêng của chip/nút luôn nằm ngay tầng 1
+/// (FAB có thêm một tầng 2 không chữ). Mở tới 2 là đủ phủ, còn khung chứa (Form, ListView)
+/// đẩy chữ của các ô bên trong xuống sâu hơn nên tự rơi ra ngoài.
+const int _sauNodeConToiDa = 2;
+
+/// Chữ của widget mang định danh khi CHÍNH node định danh có nhãn rỗng — trả {label} hoặc
+/// {tooltip}, hoặc rỗng khi không có chữ nào dùng được.
+///
+/// Vì sao phải xuống node con: chip và nút (RawChip, ButtonStyleButton, RawMaterialButton)
+/// tự dựng `Semantics(container: true)` bên trong, nên `Semantics(identifier:)` bọc ngoài
+/// ra một node RIÊNG nhãn rỗng, còn chữ và hành động chạm nằm ở node con. Ô nhập và ListTile
+/// không dựng ranh giới đó nên nhãn gộp thẳng vào node định danh. Đo trên PE_PRM393_FA26:
+/// 3 ô nhập và dòng danh sách thu được nhãn, còn cả ba nhóm chip, nút Lưu và nút Xóa trong
+/// hộp xác nhận thì không — tức đường lui theo nhãn mất đúng ở những nút có chữ.
+///
+/// Ba chốt, cái nào trượt thì thà không có đường lui còn hơn đường lui bấm nhầm:
+///   · chỉ MỘT chữ khác nhau trong phạm vi — hai nút trong một Row, hay một Form nhiều ô,
+///     không có "chữ của widget" nào để chọn;
+///   · chữ DUY NHẤT trên cả màn — đúng luật với nhãn sẵn trên node định danh;
+///   · chạm theo chữ đó RƠI ĐÚNG chỗ Golden chạm — chữ trùng ở chỗ khác đã bị chốt trên
+///     loại, chốt này chặn nốt ca node con nằm lệch ra ngoài hoặc là một nút con khác.
+/// Không đi vào node con mang định danh RIÊNG (nút xoá trong dòng): đó là widget khác của
+/// hợp đồng, chữ của nó không phải chữ của widget này.
+Map<String, String> _chuNodeConDungDuoc(
+  WidgetTester tester,
+  Finder dinhDanh,
+  SemanticsNode goc,
+) {
+  final nhan = <String>{};
+  final goiY = <String>{};
+  void gom(SemanticsData d) {
+    final l = d.label.trim();
+    if (l.isNotEmpty) nhan.add(l);
+    final t = d.tooltip.trim();
+    if (t.isNotEmpty) goiY.add(t);
+  }
+
+  // Tooltip có thể gộp thẳng vào node định danh (Tooltip không dựng ranh giới riêng).
+  gom(goc.getSemanticsData());
+  void di(SemanticsNode n, int sau) {
+    n.visitChildren((SemanticsNode con) {
+      // Node đã gộp vào cha thì chữ của nó nằm sẵn trong nhãn cha; đếm lại là tự tạo ra
+      // "hai chữ khác nhau" rồi từ chối oan (CheckboxListTile, SwitchListTile).
+      if (con.isMergedIntoParent) return true;
+      if (con.identifier.isNotEmpty) return true;
+      gom(con.getSemanticsData());
+      if (sau < _sauNodeConToiDa) di(con, sau + 1);
+      return true;
+    });
+  }
+
+  di(goc, 1);
+  // Nhãn đi trước tooltip: engine tìm theo nhãn trước, và nút có chữ thì chữ mới là thứ
+  // người ra đề nhìn thấy. Tooltip chỉ dùng khi không có nhãn nào (IconButton, FAB có
+  // tooltip) — Flutter không biến tooltip thành nhãn nên phải nướng khoá `tooltip` riêng.
+  final String khoa;
+  final Finder theoChu;
+  if (nhan.length == 1) {
+    khoa = 'label';
+    theoChu = find.bySemanticsLabel(nhan.single);
+  } else if (nhan.isEmpty && goiY.length == 1) {
+    khoa = 'tooltip';
+    theoChu = find.byTooltip(goiY.single);
+  } else {
+    return const <String, String>{};
+  }
+  if (theoChu.evaluate().length != 1) return const <String, String>{};
+  // Vị trí phải khớp CẢ HAI CHIỀU. Một chiều (tâm chữ nằm trong vùng định danh) chưa đủ:
+  // Card bấm được mang định danh, bên trong có nút "Yêu thích" — chữ duy nhất, tâm nằm
+  // gọn trong Card, nhưng Golden chạm vào TÂM Card (mở chi tiết) còn đường lui sẽ chạm
+  // nút con (bấm yêu thích). Chiều ngược — widget của chữ phủ lên điểm Golden thật sự
+  // chạm — loại được ca đó mà vẫn giữ chip, nút, FAB (đo sa bàn 24/9/2026).
+  final vungDinhDanh = tester.getRect(dinhDanh).inflate(0.5);
+  final vungChu = tester.getRect(theoChu).inflate(0.5);
+  if (!vungDinhDanh.contains(tester.getCenter(theoChu)) ||
+      !vungChu.contains(tester.getCenter(dinhDanh))) {
+    return const <String, String>{};
+  }
+  return <String, String>{khoa: khoa == 'label' ? nhan.single : goiY.single};
+}
 
 /// Loi TRAN BO CUC bat duoc trong luong hien tai, khu trung theo dong dau (overflow
 /// bao lai moi frame nen khong khu thi phinh vo han).
@@ -4357,9 +4461,20 @@ Finder _finder(Map<String, dynamic> target, {bool duPhong = false}) {
   // nên hay điền tooltip vào ô `label`. Đặt SAU phép khớp decoration chứ không trước:
   // ô nhập đã có chữ chỉ còn decoration giữ nhãn, mà thử tooltip trước thì rủi ro
   // cướp mất lookup ấy nếu tình cờ có widget khác mang đúng chuỗi đó làm tooltip.
-  if (label.isNotEmpty) {
+  //
+  // KHÔNG áp cho bước đi bằng định danh (24/9/2026): nhãn ở đó do máy nướng từ Golden làm
+  // đường lui, không ai gõ nhầm, còn tooltip thật đã có khoá `tooltip` riêng. Để nhánh này
+  // chạy là nhãn "Xóa" của nút xác nhận vớ nhầm nút thùng rác mỗi dòng mang tooltip "Xóa"
+  // của bài làm — bấm ra ngoài hộp thoại, hộp đóng, bước vẫn "qua" và lỗi đổ sang tiêu chí
+  // CSDL như thể bài xoá hỏng. Đo ở sa bàn: chỉ cần bài quên định danh nút xác nhận và viết
+  // chữ khác "Xóa" một chút ("Xoá", "Đồng ý").
+  // Cũng phải DUY NHẤT như mọi nhánh khác của thao tác: trước đây nhánh này là chỗ duy nhất
+  // lấy `.first` khi khớp nhiều widget, đúng thứ `_locatorDungDuoc` cấm.
+  final coDinhDanh = _text(target, 'semanticId').isNotEmpty ||
+      _text(target, 'semantic_id').isNotEmpty;
+  if (label.isNotEmpty && !coDinhDanh) {
     final finder = find.byTooltip(label);
-    if (finder.evaluate().isNotEmpty) return finder;
+    if (_locatorDungDuoc(finder, target, action: duPhong)) return finder;
   }
   final text = _text(target, 'text');
   if (text.isNotEmpty) {
@@ -4404,6 +4519,10 @@ Finder _finder(Map<String, dynamic> target, {bool duPhong = false}) {
     'image',
     'label',
     'hint',
+    // Tooltip nay được nướng làm đường lui cho bước đi bằng định danh. Thiếu nó ở đây thì
+    // target chỉ còn tooltip mà chưa thấy widget sẽ ném lỗi "target khai thiếu khoá" thay
+    // vì chờ tiếp như mọi khoá khác.
+    'tooltip',
     'text',
     'text_prefix',
   ];

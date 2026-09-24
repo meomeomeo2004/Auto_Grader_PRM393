@@ -1143,6 +1143,63 @@ class BehaviorAuthoringServiceTest {
         assertEquals("ElevatedButton", luiTheoNhan.get(0).get("type"));
     }
 
+    /**
+     * Nút chỉ có icon nhưng khai tooltip: engine thu khoá `tooltip` riêng (Flutter không biến
+     * tooltip thành nhãn), backend phải nướng đúng khoá đó — nhét sang `label` thì engine tìm
+     * bằng bySemanticsLabel ra 0 và đường lui thành vô dụng.
+     */
+    @Test
+    void nutChiCoIconNhanDuongLuiTheoTooltip() throws Exception {
+        Map<String, Object> golden = service.registerGoldenApp(Map.of(
+                "name", "G", "runtime_url", "http://localhost:9010", "ready", true));
+        Map<String, Object> suite = service.createSuite(Map.of(
+                "suite_code", "DUONG_LUI_TIP", "name", "Duong lui tooltip", "golden_app_id", golden.get("id")));
+        String scenarioId = String.valueOf(
+                taoLuong(String.valueOf(suite.get("id")), "CRUD", "thêm chi tiêu").get("id"));
+
+        assertEquals(1, service.applyCapturedTargets(scenarioId, Map.of(), Map.of(
+                "nut.loc", Map.of("tooltip", "Thêm khoản chi"))));
+        Map<String, Object> target = docTargetBuocDau(scenarioId);
+        assertEquals("nut.loc", target.get("semanticId"), "định danh vẫn là khoá chính");
+        assertEquals("Thêm khoản chi", target.get("tooltip"));
+        assertFalse(target.containsKey("label"), "tooltip không được nhét sang ô nhãn");
+        assertFalse(target.containsKey("fallback"));
+
+    }
+
+    /**
+     * "Sinh lại toàn bộ" chạy lại capture trên CHÍNH các bước đã lưu, không dựng lại từ
+     * raw_trace — nên lần đo mới phải thắng lần nướng cũ. Giữ bản cũ thì Golden đổi chữ nút
+     * xong, đường lui vẫn trỏ vào chữ không còn trên màn và bài quên định danh trượt oan.
+     * Lần đo không báo giá trị thì để nguyên (xem applyCapturedTargets).
+     */
+    @Test
+    void sinhLaiSauKhiGoldenDoiChuThiDuongLuiTheoChuMoi() throws Exception {
+        Map<String, Object> golden = service.registerGoldenApp(Map.of(
+                "name", "G", "runtime_url", "http://localhost:9010", "ready", true));
+        Map<String, Object> suite = service.createSuite(Map.of(
+                "suite_code", "DUONG_LUI_MOI", "name", "Duong lui moi", "golden_app_id", golden.get("id")));
+        String scenarioId = String.valueOf(
+                taoLuong(String.valueOf(suite.get("id")), "CRUD", "thêm chi tiêu").get("id"));
+
+        service.applyCapturedTargets(scenarioId, Map.of(), Map.of(
+                "nut.loc", Map.of("label", "Lưu", "tooltip", "Lưu khoản chi")));
+        assertEquals(1, service.applyCapturedTargets(scenarioId, Map.of(), Map.of(
+                "nut.loc", Map.of("label", "Lưu lại", "tooltip", "Lưu lại khoản chi"))));
+        Map<String, Object> target = docTargetBuocDau(scenarioId);
+        assertEquals("Lưu lại", target.get("label"), "Golden đổi chữ thì đường lui theo chữ mới");
+        assertEquals("Lưu lại khoản chi", target.get("tooltip"));
+        assertEquals("nut.loc", target.get("semanticId"));
+
+        // Lần đo chỉ còn hình dạng (chữ thành trùng trên màn): nhãn cũ để nguyên, hình dạng vào.
+        assertEquals(1, service.applyCapturedTargets(scenarioId, Map.of(), Map.of(
+                "nut.loc", Map.of("shape", Map.of("type", "ElevatedButton")))));
+        Map<String, Object> sau = docTargetBuocDau(scenarioId);
+        assertEquals("Lưu lại", sau.get("label"));
+        assertEquals("Lưu lại khoản chi", sau.get("tooltip"));
+        assertTrue(sau.containsKey("fallback"));
+    }
+
     @SuppressWarnings("unchecked")
     private Map<String, Object> docTargetBuocDau(String scenarioId) throws Exception {
         List<Map<String, Object>> steps = new ObjectMapper().readValue(

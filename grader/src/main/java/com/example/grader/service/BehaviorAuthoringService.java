@@ -1269,11 +1269,25 @@ public class BehaviorAuthoringService {
                 // dạng (kiểu widget + mã icon) cho nút chỉ có icon.
                 Map<String, Object> lui = map(banId.get(maDinhDanh));
                 boolean doi = false;
-                String nhanLui = text(lui, "label", "");
-                // Không ghi đè nhãn người soạn đã khai bằng tay.
-                if (!nhanLui.isBlank() && text(target, "label", "").isBlank()) {
-                    target.put("label", nhanLui);
-                    doi = true;
+                // `tooltip` cho nút chỉ có icon nhưng khai tooltip (IconButton, FAB): Flutter không
+                // biến tooltip thành nhãn nên engine thu riêng khoá này, tìm bằng find.byTooltip.
+                //
+                // Số đo MỚI thắng số đo cũ. Bước đi bằng định danh không bao giờ mang nhãn/tooltip
+                // gõ tay — recorder chỉ ghi semanticId, khung "Thêm action" chỉ dựng target một
+                // khoá. Giá trị đang có chỉ có thể là lần nướng trước, hoặc nhãn ghi hình đời cũ
+                // được applyCapturedIdentifiers nâng định danh; cả hai đều đo từ Golden, nên Golden
+                // HIỆN TẠI nói gì thì theo đó. Giữ bản cũ thì Golden đổi chữ nút ("Lưu" → "Lưu lại")
+                // rồi "Sinh lại toàn bộ" vẫn để đường lui trỏ vào chữ đã chết — recapture không
+                // dựng lại bước từ raw_trace nên không có dịp nào khác để sửa.
+                // Lần đo KHÔNG báo giá trị (chữ thành trùng, nút hết chữ) thì để nguyên: xoá đi là
+                // mất nhãn ghi hình đời cũ của các bước lặp có `index`; để lại thì vô hại, vì bài
+                // theo Golden mới không còn chữ đó, còn khớp nhiều widget thì engine đã từ chối.
+                for (String khoa : List.of("label", "tooltip")) {
+                    String moi = text(lui, khoa, "");
+                    if (!moi.isBlank()) {
+                        target.put(khoa, moi);
+                        doi = true;
+                    }
                 }
                 Map<String, Object> hinh = map(lui.get("shape"));
                 if (!hinh.isEmpty()) {
