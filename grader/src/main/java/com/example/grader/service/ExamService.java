@@ -2036,6 +2036,8 @@ public class ExamService {
 
     /** Hai file CHO SẴN: chép NGUYÊN BYTE từ Golden sang khung, không sinh lại. */
     private static final List<String> FILE_CHO_SAN = List.of("database_helper.dart", "dinh_danh.dart");
+    /** File cho sẵn chỉ bắt buộc khi đề có dùng database. */
+    private static final String FILE_DATABASE_HELPER = "database_helper.dart";
 
     /**
      * FILE MẪU {@code dinh_danh.dart} — tài nguyên TĨNH, không suy ra gì từ đề.
@@ -2095,9 +2097,14 @@ public class ExamService {
                     .sinh(new String(mainGolden, StandardCharsets.UTF_8))
                     .getBytes(StandardCharsets.UTF_8));
 
+            // Đề không dùng database (26/9/2026) thì không đòi database_helper.dart: máy tính cộng trừ
+            // không có bảng nào để mở, bắt Golden viết một file rỗng chỉ để qua cửa là vô lý. Có file thì
+            // vẫn chép. dinh_danh.dart thì đề nào cũng cần: hợp đồng chấm không phụ thuộc database.
+            boolean khongDb = DatabaseCuaGolden.quet(golden).khongDungDatabase();
             for (String ten : FILE_CHO_SAN) {
                 byte[] noiDung = timTrongLib(zip, goc, ten);
                 if (noiDung == null) {
+                    if (khongDb && FILE_DATABASE_HELPER.equals(ten)) continue;
                     throw new IllegalStateException("Golden thiếu file cho sẵn lib/**/" + ten
                             + " nên khung phát sẽ không khớp hợp đồng. Bổ sung vào Golden rồi xuất lại.");
                 }

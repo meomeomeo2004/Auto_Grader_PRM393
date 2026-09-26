@@ -105,10 +105,13 @@ public class BehaviorSuiteMaterializer {
             result.put("testcase_path", target.toAbsolutePath().toString());
             result.put("scenario_count", list(plan.get("scenarios")).size());
             result.put("criterion_count", matrix.size());
-            result.put("files", List.of(
+            List<String> daGhi = new ArrayList<>(List.of(
                     "exam_test.dart", "grader.dart", "behavior_plan.json",
-                    "skills_matrix.json", "contract.json", "suite_manifest.json",
-                    "fixtures/hidden.db", "fixtures/expected-output.db"));
+                    "skills_matrix.json", "contract.json", "suite_manifest.json"));
+            if (!artifacts.khongDungDatabase(suiteId)) {
+                daGhi.addAll(List.of("fixtures/hidden.db", "fixtures/expected-output.db"));
+            }
+            result.put("files", daGhi);
             result.put("ready_for_grading", true);
             return result;
         } catch (Exception e) {
@@ -193,7 +196,7 @@ public class BehaviorSuiteMaterializer {
                     "behavior_plan.json",
                     "Toàn bộ action, checkpoint và oracle mà runner sẽ replay.",
                     "BUNDLE",
-                    json(executablePlan(plan, suite, cases, false))));
+                    json(executablePlan(plan, suite, cases, false, !artifacts.khongDungDatabase(suiteId)))));
             files.add(previewFile(
                     "skills_matrix.json",
                     "Danh sách testcase, trọng số và checkpoint dùng để tính điểm.",
@@ -291,21 +294,28 @@ public class BehaviorSuiteMaterializer {
         copyResource("behavior-replay-engine/grader.dart", target.resolve("grader.dart"));
 
         Path fixtures = target.resolve("fixtures");
+        // Thư mục fixtures vẫn phải có kể cả khi đề không dùng database: engine ghi ảnh chuẩn,
+        // captured-layout.json… CẠNH đường dẫn captured-output.db, tức vào đúng thư mục này.
         Files.createDirectories(fixtures);
+        boolean khongDb = artifacts.khongDungDatabase(suiteId);
         // student.db KHONG con duoc chep vao bundle: engine chi doc hidden_fixture_path,
         // khong bao gio mo student.db. Viec canh schema nay do khau kiem dong bo khung phat lam.
-        copyArtifact(suiteId, BehaviorArtifactType.HIDDEN_DATABASE, fixtures.resolve("hidden.db"));
-        if (requireOutputDatabase
-                || artifacts.activeOptional(suiteId, BehaviorArtifactType.OUTPUT_DATABASE).isPresent()) {
-            copyArtifact(suiteId, BehaviorArtifactType.OUTPUT_DATABASE, fixtures.resolve("expected-output.db"));
-        } else {
-            // File chỉ là placeholder của bundle capture; không được dùng làm oracle.
-            // Output thật sẽ được exam_test.dart ghi sang captured-output.db.
-            copyArtifact(suiteId, BehaviorArtifactType.HIDDEN_DATABASE, fixtures.resolve("expected-output.db"));
+        // Đề không dùng database: không chép gì cả — kể cả một Database ẩn lỡ tải lên từ trước. Gói
+        // bàn giao là thư mục này, nên file thừa ở đây đi thẳng sang máy người chấm.
+        if (!khongDb) {
+            copyArtifact(suiteId, BehaviorArtifactType.HIDDEN_DATABASE, fixtures.resolve("hidden.db"));
+            if (requireOutputDatabase
+                    || artifacts.activeOptional(suiteId, BehaviorArtifactType.OUTPUT_DATABASE).isPresent()) {
+                copyArtifact(suiteId, BehaviorArtifactType.OUTPUT_DATABASE, fixtures.resolve("expected-output.db"));
+            } else {
+                // File chỉ là placeholder của bundle capture; không được dùng làm oracle.
+                // Output thật sẽ được exam_test.dart ghi sang captured-output.db.
+                copyArtifact(suiteId, BehaviorArtifactType.HIDDEN_DATABASE, fixtures.resolve("expected-output.db"));
+            }
         }
 
         writeJson(target.resolve("behavior_plan.json"),
-                executablePlan(plan, suite, cases, includeInternalIdentity));
+                executablePlan(plan, suite, cases, includeInternalIdentity, !khongDb));
         writeJson(target.resolve("skills_matrix.json"), matrix);
         writeJson(target.resolve("contract.json"), publicContract(suiteId, plan));
         Map<String, Object> manifest = new LinkedHashMap<>();
@@ -385,6 +395,9 @@ public class BehaviorSuiteMaterializer {
     private static final java.util.Set<String> ABSOLUTE_WEIGHT_KINDS =
             java.util.Set.of("component_present", "component_position", "layout_relation", "component_color",
                     "theme_color", "screen_match",
+                    // Số cột của nhóm lặp: một khẳng định nhị phân về bố cục, cùng lý lẽ với
+                    // layout_relation — và nhờ có mặt ở đây, dòng bảng điểm mang đúng tên tiêu chí.
+                    "group_columns",
                     // Ch.7 — cùng lý lẽ với component_present: mỗi tiêu chí là MỘT khẳng
                     // định nhị phân về một widget cụ thể, không phải một bước trong luồng
                     // hành vi nên không nên bị pha loãng theo trọng số scenario.
@@ -555,7 +568,7 @@ public class BehaviorSuiteMaterializer {
             //   · description      — luôn null, màn soạn không có ô nhập mô tả luồng
             //   · expected         — một câu y hệt nhau ở mọi dòng, không mang tin gì
             //   · difficulty       — suy máy móc từ loại tiêu chí rồi tắc ở result.json
-            //   · layer, testcase_group — chỉ TestCaseTaxonomy đọc, mà lớp đó không ai gọi
+            //   · layer, testcase_group — chỉ TestCaseTaxonomy đọc, mà lớp đó không ai gọi (đã xoá 23/9)
             //   · group_name       — luôn bằng group_id kể từ khi nhóm do người soạn gõ
             // Thêm field mới vào đây thì phải chỉ ra được NGƯỜI ĐỌC, không thì nó lại nằm đó
             // mười tháng và người sau phải đi đo lại từ đầu.
@@ -631,14 +644,26 @@ public class BehaviorSuiteMaterializer {
         return ra;
     }
 
+    /**
+     * @param coDatabase đề có dùng database không (xem BehaviorArtifactService#khongDungDatabase).
+     *                   {@code false} thì engine bỏ qua mọi bước nạp/chụp database; trước 26/9/2026
+     *                   cờ này bị ép cứng {@code true} cho mọi đề.
+     */
     private Map<String, Object> executablePlan(Map<String, Object> plan,
                                                Map<String, Object> suite,
                                                List<Map<String, Object>> cases,
-                                               boolean includeInternalIdentity) {
+                                               boolean includeInternalIdentity,
+                                               boolean coDatabase) {
         Map<String, Object> databaseContract = new LinkedHashMap<>(map(plan.get("database_contract")));
-        databaseContract.put("enabled", true);
-        databaseContract.put("hidden_fixture_path", "/app/test/fixtures/hidden.db");
-        databaseContract.put("expected_output_path", "/app/test/fixtures/expected-output.db");
+        databaseContract.put("enabled", coDatabase);
+        if (coDatabase) {
+            databaseContract.put("hidden_fixture_path", "/app/test/fixtures/hidden.db");
+            databaseContract.put("expected_output_path", "/app/test/fixtures/expected-output.db");
+        } else {
+            // Không trỏ engine tới file không có trong bộ chấm.
+            databaseContract.remove("hidden_fixture_path");
+            databaseContract.remove("expected_output_path");
+        }
 
         Map<String, Object> executable = new LinkedHashMap<>();
         executable.put("schema_version", plan.get("schema_version"));

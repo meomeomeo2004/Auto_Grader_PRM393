@@ -217,15 +217,20 @@ public class GoldenRuntimeService {
         if (!databaseName.isBlank()) databaseName = databaseName.substring(databaseName.lastIndexOf('/') + 1);
         if (databaseName.isBlank()) databaseName = contract.path("database_name").asText("");
         if (databaseName.isBlank()) databaseName = contract.path("name").asText("");
-        if (!databaseName.matches("[-A-Za-z0-9_.]+[.]db")) {
+        // Đề không dùng database (Golden không có dấu vết nào, xem DatabaseCuaGolden) thì không có tên
+        // nào để kiểm và không có gì để nạp. Đề CÓ database thì luật tên giữ nguyên như cũ.
+        boolean khongDb = artifacts.khongDungDatabase(suiteId);
+        if (!khongDb && !databaseName.matches("[-A-Za-z0-9_.]+[.]db")) {
             throw new IllegalArgumentException("Chưa xác định được tên database hợp lệ. Hãy tải lại ZIP Golden.");
         }
-        writeRecorderEntry(target.resolve("lib"), databaseName);
+        writeRecorderEntry(target.resolve("lib"), khongDb ? null : databaseName);
         if (Files.isDirectory(source.resolve("assets"))) copyTree(source.resolve("assets"), target.resolve("assets"));
         // hidden.db vào assets của bản web: recorder entry nạp nó vào SQLite web TRƯỚC khi
         // app chạy — đúng cách engine chấm reset database rồi mới boot. Nhờ vậy người soạn
         // đề nhìn thấy CHÍNH dữ liệu chấm, không cần bản mô phỏng chép tay có thể lệch.
-        artifacts.activeOptional(suiteId, BehaviorArtifactType.HIDDEN_DATABASE).ifPresent(hidden -> {
+        // Đề không dùng database: file Database ẩn (nếu lỡ tải lên từ trước) không được chép vào — không
+        // ai mở nó, và thêm một thư mục assets/ chỉ để chứa nó là đổi cả pubspec của bản web.
+        if (!khongDb) artifacts.activeOptional(suiteId, BehaviorArtifactType.HIDDEN_DATABASE).ifPresent(hidden -> {
             try {
                 Files.createDirectories(target.resolve("assets"));
                 Files.copy(Path.of(hidden.getStoragePath()),
@@ -346,19 +351,49 @@ public class GoldenRuntimeService {
      * trước khi chạy {@code main()} của Golden Solution. Sinh tệp bằng Java thay vì bằng shell
      * để không phụ thuộc cách dash/bash xử lý dấu nháy lồng nhau.
      */
+    /**
+     * @param databaseName tên file Golden mở; {@code null} = đề không dùng database, entry sinh ra
+     *                     không import sqflite và không nạp gì trước khi mở app.
+     */
     private void writeRecorderEntry(Path lib, String databaseName) throws Exception {
         Files.createDirectories(lib);
+        boolean coDb = databaseName != null;
+        String importDb = coDb ? """
+                import 'package:flutter/services.dart' show ByteData, rootBundle;
+                import 'package:sqflite_common/sqflite.dart' as sqflite_common;
+                import 'package:sqflite_common_ffi_web/sqflite_ffi_web.dart' as sqflite_web;
+                """ : "";
+        String napDb = coDb ? """
+                  // SQLite THẬT trên web + nạp hidden.db TRƯỚC khi app khởi động — đúng cách
+                  // engine chấm reset database rồi mới boot. Nhờ vậy Golden dùng sqflite thuần
+                  // (cả ba gói sqflite dùng chung một biến toàn cục databaseFactory), không cần
+                  // file web riêng, và màn hình soạn đề là chính dữ liệu chấm.
+                  try {
+                    // Bản KHÔNG worker: SQLite wasm chạy ngay luồng chính. Bản shared
+                    // worker trả null cho getDatabasesPath (mọi lời gọi database chết theo
+                    // vì fixPath cần nó); phiên soạn đề một tab nên không cần worker.
+                    sqflite_common.databaseFactory = sqflite_web.databaseFactoryFfiWebNoWebWorker;
+                    final ByteData bytes = await rootBundle.load('assets/grader_hidden.db');
+                    await sqflite_common.databaseFactory.writeDatabaseBytes(
+                      '{{DATABASE_NAME}}',
+                      bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
+                    );
+                  } catch (e) {
+                    // Thiếu hidden.db (chưa upload) hoặc Golden kiểu cũ tự quản dữ liệu —
+                    // app vẫn phải lên để ghi thao tác, recorder không được chết theo.
+                    debugPrint('Recorder: khong nap duoc hidden.db: $e');
+                  }
+                """.replace("{{DATABASE_NAME}}", databaseName) : """
+                  // Đề không dùng database: không có gì để nạp trước khi mở app.
+                """;
         Files.writeString(lib.resolve("_recorder_entry.dart"), """
                 // Tệp do hệ thống sinh cho phiên ghi thao tác — không có trong bài nộp sinh viên.
                 import 'dart:ui_web' as ui_web;
 
                 import 'package:flutter/foundation.dart' show debugPrint;
                 import 'package:flutter/semantics.dart';
-                import 'package:flutter/services.dart' show ByteData, rootBundle;
                 import 'package:flutter/widgets.dart';
-                import 'package:sqflite_common/sqflite.dart' as sqflite_common;
-                import 'package:sqflite_common_ffi_web/sqflite_ffi_web.dart' as sqflite_web;
-
+                {{IMPORT_DB}}
                 import 'main.dart' as golden_app;
 
                 Future<void> main() async {
@@ -384,29 +419,12 @@ public class GoldenRuntimeService {
                   debugPrint('recorder-entry {{VERSION}}');
                   // Giữ handle sống suốt phiên để cây ngữ nghĩa luôn được dựng.
                   SemanticsBinding.instance.ensureSemantics();
-                  // SQLite THẬT trên web + nạp hidden.db TRƯỚC khi app khởi động — đúng cách
-                  // engine chấm reset database rồi mới boot. Nhờ vậy Golden dùng sqflite thuần
-                  // (cả ba gói sqflite dùng chung một biến toàn cục databaseFactory), không cần
-                  // file web riêng, và màn hình soạn đề là chính dữ liệu chấm.
-                  try {
-                    // Bản KHÔNG worker: SQLite wasm chạy ngay luồng chính. Bản shared
-                    // worker trả null cho getDatabasesPath (mọi lời gọi database chết theo
-                    // vì fixPath cần nó); phiên soạn đề một tab nên không cần worker.
-                    sqflite_common.databaseFactory = sqflite_web.databaseFactoryFfiWebNoWebWorker;
-                    final ByteData bytes = await rootBundle.load('assets/grader_hidden.db');
-                    await sqflite_common.databaseFactory.writeDatabaseBytes(
-                      '{{DATABASE_NAME}}',
-                      bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
-                    );
-                  } catch (e) {
-                    // Thiếu hidden.db (chưa upload) hoặc Golden kiểu cũ tự quản dữ liệu —
-                    // app vẫn phải lên để ghi thao tác, recorder không được chết theo.
-                    debugPrint('Recorder: khong nap duoc hidden.db: $e');
-                  }
+                {{NAP_DB}}
                   golden_app.main();
                 }
                 """.replace("{{VERSION}}", RECORDER_BRIDGE_VERSION)
-                        .replace("{{DATABASE_NAME}}", databaseName), StandardCharsets.UTF_8);
+                        .replace("{{IMPORT_DB}}\n", importDb)
+                        .replace("{{NAP_DB}}\n", napDb), StandardCharsets.UTF_8);
     }
 
     private void injectRecorderBridge(Path index) throws Exception {

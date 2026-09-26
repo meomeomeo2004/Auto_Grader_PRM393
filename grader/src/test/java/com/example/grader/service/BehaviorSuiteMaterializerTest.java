@@ -406,6 +406,75 @@ class BehaviorSuiteMaterializerTest {
         assertFalse(thuong.get("cases").get(0).has("oracle"), "oracle đã bỏ khỏi plan");
     }
 
+    /**
+     * Tiêu chí số cột đi tới plan ĐỦ tham số engine cần, ở khung desktop, và dòng bảng điểm
+     * mang đúng tên người soạn thấy lúc tick — không phải tên máy tự ghép.
+     */
+    @Test
+    void soCotNhomVaoPlanOKhungDesktopVoiDuThamSo() throws Exception {
+        BehaviorAuthoringService authoring = mock(BehaviorAuthoringService.class);
+        BehaviorArtifactService artifacts = mock(BehaviorArtifactService.class);
+        ExamRepository exams = mock(ExamRepository.class);
+        BehaviorSuiteMaterializer materializer = newMaterializer(authoring, artifacts, exams);
+        ReflectionTestUtils.setField(materializer, "templateDir", Path.of("..", "grader-base").toString());
+        ReflectionTestUtils.setField(materializer, "examsDir", tempDir.toString());
+
+        String ten = "Responsive — nhóm user.# xếp từ 2 cột trở lên ở khung desktop";
+        Map<String, Object> scenario = Map.ofEntries(
+                Map.entry("scenario_code", "LIST"),
+                Map.entry("name", "Màn danh sách"),
+                Map.entry("skill_code", "UI_LAYOUT"),
+                Map.entry("weight", 5.0),
+                Map.entry("initial_state", Map.of("reset_storage", true)),
+                Map.entry("steps", List.of()),
+                Map.entry("oracle", Map.of("seed", "seed-01", "input", Map.of())),
+                Map.entry("checkpoints", List.of(
+                        Map.of("id", "COT_1", "kind", "group_columns", "khung", "desktop",
+                                "group_pattern", "user.#", "min_columns", 2,
+                                "weight", 5.0, "name", ten))));
+        Map<String, Object> plan = Map.of(
+                "schema_version", "1.0",
+                "suite", Map.of(
+                        "id", "suite-1", "suite_code", "RAR_USER", "exam_id", "RAR_USER_EXAM",
+                        "name", "RAR User", "description", "Golden behavior", "revision", 1),
+                "public_contract", Map.of("allow_coordinate_fallback", false),
+                "database_contract", Map.of("enabled", true, "database_name", "users.db"),
+                "runtime_config", Map.of("default_timeout_ms", 5000),
+                "scenarios", List.of(scenario));
+        when(authoring.executionPlan("suite-1")).thenReturn(plan);
+        for (BehaviorArtifactType type : List.of(
+                BehaviorArtifactType.STUDENT_DATABASE,
+                BehaviorArtifactType.HIDDEN_DATABASE,
+                BehaviorArtifactType.OUTPUT_DATABASE)) {
+            Path source = tempDir.resolve(type.name().toLowerCase() + ".db");
+            Files.writeString(source, "fixture-" + type);
+            BehaviorArtifact artifact = new BehaviorArtifact();
+            artifact.setArtifactType(type);
+            artifact.setStoragePath(source.toString());
+            when(artifacts.active("suite-1", type)).thenReturn(artifact);
+        }
+        when(exams.findByExamId("RAR_USER_EXAM")).thenReturn(Optional.empty());
+        when(exams.save(any(Exam.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        materializer.materialize("suite-1");
+
+        Path output = tempDir.resolve("RAR_USER_EXAM").resolve("testcase");
+        JsonNode luong = new ObjectMapper().readTree(output.resolve("behavior_plan.json").toFile()).get("luong");
+        assertEquals(1, luong.size());
+        JsonNode l = luong.get(0);
+        assertEquals(1280, l.get("viewport").get("width").asInt(), "đếm cột phải ở khung desktop");
+        assertEquals("LIST__VP_DESKTOP", l.get("execution_code").asText());
+        JsonNode cp = l.get("cases").get(0).get("checkpoint");
+        assertEquals("group_columns", cp.get("kind").asText());
+        assertEquals("user.#", cp.get("group_pattern").asText(), "engine cần mẫu để gom nhóm");
+        assertEquals(2, cp.get("min_columns").asInt(), "engine cần số cột tối thiểu");
+
+        JsonNode matrix = new ObjectMapper().readTree(output.resolve("skills_matrix.json").toFile());
+        assertEquals(1, matrix.size());
+        assertEquals(ten, matrix.elements().next().get("name").asText(),
+                "dòng bảng điểm phải mang đúng tên tiêu chí người soạn đã tick");
+    }
+
     @Test
     void captureBundleDoesNotRequireAnOutputDatabaseAndKeepsScenarioIdentity() throws Exception {
         BehaviorAuthoringService authoring = mock(BehaviorAuthoringService.class);
@@ -462,6 +531,65 @@ class BehaviorSuiteMaterializerTest {
                 "Capture bundle chỉ dùng Hidden DB làm placeholder trước khi có Output DB thật");
         JsonNode behaviorPlan = new ObjectMapper().readTree(output.resolve("behavior_plan.json").toFile());
         assertEquals("scenario-42", behaviorPlan.path("luong").get(0).path("scenario_id").asText());
+    }
+
+    /**
+     * Đề KHÔNG dùng database (máy tính cộng trừ): bộ chấm sinh ra không được có database nào,
+     * và engine phải được báo tắt hợp đồng.
+     *
+     * <p>Trước 26/9/2026 writeBundle chép hidden.db VÔ ĐIỀU KIỆN (thiếu là ném "Thiếu artifact bắt
+     * buộc"), còn executablePlan ép cứng enabled=true — nên đề không có database không dựng nổi
+     * bundle capture, và kể cả dựng được thì engine vẫn đi tìm một file .db không tồn tại.
+     */
+    @Test
+    void deKhongDungDatabaseThiBundleKhongCoDatabaseVaEngineTatHopDong() throws Exception {
+        BehaviorAuthoringService authoring = mock(BehaviorAuthoringService.class);
+        BehaviorArtifactService artifacts = mock(BehaviorArtifactService.class);
+        BehaviorSuiteMaterializer materializer = newMaterializer(authoring, artifacts, mock(ExamRepository.class));
+        ReflectionTestUtils.setField(materializer, "templateDir", Path.of("..", "grader-base").toString());
+        when(artifacts.khongDungDatabase("suite-calc")).thenReturn(true);
+        when(artifacts.activeManifest("suite-calc")).thenReturn(Map.of());
+
+        Map<String, Object> scenario = Map.ofEntries(
+                Map.entry("id", "scenario-cong"),
+                Map.entry("scenario_code", "CONG"),
+                Map.entry("name", "Cộng hai số"),
+                Map.entry("weight", 1.0),
+                Map.entry("variables", Map.of()),
+                Map.entry("initial_state", Map.of("reset_storage", true)),
+                Map.entry("steps", List.of(Map.of(
+                        "id", "step_1", "action", "tap",
+                        "target", Map.of("semantic_id", "calculate.tinh")))),
+                Map.entry("viewports", List.of(Map.of(
+                        "name", "phone", "width", 412, "height", 915))),
+                Map.entry("oracle", Map.of("seed", "seed-1", "input", Map.of())),
+                Map.entry("checkpoints", List.of(Map.of(
+                        "id", "KET_QUA", "kind", "checkpoint", "scope", "ui",
+                        "weight", 1.0, "expect", Map.of("no_exception", true)))));
+        when(authoring.previewExecutionPlan("suite-calc")).thenReturn(Map.of(
+                "schema_version", "1.0",
+                "suite", Map.of("id", "suite-calc", "suite_code", "CALC", "revision", 1),
+                "public_contract", Map.of(),
+                // Hợp đồng lưu trong suite đã bị tắt lúc tải Golden, nhưng còn sót một đường dẫn cũ:
+                // bundle không được trỏ engine vào đó.
+                "database_contract", Map.of("enabled", false, "hidden_fixture_path", "/app/test/fixtures/hidden.db"),
+                "runtime_config", Map.of("default_timeout_ms", 5000),
+                "scenarios", List.of(scenario)));
+
+        Path output = materializer.createCaptureBundle("suite-calc", tempDir.resolve("capture-calc"));
+
+        assertTrue(Files.isDirectory(output.resolve("fixtures")),
+                "fixtures vẫn phải có: engine ghi ảnh chuẩn và captured-layout.json vào đây");
+        assertFalse(Files.exists(output.resolve("fixtures/hidden.db")));
+        assertFalse(Files.exists(output.resolve("fixtures/expected-output.db")));
+        verify(artifacts, never()).active("suite-calc", BehaviorArtifactType.HIDDEN_DATABASE);
+        verify(artifacts, never()).active("suite-calc", BehaviorArtifactType.OUTPUT_DATABASE);
+
+        JsonNode contract = new ObjectMapper().readTree(output.resolve("behavior_plan.json").toFile())
+                .path("database_contract");
+        assertFalse(contract.path("enabled").asBoolean(true), "engine phải thấy hợp đồng database đã tắt");
+        assertFalse(contract.has("hidden_fixture_path"));
+        assertFalse(contract.has("expected_output_path"));
     }
 
     @Test

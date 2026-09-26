@@ -85,16 +85,22 @@ public class GoldenOracleCaptureService {
 
             Path captured = test.resolve("fixtures").resolve("captured-output.db");
             Path metadata = test.resolve("fixtures").resolve("captured-output.json");
+            // Đề không dùng database: vẫn capture đầy đủ bố cục, định danh, ảnh chuẩn — chỉ không có
+            // Output Database và không có checkpoint database nào để tách. Engine cũng biết điều này
+            // qua database_contract.enabled=false nên không sinh captured-output.db.
+            boolean khongDb = artifacts.khongDungDatabase(suiteId);
             StringBuilder output = new StringBuilder();
             chayMotLuot(executionCode, lib, project, test, containerName, output);
-            if (!Files.isRegularFile(captured) || Files.size(captured) == 0) {
+            // Dây an toàn cũ CHỈ dời về đây, không bỏ: đề có database mà replay không đẻ ra file thì
+            // vẫn là lỗi. Phía Java mới là nơi biết đề có cần file đó hay không.
+            if (!khongDb && (!Files.isRegularFile(captured) || Files.size(captured) == 0)) {
                 throw new IllegalStateException("Golden replay kết thúc nhưng không sinh captured-output.db");
             }
 
             Map<String, Object> captureMetadata = Files.isRegularFile(metadata)
                     ? mapper.readValue(metadata.toFile(), new TypeReference<>() {})
                     : Map.of();
-            Map<String, Object> outputArtifact = artifacts.writeGeneratedFile(
+            Map<String, Object> outputArtifact = khongDb ? null : artifacts.writeGeneratedFile(
                     suiteId,
                     BehaviorArtifactType.OUTPUT_DATABASE,
                     "output-database.db",
@@ -167,9 +173,14 @@ public class GoldenOracleCaptureService {
                 }
             }
 
-            List<Map<String, Object>> checkpoints = artifacts.databaseDiffCheckpoints(suiteId);
+            // Vẫn gọi applyDerivedDatabaseCheckpoints khi không có database: chính hàm đó đóng dấu
+            // oracle READY kèm sha Golden, mà publish đòi dấu đó cho từng scenario. Danh sách rỗng
+            // còn dọn luôn checkpoint database tự sinh từ lần capture cũ (khi Golden còn dùng database).
+            List<Map<String, Object>> checkpoints = khongDb
+                    ? List.of() : artifacts.databaseDiffCheckpoints(suiteId);
             Map<String, Object> completedScenario = authoring.applyDerivedDatabaseCheckpoints(
-                    scenarioId, checkpoints, String.valueOf(outputArtifact.get("sha256")), golden.getSha256());
+                    scenarioId, checkpoints,
+                    khongDb ? null : String.valueOf(outputArtifact.get("sha256")), golden.getSha256());
 
             Map<String, Object> result = new LinkedHashMap<>();
             // Luồng có nhập liệu mà không đẻ nổi một checkpoint database nào là dấu hiệu
@@ -183,14 +194,16 @@ public class GoldenOracleCaptureService {
             boolean coKiemDb = cacKiem.stream()
                     .anyMatch(c -> Set.of("database_observation", "entity_consistency")
                             .contains(String.valueOf(map(c).get("kind"))));
-            if (coNhapLieu && !coKiemDb) {
+            // Đề không dùng database thì "nhập liệu mà database không đổi" là chuyện bình thường — máy
+            // tính nào cũng nhập số — nên cảnh báo này sẽ báo oan ở mọi luồng.
+            if (!khongDb && coNhapLieu && !coKiemDb) {
                 result.put("capture_warning",
                         "Luồng có nhập liệu nhưng replay KHÔNG làm database thay đổi — không sinh được"
                         + " checkpoint database nào. Kiểm lại: giá trị nhập có qua được validate không,"
                         + " app có thật sự lưu không. Nếu bỏ qua, kịch bản này sẽ không kiểm database.");
             }
             result.put("scenario", completedScenario);
-            result.put("output_database", outputArtifact);
+            if (outputArtifact != null) result.put("output_database", outputArtifact);
             result.put("database_checkpoint_count", checkpoints.size());
             result.put("layout_checkpoint_count", daNuongBoCuc);
             result.put("responsive_checkpoint_count", daNuongDesktop);

@@ -18,6 +18,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 
 class GoldenRuntimeServiceTest {
     @TempDir
@@ -160,6 +162,58 @@ class GoldenRuntimeServiceTest {
 
         assertThat(Files.readString(target.resolve("lib/_recorder_entry.dart")))
                 .contains("'expenses.db'");
+    }
+
+    /**
+     * Đề KHÔNG dùng database: bản web vẫn dựng được và entry không đụng tới sqflite.
+     *
+     * <p>Trước 26/9/2026 prepareProject ném "Chưa xác định được tên database hợp lệ" với mọi Golden
+     * không lộ ra tên .db — đề máy tính cộng trừ không mở được khung Golden để ghi thao tác.
+     */
+    @Test
+    void deKhongDungDatabaseThiEntryKhongNapDatabase() throws Exception {
+        suites.findById("suite-1").orElseThrow().setDatabaseContractJson("{\"enabled\":false}");
+        when(artifacts.khongDungDatabase("suite-1")).thenReturn(true);
+        Path source = temp.resolve("golden-calc");
+        Path target = temp.resolve("runtime-calc");
+        Files.createDirectories(source.resolve("lib"));
+        Files.writeString(source.resolve("lib/main.dart"), "void main() {}\n");
+        ReflectionTestUtils.setField(service, "templateDir", temp.resolve("templates-calc").toString());
+        Files.createDirectories(temp.resolve("templates-calc"));
+        Files.writeString(temp.resolve("templates-calc/pubspec.base.yaml"), "name: exam_project\n");
+
+        ReflectionTestUtils.invokeMethod(service, "prepareProject", "suite-1", source, target);
+
+        assertThat(Files.readString(target.resolve("lib/_recorder_entry.dart"), StandardCharsets.UTF_8))
+                .contains("golden_app.main();")
+                .contains("ensureSemantics()")
+                .doesNotContain("sqflite")
+                .doesNotContain("rootBundle")
+                .doesNotContain("grader_hidden.db")
+                .doesNotContain("{{");
+        verify(artifacts, never()).activeOptional("suite-1", BehaviorArtifactType.HIDDEN_DATABASE);
+    }
+
+    /** Đề CÓ database: entry vẫn nạp đúng tên, và không sót chỗ giữ chỗ nào của mẫu. */
+    @Test
+    void deCoDatabaseThiEntryVanNapDungTen() throws Exception {
+        Path source = temp.resolve("golden-db");
+        Path target = temp.resolve("runtime-db");
+        Files.createDirectories(source.resolve("lib"));
+        Files.writeString(source.resolve("lib/main.dart"), "void main() {}\n");
+        ReflectionTestUtils.setField(service, "templateDir", temp.resolve("templates-db").toString());
+        Files.createDirectories(temp.resolve("templates-db"));
+        Files.writeString(temp.resolve("templates-db/pubspec.base.yaml"), "name: exam_project\n");
+
+        ReflectionTestUtils.invokeMethod(service, "prepareProject", "suite-1", source, target);
+
+        assertThat(Files.readString(target.resolve("lib/_recorder_entry.dart"), StandardCharsets.UTF_8))
+                .contains("import 'package:sqflite_common/sqflite.dart' as sqflite_common;")
+                .contains("rootBundle.load('assets/grader_hidden.db')")
+                .contains("writeDatabaseBytes(")
+                .contains("'expenses.db',")
+                .contains("golden_app.main();")
+                .doesNotContain("{{");
     }
 
     @Test

@@ -300,6 +300,44 @@ class ExamStarterFromGoldenTest {
         assertTrue(e.getMessage().contains("dinh_danh.dart"), e.getMessage());
     }
 
+    /**
+     * Đề KHÔNG dùng database (máy tính cộng trừ) thì khung phát không đòi database_helper.dart.
+     *
+     * <p>Trước 26/9/2026 thiếu file đó là ném lỗi, nên đề không có dữ liệu nào vẫn không xuất nổi
+     * khung phát — muốn qua cửa phải bắt Golden viết một DatabaseHelper rỗng không ai gọi.
+     */
+    @Test
+    void deKhongDungDatabaseThiKhungKhongDoiDatabaseHelper() throws Exception {
+        ExamService s = service(PUBSPEC_GOLDEN);
+        Path zip = temp.resolve("golden.zip");
+        try (ZipOutputStream out = new ZipOutputStream(Files.newOutputStream(zip))) {
+            them(out, "lib/main.dart", MAIN_GOLDEN);
+            them(out, "lib/dinh_danh.dart", DINH_DANH_GOLDEN);
+            them(out, "lib/screens/home_screen.dart", "class HomeScreen {} // LOI GIAI\n");
+            them(out, "pubspec.yaml", PUBSPEC_GOLDEN);
+        }
+
+        Map<String, byte[]> tep = giaiNen(s.zipKhungPhat("PE"));
+        assertTrue(tep.containsKey("lib/dinh_danh.dart"), "hợp đồng định danh thì đề nào cũng cần");
+        assertFalse(tep.containsKey("lib/database_helper.dart"));
+    }
+
+    /** Vế kia: Golden CÓ dùng database mà thiếu database_helper.dart thì vẫn chặn như cũ. */
+    @Test
+    void deCoDatabaseMaThieuDatabaseHelperVanBaoLoi() throws Exception {
+        ExamService s = service(PUBSPEC_GOLDEN);
+        Path zip = temp.resolve("golden.zip");
+        try (ZipOutputStream out = new ZipOutputStream(Files.newOutputStream(zip))) {
+            them(out, "lib/main.dart", MAIN_GOLDEN);
+            them(out, "lib/dinh_danh.dart", DINH_DANH_GOLDEN);
+            them(out, "lib/data/repo.dart", "import 'package:sqflite/sqflite.dart';\nclass Repo {}\n");
+            them(out, "pubspec.yaml", PUBSPEC_GOLDEN);
+        }
+
+        var e = assertThrows(IllegalStateException.class, () -> s.zipKhungPhat("PE"));
+        assertTrue(e.getMessage().contains("database_helper.dart"), e.getMessage());
+    }
+
     /** Vân tay chỉ đổi khi BỐN THỨ khung đọc đổi — sửa màn lời giải thì khung không lệch. */
     @Test
     void vanTayKhongDoiKhiChiSuaLoiGiai() throws Exception {

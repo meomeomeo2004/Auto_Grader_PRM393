@@ -13,14 +13,10 @@ npm-debug.log*
 yarn-error.log*
 
 # ── Dữ liệu runtime của hệ thống chấm ───────────────────────────
-# Neo vào gốc repo: fixtures/ cũng có thư mục tên submissions/ nhưng là dữ liệu
-# nghiệm thu phải commit, không phải dữ liệu runtime.
 # exams/ chứa testcase đã upload (mount lúc chấm) — dữ liệu runtime
 /exams/
 # submissions/ lưu zip bài nộp SV để audit — dữ liệu runtime
 /submissions/
-# Thư mục tạm do fixtures/result-json-v2/run-fixture.sh sinh ra
-fixtures/*/.build/
 
 # ── IDE / OS ────────────────────────────────────────────────────
 .idea/
@@ -83,12 +79,6 @@ secret.properties
 *.sqlite3
 mysql/data/
 mysql_data/
-
-# Rác Dart/Flutter sinh ra trong thư mục bài nộp fixture khi IDE chạy `pub get`.
-# Bài nộp chỉ gồm `lib/` + `pubspec.yaml`; container chấm không đọc gì khác.
-fixtures/result-json-v2/submissions/*/.dart_tool/
-fixtures/result-json-v2/submissions/*/.flutter-plugins-dependencies
-fixtures/result-json-v2/submissions/*/pubspec.lock
 
 # Ghi chu rieng cho tro ly AI tren may nay, khong day len kho chung.
 /CLAUDE.md

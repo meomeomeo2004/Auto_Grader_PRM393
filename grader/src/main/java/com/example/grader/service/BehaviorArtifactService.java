@@ -252,7 +252,13 @@ public class BehaviorArtifactService {
         requireSuite(suiteId);
         Map<String, Object> status = new LinkedHashMap<>();
         List<String> missing = new ArrayList<>();
+        boolean khongDb = khongDungDatabase(suiteId);
         for (BehaviorArtifactType type : BehaviorArtifactType.values()) {
+            // Đề không dùng database: Database ẩn và Output Database không còn là thứ phải có.
+            // Không báo trạng thái của chúng để màn soạn đề không còn ô nào bắt người ra đề đi tìm
+            // một file mà Golden của họ không bao giờ mở.
+            if (khongDb && (type == BehaviorArtifactType.HIDDEN_DATABASE
+                    || type == BehaviorArtifactType.OUTPUT_DATABASE)) continue;
             // STUDENT_DATABASE da BO HAN khoi quy trinh: engine chi doc hidden_fixture_path,
             // khong bao gio mo student.db, con viec canh cau truc bang da chuyen sang khau kiem
             // dong bo khung phat. Khong bao cao trang thai nua de man soan de khong con o nao
@@ -268,14 +274,40 @@ public class BehaviorArtifactService {
                 "suite_id", suiteId,
                 "ready", missing.isEmpty(),
                 "missing", missing,
-                "artifacts", status);
+                "artifacts", status,
+                "database_required", !khongDb);
+    }
+
+    /**
+     * Đề này KHÔNG dùng database — suy từ Golden đang hoạt động (xem {@link DatabaseCuaGolden}).
+     *
+     * <p>Mặc định là CÓ dùng: chưa tải Golden, hoặc đọc ZIP lỗi, thì giữ nguyên mọi luật database cũ.
+     * Hàm đặt tên theo chiều "không dùng" có ý: sai theo hướng này chỉ là đòi thừa một file,
+     * còn sai theo hướng kia là soạn mù trên database trống.
+     *
+     * <p>Đọc thẳng Golden chứ không tin cờ {@code enabled} trong database_contract: cờ đó sửa được
+     * qua API, còn ZIP thì chỉ đổi được bằng cách tải Golden mới — đúng nguồn sự thật duy nhất.
+     */
+    public boolean khongDungDatabase(String suiteId) {
+        Optional<BehaviorArtifact> golden = artifacts
+                .findFirstBySuiteIdAndArtifactTypeAndActiveTrueOrderByVersionDesc(
+                        suiteId, BehaviorArtifactType.GOLDEN_SOLUTION);
+        if (golden.isEmpty()) return false;
+        try {
+            return DatabaseCuaGolden.quet(Path.of(golden.get().getStoragePath())).khongDungDatabase();
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     public void requireComplete(String suiteId) {
         Map<String, Object> readiness = readiness(suiteId);
         if (!Boolean.TRUE.equals(readiness.get("ready"))) {
-            throw new IllegalStateException("Bộ chấm chưa đủ 6 artifact: " + readiness.get("missing"));
+            throw new IllegalStateException("Bộ chấm chưa đủ artifact bắt buộc: " + readiness.get("missing"));
         }
+        // Đề không dùng database thì không có gì để so cấu trúc hay đòi hợp đồng: readiness ở trên đã
+        // đủ cho bốn artifact còn lại.
+        if (!Boolean.TRUE.equals(readiness.get("database_required"))) return;
         BehaviorArtifact hiddenDb = active(suiteId, BehaviorArtifactType.HIDDEN_DATABASE);
         BehaviorArtifact outputDb = active(suiteId, BehaviorArtifactType.OUTPUT_DATABASE);
         // Output do chinh Golden sinh ra khi replay tren hidden: hai file phai cung cau truc,
@@ -306,9 +338,11 @@ public class BehaviorArtifactService {
 
     /** Các đầu vào tối thiểu phải ổn định trước khi ghi một luồng Golden. */
     public void requireRecordingInputs(String suiteId) {
-        // Chi con hai dau vao that su can de ghi hinh: database an va Golden.
-        active(suiteId, BehaviorArtifactType.HIDDEN_DATABASE);
+        // Golden LUÔN phải có. Database ẩn chỉ bắt buộc khi Golden thật sự mở database — đề máy
+        // tính cộng trừ không có dữ liệu nào để nạp. Hỏi Golden trước: thiếu Golden thì câu lỗi
+        // nói đúng cái thiếu, thay vì đòi một file database có khi đề không hề cần.
         active(suiteId, BehaviorArtifactType.GOLDEN_SOLUTION);
+        if (!khongDungDatabase(suiteId)) active(suiteId, BehaviorArtifactType.HIDDEN_DATABASE);
     }
 
     /**
@@ -347,9 +381,18 @@ public class BehaviorArtifactService {
      * Cách quét: gom mọi chuỗi '*.db' trong lib/**.dart của ZIP, bỏ chuỗi có '/'
      * (đường dẫn assets như 'assets/hidden.db' là nguồn NẠP, không phải file MỞ).
      * Phải tìm được đúng một tên: giao diện không còn cho khai hoặc sửa bằng tay.
+     *
+     * <p>Ngoại lệ duy nhất (26/9/2026): Golden không có MỘT dấu vết database nào — đề không
+     * dùng database, cho qua và tắt hợp đồng. Luật "dấu vết" chặt tới đâu và vì sao, xem
+     * {@link DatabaseCuaGolden}.
      */
     public void crossCheckGoldenDatabaseName(String suiteId, Path goldenZip) throws Exception {
-        Set<String> found = scanDartDatabaseNames(goldenZip);
+        DatabaseCuaGolden.KetQua quet = DatabaseCuaGolden.quet(goldenZip);
+        if (quet.khongDungDatabase()) {
+            ghiKhongDungDatabase(suiteId);
+            return;
+        }
+        Set<String> found = quet.tenFile();
         if (found.isEmpty()) {
             throw new IllegalArgumentException("Golden không tìm thấy tên file .db trong mã lib/*.dart. "
                     + "Hãy khai rõ một tên database (ví dụ 'app.db'), chỉnh Golden rồi tải ZIP lại.");
@@ -368,7 +411,13 @@ public class BehaviorArtifactService {
                         suiteId, BehaviorArtifactType.GOLDEN_SOLUTION)
                 .ifPresent(golden -> {
                     try {
-                        Set<String> found = scanDartDatabaseNames(Path.of(golden.getStoragePath()));
+                        DatabaseCuaGolden.KetQua quet = DatabaseCuaGolden.quet(Path.of(golden.getStoragePath()));
+                        if (quet.khongDungDatabase()) {
+                            if (declared == null || declared.isBlank()) return;
+                            throw new IllegalArgumentException("Golden không dùng database nào nên không khai được tên '"
+                                    + declared + "'. Hãy chỉnh Golden rồi tải ZIP lại.");
+                        }
+                        Set<String> found = quet.tenFile();
                         if (found.size() != 1 || declared == null || !found.contains(declared)) {
                             throw new IllegalArgumentException(
                                     "Tên database được tự động nhận diện từ Golden " + found
@@ -380,6 +429,34 @@ public class BehaviorArtifactService {
                         throw new IllegalStateException("Không đọc được Golden ZIP để đối chiếu: " + e.getMessage(), e);
                     }
                 });
+    }
+
+    /**
+     * Tắt hợp đồng database khi Golden không dùng database nào.
+     *
+     * <p>Gỡ luôn tên cũ: bộ chấm từng có Golden dùng database rồi đổi sang bản không dùng mà còn
+     * giữ tên thì màn soạn đề vẫn in "Database: app.db" cho một file không còn ai mở. Giữ
+     * ignore_columns và các tuỳ chọn khác — tải lại bản có database thì không phải khai lại.
+     */
+    private void ghiKhongDungDatabase(String suiteId) {
+        suites.findById(suiteId).ifPresent(suite -> {
+            try {
+                com.fasterxml.jackson.databind.node.ObjectNode contract =
+                        suite.getDatabaseContractJson() == null || suite.getDatabaseContractJson().isBlank()
+                                ? mapper.createObjectNode()
+                                : (com.fasterxml.jackson.databind.node.ObjectNode)
+                                        mapper.readTree(suite.getDatabaseContractJson());
+                contract.put("enabled", false);
+                contract.remove("database_name");
+                contract.remove("path");
+                contract.remove("name");
+                suite.setDatabaseContractJson(mapper.writeValueAsString(contract));
+                suites.save(suite);
+            } catch (Exception e) {
+                throw new IllegalStateException(
+                        "Không ghi được hợp đồng database của Golden: " + e.getMessage(), e);
+            }
+        });
     }
 
     /** Giữ các tùy chọn chấm đã lưu, chỉ thay tên database bằng tên dò từ Golden. */
@@ -411,30 +488,8 @@ public class BehaviorArtifactService {
     // thì endpoint /golden-value-keys không còn ai gọi, và màn soạn cũng bỏ ValueKey khỏi danh
     // sách locator. Giữ lại chỉ là mời người sau dựng lại hệ định danh thứ hai.
 
-    private Set<String> scanDartDatabaseNames(Path zip) throws Exception {
-        Set<String> found = new java.util.LinkedHashSet<>();
-        java.util.regex.Pattern mau = java.util.regex.Pattern.compile("['\"]([-A-Za-z0-9_./]+[.]db)['\"]");
-        // Giữ nguyên chuỗi nhưng bỏ comment: nhắc tên DB cũ trong chú thích không phải mở thêm DB.
-        java.util.regex.Pattern token = java.util.regex.Pattern.compile(
-                "\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'|//[^\\r\\n]*|/\\*[\\s\\S]*?\\*/");
-        try (ZipFile file = new ZipFile(zip.toFile())) {
-            var entries = file.entries();
-            while (entries.hasMoreElements()) {
-                ZipEntry entry = entries.nextElement();
-                String entryName = entry.getName().replace('\\', '/');
-                if (entry.isDirectory() || !entryName.endsWith(".dart") || !entryName.contains("lib/")) continue;
-                String source = new String(file.getInputStream(entry).readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-                java.util.regex.Matcher tokens = token.matcher(source);
-                while (tokens.find()) {
-                    java.util.regex.Matcher m = mau.matcher(tokens.group());
-                    if (!m.matches()) continue;
-                    String name = m.group(1);
-                    if (!name.contains("/") && !name.contains("\\")) found.add(name);
-                }
-            }
-        }
-        return found;
-    }
+    // Bộ quét tên database đã chuyển sang DatabaseCuaGolden (26/9/2026) để khung phát dùng chung:
+    // nó cần biết đề không dùng database thì không đòi database_helper.dart nữa.
 
     /** Tra ve danh sach CANH BAO (rong = sach); loi that van nem ngoai le. */
     private List<String> validateContent(String suiteId, BehaviorArtifactType type, Path candidate) throws Exception {
