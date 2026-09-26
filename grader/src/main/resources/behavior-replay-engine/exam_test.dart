@@ -827,6 +827,15 @@ Future<void> _assertCheckpoint(
     return;
   }
 
+  // SỐ CỘT CỦA MỘT NHÓM LẶP — kĩ năng responsive "danh sách thành lưới" (25/9/2026).
+  // Số cột tối thiểu do bảng dò trên màn soạn đề đặt, KHÔNG phải oracle đo lúc capture,
+  // nên luôn chạy thật — kể cả ở lượt capture: Golden không đạt chính tiêu chí này thì
+  // người ra đề phải biết ngay lúc đó chứ không phải lúc chấm bài đầu tiên.
+  if (kind == 'group_columns') {
+    await _assertSoCotNhom(tester, checkpoint, timeout);
+    return;
+  }
+
   final expectValue = _asMap(checkpoint['expect']);
   // Đếm số phép kiểm THẬT SỰ chạy. Xem chốt chặn cuối hàm.
   var soPhepKiem = 0;
@@ -2036,14 +2045,18 @@ String _dinhDanhCua(Element e) {
 /// ngược từ chính các thể hiện đang đếm.
 List<Element> _cacDongTheoDinhDanh(String tienTo) {
   if (tienTo.isEmpty) return const <Element>[];
+  // Neo hai đầu: bySemanticsIdentifier dùng hasMatch nên không neo thì "chi_tieu.dong."
+  // nuốt luôn "chi_tieu.dong.3.xoa" — nút Xóa bị đếm thành một dòng.
+  return _motElementMoiDinhDanh(RegExp('^${RegExp.escape(tienTo)}' + r'\d+$'));
+}
+
+/// Mỗi định danh khớp `mau` giữ ĐÚNG một element. Tách khỏi `_cacDongTheoDinhDanh` để phép
+/// đếm cột dùng chung một luật chọn element với phép đếm icon theo dòng — hai luật lệch
+/// nhau thì cùng một dòng bị hai tiêu chí nhìn thành hai thứ khác nhau.
+List<Element> _motElementMoiDinhDanh(RegExp mau) {
   List<Element> tho;
   try {
-    // Neo hai đầu: bySemanticsIdentifier dùng hasMatch nên không neo thì "chi_tieu.dong."
-    // nuốt luôn "chi_tieu.dong.3.xoa" — nút Xóa bị đếm thành một dòng.
-    tho = find
-        .bySemanticsIdentifier(RegExp('^${RegExp.escape(tienTo)}' + r'\d+$'))
-        .evaluate()
-        .toList();
+    tho = find.bySemanticsIdentifier(mau).evaluate().toList();
   } catch (_) {
     // Semantics chưa bật thì không có đường nào đếm dòng; bỏ phép kiểm còn hơn báo sai.
     return const <Element>[];
@@ -2059,6 +2072,74 @@ List<Element> _cacDongTheoDinhDanh(String tienTo) {
     if (cu == null || _dienTich(e) > _dienTich(cu)) tot[id] = e;
   }
   return tot.values.toList();
+}
+
+/// Biến mẫu nhóm `user.#` thành RegExp neo hai đầu `^user\.\d+$`.
+///
+/// Neo hai đầu vì bySemanticsIdentifier dùng hasMatch: không neo thì `user.#` nuốt luôn
+/// `user.3.xoa`, nút Xoá của mỗi dòng bị đếm thành một ô của lưới và số cột nhân đôi.
+RegExp _regexMauNhom(String mau) =>
+    RegExp('^${mau.split('#').map(RegExp.escape).join(r'\d+')}\$');
+
+/// Số phần tử nhiều nhất cùng nằm một hàng: tâm dọc lệch nhau không quá `dungSai`.
+///
+/// CHÉP ĐÚNG luật `soCotToiDa` của bảng dò bên màn soạn đề (behavior-authoring/page.tsx),
+/// kể cả dung sai 2% chiều cao màn. Hai bên đếm khác nhau thì bảng dò báo "1 → 2 cột" trên
+/// Golden, giảng viên tick, rồi engine chấm chính Golden ra con số khác và Golden tự trượt.
+int _soCotToiDa(List<Rect> khung, double dungSai) {
+  var max = 1;
+  for (final r in khung) {
+    final cung =
+        khung.where((o) => (o.center.dy - r.center.dy).abs() <= dungSai).length;
+    if (cung > max) max = cung;
+  }
+  return max;
+}
+
+/// SỐ CỘT CỦA NHÓM LẶP — đạt khi nhóm xếp được ít nhất `min_columns` cột.
+///
+/// Không so thứ tự hay vị trí từng dòng với Golden: bài đưa `user.1` lên đầu hay `user.10`
+/// lên đầu thì vẫn là lưới đúng. So quan hệ giữa hai dòng cụ thể (user.10 bên trái user.9)
+/// thì lưới đúng mà sắp khác Golden vẫn trượt oan — lý do chọn đếm cột (chốt 25/9/2026).
+///
+/// Cần định danh theo dòng: đây là tiêu chí bố cục, và tiêu chí bố cục chấm bằng
+/// `semantic_id` (xem mục Hợp đồng định danh). Không có đường dự phòng theo nhãn vì nhãn
+/// dòng là DỮ LIỆU — tên từng người dùng — không có mẫu chung nào để gom.
+Future<void> _assertSoCotNhom(
+  WidgetTester tester,
+  Map<String, dynamic> checkpoint,
+  Duration timeout,
+) async {
+  final mau = _text(checkpoint, 'group_pattern');
+  if (!mau.contains('#')) {
+    throw ArgumentError(
+      'Tiêu chí số cột phải có group_pattern chứa "#" (ví dụ user.#), nhận được "$mau".',
+    );
+  }
+  final toiThieu = _int(checkpoint['min_columns'], 2);
+  final regex = _regexMauNhom(mau);
+  // Lưới và danh sách đều dựng LƯỜI: chờ đủ phần tử rồi mới đếm, đừng kết luận trên
+  // khung hình đầu khi dữ liệu còn đang nạp từ database.
+  var cac = <Element>[];
+  await _waitUntil(
+    tester,
+    () {
+      cac = _motElementMoiDinhDanh(regex);
+      return cac.length >= 2;
+    },
+    timeout,
+    'Không thấy nhóm "$mau" trên màn: cần ít nhất 2 phần tử mang định danh khớp mẫu '
+        'này để đếm cột (thấy ${cac.length}).',
+  );
+  final man = _coManHinh(tester);
+  final khung = cac.map((Element e) => tester.getRect(_laPhanTu(e))).toList();
+  final soCot = _soCotToiDa(khung, man.height * 0.02);
+  if (soCot < toiThieu) {
+    throw StateError(
+      'Nhóm "$mau" chỉ xếp $soCot cột ở khung ${man.width.round()}×${man.height.round()} '
+      '(${cac.length} phần tử) — cần ít nhất $toiThieu cột.',
+    );
+  }
 }
 
 /// Số thể hiện nằm trong một dòng. Đếm theo QUAN HỆ CÂY chứ không theo hình chữ nhật:
@@ -3120,11 +3201,15 @@ double _matchRatio(Uint8List a, Uint8List b) {
 Future<void> _captureOutputDatabase(Map<String, dynamic> contract) async {
   final outputPath = Platform.environment['GRADER_CAPTURE_OUTPUT_PATH'] ?? '';
   if (outputPath.isEmpty) return;
-  if (!_bool(contract['enabled'], false)) {
-    throw StateError(
-      'Không thể capture Output DB khi database_contract.enabled=false.',
-    );
-  }
+  // ĐỀ KHÔNG DÙNG DATABASE (26/9/2026): không có gì để chụp, lặng lẽ bỏ qua.
+  //
+  // Trước đây chỗ này NÉM. Không được ném nữa vì GRADER_CAPTURE_OUTPUT_PATH không chỉ là nơi
+  // ghi database — nó còn là CỜ bật chế độ capture cho bố cục, định danh, ảnh chuẩn. Ném ở
+  // đây là đề máy tính cộng trừ không bao giờ capture được oracle nào.
+  //
+  // Dây an toàn không mất: `enabled` do backend đặt theo Golden (Golden có dùng database
+  // thì luôn true), và đề có database mà không ra file thì phía Java vẫn báo lỗi.
+  if (!_bool(contract['enabled'], false)) return;
 
   final sourcePath = await _databasePath(contract);
   if (!File(sourcePath).existsSync()) {

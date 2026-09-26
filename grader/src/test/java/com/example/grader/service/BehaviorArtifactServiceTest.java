@@ -130,6 +130,112 @@ class BehaviorArtifactServiceTest {
         assertTrue(stored.get(0).getActive());
     }
 
+    // ==================== ĐỀ KHÔNG DÙNG DATABASE (26/9/2026) ====================
+    //
+    // Đề máy tính cộng trừ không có dữ liệu nào để nạp. Trước đây Golden kiểu này bị từ chối
+    // ngay ở cửa tải lên vì không lộ ra tên .db nào, rồi còn bị đòi Database ẩn trước khi ghi
+    // thao tác. Nhưng dây an toàn tên database (vụ 29/8) phải còn nguyên cho Golden CÓ database:
+    // các test dưới đây giữ cả hai vế.
+
+    /** Máy tính cộng trừ: không import sqflite, không mở database, không một chuỗi .db nào. */
+    private static final String MAY_TINH =
+            "double docSo(String s) => double.tryParse(s) ?? 0;\n"
+            + "String tinh(String a, String b) => (docSo(a) + docSo(b)).toString();\n";
+
+    @Test
+    void nhanGoldenKhongDungDatabaseVaTatHopDong() throws Exception {
+        uploadGolden(MAY_TINH);
+
+        assertEquals(1, stored.size(), "Golden không dùng database phải tải lên được");
+        var contract = new com.fasterxml.jackson.databind.ObjectMapper().readTree(suite.getDatabaseContractJson());
+        assertFalse(contract.path("enabled").asBoolean(true));
+        assertFalse(contract.has("database_name"), "tên grader.db cũ không được treo lại cho một file không ai mở");
+        assertTrue(service.khongDungDatabase("suite-1"));
+    }
+
+    @Test
+    void deKhongDungDatabaseThiKhongDoiDatabaseAnHayOutputDatabase() throws Exception {
+        uploadGolden(MAY_TINH);
+
+        Map<String, Object> readiness = service.readiness("suite-1");
+        assertEquals(false, readiness.get("database_required"));
+        @SuppressWarnings("unchecked")
+        List<String> thieu = (List<String>) readiness.get("missing");
+        assertFalse(thieu.contains("HIDDEN_DATABASE"), "thiếu: " + thieu);
+        assertFalse(thieu.contains("OUTPUT_DATABASE"), "thiếu: " + thieu);
+        // Chỉ cần Golden là đủ để bắt đầu ghi thao tác.
+        assertDoesNotThrow(() -> service.requireRecordingInputs("suite-1"));
+    }
+
+    /** Vế kia của cùng luật: Golden CÓ database thì mọi đòi hỏi cũ giữ nguyên. */
+    @Test
+    void goldenCoDatabaseVanDoiDatabaseAn() throws Exception {
+        uploadGolden("const databaseName = 'grader.db';");
+
+        assertFalse(service.khongDungDatabase("suite-1"));
+        Map<String, Object> readiness = service.readiness("suite-1");
+        assertEquals(true, readiness.get("database_required"));
+        @SuppressWarnings("unchecked")
+        List<String> thieu = (List<String>) readiness.get("missing");
+        assertTrue(thieu.contains("HIDDEN_DATABASE"));
+        assertTrue(thieu.contains("OUTPUT_DATABASE"));
+        IllegalStateException loi = assertThrows(IllegalStateException.class,
+                () -> service.requireRecordingInputs("suite-1"));
+        assertTrue(loi.getMessage().contains("HIDDEN_DATABASE"));
+    }
+
+    /**
+     * Dây an toàn 29/8 KHÔNG được lỏng ra: Golden có dùng sqflite mà ghép tên file động thì
+     * vẫn chặn. Coi nó là "không dùng database" là người soạn nhìn app trống dữ liệu mà không
+     * biết vì sao — đúng loại hỏng im lặng dây đó sinh ra để chặn.
+     */
+    @Test
+    void vanChanGoldenDungSqfliteMaKhongDoRaTen() throws Exception {
+        for (String nguon : List.of(
+                "import 'package:sqflite/sqflite.dart';\nFuture<void> mo(String ten) async {}\n",
+                "Future<void> mo(String ten) async { final db = await openDatabase('$ten'); }\n",
+                "Future<String> duongDan() => getDatabasesPath();\n")) {
+            IllegalArgumentException loi = assertThrows(IllegalArgumentException.class,
+                    () -> uploadGolden(nguon), nguon);
+            assertTrue(loi.getMessage().contains("không tìm thấy"), loi.getMessage());
+        }
+        assertEquals(0, stored.size(), "không bản nào được nhận");
+    }
+
+    /** Nhắc tới database trong CHÚ THÍCH không phải là dùng database. */
+    @Test
+    void chuThichNhacDatabaseKhongTinhLaDungDatabase() throws Exception {
+        uploadGolden("// Ban cu mo 'app.db' bang sqflite: openDatabase(...)\n"
+                + "/* import 'package:sqflite/sqflite.dart'; */\n" + MAY_TINH);
+
+        assertEquals(1, stored.size());
+        assertTrue(service.khongDungDatabase("suite-1"));
+    }
+
+    @Test
+    void doiQuaLaiGiuaGoldenCoVaKhongCoDatabase() throws Exception {
+        uploadGolden("const databaseName = 'grader.db';");
+        uploadGolden(MAY_TINH);
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        assertFalse(mapper.readTree(suite.getDatabaseContractJson()).path("enabled").asBoolean(true));
+
+        uploadGolden("const databaseName = 'expenses.db';");
+        var contract = mapper.readTree(suite.getDatabaseContractJson());
+        assertTrue(contract.path("enabled").asBoolean(false), "tải lại bản có database thì bật lại hợp đồng");
+        assertEquals("expenses.db", contract.path("database_name").asText());
+        assertFalse(service.khongDungDatabase("suite-1"));
+    }
+
+    @Test
+    void deKhongDungDatabaseThiKhongKhaiDuocTenDatabase() throws Exception {
+        uploadGolden(MAY_TINH);
+
+        assertDoesNotThrow(() -> service.crossCheckDeclaredDatabaseName("suite-1", ""));
+        IllegalArgumentException loi = assertThrows(IllegalArgumentException.class,
+                () -> service.crossCheckDeclaredDatabaseName("suite-1", "app.db"));
+        assertTrue(loi.getMessage().contains("không dùng database"), loi.getMessage());
+    }
+
     private void uploadGolden(String source) throws Exception {
         Path zip = tempDir.resolve("golden.zip");
         try (var out = new java.util.zip.ZipOutputStream(Files.newOutputStream(zip))) {

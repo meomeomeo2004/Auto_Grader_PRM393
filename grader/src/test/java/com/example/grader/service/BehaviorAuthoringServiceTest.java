@@ -266,6 +266,54 @@ class BehaviorAuthoringServiceTest {
                 "component_table phải còn trong checkpoints sau abstract, danh sách hiện có: " + kinds);
     }
 
+    /**
+     * SỐ CỘT CỦA NHÓM LẶP (25/9/2026) — tiêu chí responsive "danh sách thành lưới".
+     *
+     * <p>Khoá hai thứ. Một: appendEvent chặn ngay lúc ghi mọi dạng engine không chấm nổi —
+     * tới lượt capture mới nổ thì người soạn đã mất cả phiên record. Hai: abstract KHÔNG âm
+     * thầm bỏ event này, đúng cái bẫy đã nuốt cả 8 kind Ch.7 ở bài kiểm ngay trên.
+     */
+    @Test
+    void soCotNhomSongQuaAbstractVaGiuDuThamSo() {
+        Map<String, Object> golden = service.registerGoldenApp(Map.of(
+                "name", "Golden luoi", "runtime_url", "http://localhost:9010", "ready", true));
+        Map<String, Object> suite = service.createSuite(Map.of(
+                "suite_code", "LUOI_ABSTRACT", "name", "Luoi abstract", "golden_app_id", golden.get("id")));
+        Map<String, Object> recording = service.startRecording(String.valueOf(suite.get("id")), Map.of(
+                "name", "Danh sach", "initial_state", Map.of("reset_storage", false)));
+        String recordingId = String.valueOf(recording.get("id"));
+        service.appendEvent(recordingId, Map.of(
+                "kind", "action", "action", "tap", "target", Map.of("label", "Users List")));
+
+        assertThrows(IllegalArgumentException.class, () -> service.appendEvent(recordingId, Map.of(
+                "kind", "group_columns", "khung", "desktop", "group_pattern", "user.1", "min_columns", 2)),
+                "mẫu không có # thì chỉ khớp đúng một định danh — nhóm một phần tử, luôn trượt");
+        assertThrows(IllegalArgumentException.class, () -> service.appendEvent(recordingId, Map.of(
+                "kind", "group_columns", "khung", "desktop", "group_pattern", "user.#", "min_columns", 1)),
+                "tối thiểu 1 cột thì danh sách dọc cũng đạt");
+        assertThrows(IllegalArgumentException.class, () -> service.appendEvent(recordingId, Map.of(
+                "kind", "group_columns", "group_pattern", "user.#", "min_columns", 2)),
+                "ở khung điện thoại danh sách đúng đề là một cột — Golden tự trượt");
+
+        service.appendEvent(recordingId, Map.of(
+                "kind", "group_columns", "khung", "desktop", "group_pattern", "user.#", "min_columns", 2,
+                "name", "Responsive — nhóm user.# xếp từ 2 cột trở lên ở khung desktop"));
+        service.stopRecording(recordingId, Map.of());
+
+        Map<String, Object> scenario = service.abstractRecording(recordingId, Map.of(
+                "scenario_code", "LIST_GRID", "name", "Danh sach", "weight", 5.0));
+
+        Map<?, ?> cot = ((List<?>) scenario.get("checkpoints")).stream()
+                .map(item -> (Map<?, ?>) item)
+                .filter(item -> "group_columns".equals(item.get("kind")))
+                .findFirst().orElse(null);
+        assertNotNull(cot, "group_columns phải còn trong checkpoints sau abstract");
+        assertEquals("user.#", cot.get("group_pattern"));
+        assertEquals(2, ((Number) cot.get("min_columns")).intValue());
+        assertEquals("desktop", cot.get("khung"),
+                "mất cờ khung là tiêu chí rơi về khung điện thoại và Golden tự trượt");
+    }
+
     @Test
     void stoppedRecordingCanBeDiscardedAfterAbstractFailure() {
         Map<String, Object> golden = service.registerGoldenApp(Map.of(

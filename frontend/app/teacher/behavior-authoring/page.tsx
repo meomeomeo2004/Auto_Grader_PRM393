@@ -102,7 +102,7 @@ interface Suite { id: string; suite_code: string; exam_id?: string; golden_app_i
 interface Recording { id: string; suite_id: string; name: string; status: string; revision_scenario_id?: string | null; raw_trace?: JsonMap[]; initial_state?: JsonMap }
 interface Artifact { id: string; type: ArtifactType; version: number; file_name: string; size_bytes: number; active: boolean; sha256: string }
 interface MissingPackageSpec { name: string; version: string }
-interface Readiness { ready: boolean; missing: ArtifactType[]; artifacts: Partial<Record<ArtifactType, Artifact | null>> }
+interface Readiness { ready: boolean; missing: ArtifactType[]; artifacts: Partial<Record<ArtifactType, Artifact | null>>; database_required?: boolean }
 /** Kết quả duyệt toàn bộ scenario xem cái nào còn khớp Golden hiện tại (không chạy Docker). */
 interface SoatScenarioRow { id: string; scenario_code: string; name: string; ok: boolean; reasons: string[] }
 interface SoatScenario { total: number; failed: string[]; golden_ready: boolean; scenarios: SoatScenarioRow[] }
@@ -110,6 +110,56 @@ interface GoldenValidation { status: "NOT_RUN" | "RUNNING" | "PASSED" | "FAILED"
 interface RuntimeStatus { status: string; runtime_url?: string | null; runtime_path?: string | null; available?: boolean; cached?: boolean; message?: string; metadata?: JsonMap }
 interface CodePreviewFile { name: string; description: string; scope: "SCENARIO" | "BUNDLE" | "ENGINE"; content: string }
 interface CodePreview { suite_id: string; suite_code: string; scenario_count: number; criterion_count: number; files: CodePreviewFile[] }
+
+// TÔ MÀU CHO HỘP "XEM CODE". Tự viết chứ không kéo thư viện: repo build offline và chưa có
+// bộ tô màu nào trong node_modules. Chỉ cần hiểu JSON vì hộp chỉ còn bày ba file JSON
+// (behavior_plan / skills_matrix / contract) — exam_test.dart và grader.dart đã gỡ khỏi màn
+// xem từ trước (xem BehaviorSuiteMaterializer.previewCode). File đuôi khác thì chỉ có số dòng.
+type LoaiManh = "khoa" | "chuoi" | "so" | "hang" | "dau" | "thuong";
+interface ManhCode { loai: LoaiManh; chu: string }
+const MAU_MANH: Record<LoaiManh, string> = {
+  khoa: "text-sky-300",
+  chuoi: "text-emerald-300",
+  so: "text-amber-300",
+  hang: "text-violet-300",
+  dau: "text-slate-500",
+  thuong: "text-slate-200",
+};
+
+/**
+ * Tách JSON thành từng DÒNG, mỗi dòng là dãy mảnh có loại.
+ *
+ * Tách token trên CẢ văn bản rồi mới cắt theo xuống dòng, không tách từng dòng một: nhờ vậy
+ * cột số dòng khớp đúng với file, kể cả khi nội dung hỏng — chuỗi thiếu nháy đóng cũng không
+ * bị nuốt sang dòng sau (mẫu chuỗi loại trừ xuống dòng), nên lỗi nằm đâu thì màu lệch đúng đó.
+ * Chuỗi đứng trước dấu `:` là TÊN KHÓA, tô khác giá trị — đọc plan dài 3000 dòng mà khóa
+ * cùng màu giá trị thì mắt phải tự đi tìm dấu hai chấm.
+ */
+function toMauJson(noiDung: string): ManhCode[][] {
+  const dong: ManhCode[][] = [[]];
+  const them = (loai: LoaiManh, chu: string) => {
+    chu.split("\n").forEach((phan, i) => {
+      if (i > 0) dong.push([]);
+      if (phan) dong[dong.length - 1].push({ loai, chu: phan });
+    });
+  };
+  const mau = /("(?:[^"\\\n]|\\.)*")(\s*:)?|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|\b(true|false|null)\b|([{}[\],:])|(\s+)|([^])/g;
+  for (const m of noiDung.matchAll(mau)) {
+    if (m[1] !== undefined) {
+      them(m[2] ? "khoa" : "chuoi", m[1]);
+      if (m[2]) them("dau", m[2]);
+    } else if (m[3] !== undefined) them("so", m[3]);
+    else if (m[4] !== undefined) them("hang", m[4]);
+    else if (m[5] !== undefined) them("dau", m[5]);
+    else them("thuong", m[6] ?? m[7] ?? "");
+  }
+  return dong;
+}
+
+const dongCuaFile = (file: CodePreviewFile): ManhCode[][] =>
+  file.name.toLowerCase().endsWith(".json")
+    ? toMauJson(file.content)
+    : file.content.split("\n").map((chu) => (chu ? [{ loai: "thuong" as const, chu }] : []));
 interface StaticRuleGolden { passed: boolean | null; detail: string }
 interface StaticRule { id: string; name: string; kind: "lint" | "source_pattern"; lint_code?: string; config?: JsonMap; weight: number; group_id: string; skill_code?: string; description?: string; golden?: StaticRuleGolden }
 interface StaticRulesView { suite_id: string; golden_available: boolean; rules: StaticRule[]; presets: StaticRule[] }
@@ -455,7 +505,12 @@ interface KetQuaDoCoGian {
   /** Tỉ lệ bề ngang nội dung chiếm trên màn, ở hai khung. */
   beNgang: { dienThoai: number; desktop: number };
   /** Nhóm lặp đổi số cột: list thành grid. */
-  doiCot: { key: string; nhan: string; dienThoai: number; desktop: number }[];
+  doiCot: {
+    key: string; nhan: string; dienThoai: number; desktop: number; checked: boolean;
+    /** Nhóm gom theo MẪU định danh (`user.#`) — chỉ loại này chấm được: engine đếm cột bằng
+     *  định danh, còn nhóm gom theo nhãn thì không có mẫu nào để engine tìm lại. */
+    theoDinhDanh: boolean;
+  }[];
   capReflow: CapDoiBoCuc[];
 }
 
@@ -500,6 +555,13 @@ const quanHeBoCuc = (a: KhungThanhPhan, b: KhungThanhPhan, man: { w: number; h: 
   return chongNhau ? "overlap" : (tamA.y < tamB.y ? "above" : "below");
 };
 
+/**
+ * Tên hiện ra của một thành phần: ĐỊNH DANH trước, nhãn sau — cùng thứ tự với đích của
+ * checkpoint ngay dưới. Trước đây nhãn đứng trước, nên dòng user hiện ra bằng tên người trong
+ * dữ liệu ("Ngô Phương Thảo") thay vì `user.10` — đọc vào không biết tiêu chí sẽ tìm cái gì.
+ */
+const tenThanhPhan = (it: KhungThanhPhan): string => it.identifier || it.label || it.key;
+
 /** Đích cho checkpoint: ưu tiên định danh, không có thì dùng nhãn. */
 const dichCuaThanhPhan = (it: KhungThanhPhan): JsonMap =>
   it.identifier ? { semanticId: it.identifier } : { label: it.label };
@@ -513,6 +575,41 @@ const soCotToiDa = (rects: KhungThanhPhan[], tolY: number): number => {
     if (cung > max) max = cung;
   }
   return max;
+};
+
+/**
+ * Khoá NHÓM của một thành phần lặp: mọi đoạn số trong định danh thay bằng "#".
+ *
+ * Hợp đồng định danh CỐ Ý gắn mã riêng cho từng dòng (`user.10`, `user.10.xoa`) để chấm trúng
+ * đúng dòng. Nên với Golden làm ĐÚNG hợp đồng thì không dòng nào trùng khoá với dòng nào —
+ * `dup` luôn bằng 1, và phép đếm cột trước đây (chỉ xét nhóm `dup > 1`) không bao giờ thấy danh
+ * sách nào. Đo thật trên Golden User Manager 25/9/2026: 52 thành phần, 10 dòng user, 0 khoá lặp —
+ * màn đổi từ danh sách một cột sang lưới hai cột ở 1280 mà bị báo "không có mã responsive".
+ *
+ * Chỉ thay đoạn số ĐỨNG RIÊNG giữa hai dấu phân cách, để `form.avatar.2` thành `form.avatar.#`
+ * nhưng `h1_title` hay `v2api` giữ nguyên. Thành phần không có định danh thì vẫn gom theo nhãn
+ * như cũ — nút "Xoá" không mã ở mọi dòng vẫn chung một khoá.
+ */
+const khoaNhom = (it: KhungThanhPhan): string =>
+  it.identifier ? it.identifier.replace(/(^|[._\-])\d+(?=$|[._\-])/g, "$1#") : it.key;
+
+/**
+ * Hai thành phần có THẬT SỰ đổi chỗ với nhau không: so vectơ nối tâm A → tâm B ở hai khung.
+ *
+ * Vì sao cần: luật quan hệ lấy dung sai bằng 5% cạnh DÀI của màn, nên dung sai tự phình từ
+ * 42px (412×838) lên 64px (1280×800). Hai ô đứng sát nhau mà không hề xê dịch — hai avatar
+ * trong cột form cố định của Golden User Manager — đổi NHÃN từ "bên trái" sang "nằm trong"
+ * chỉ vì dung sai lớn ra. Đo thật 25/9/2026: đó là gần nửa danh sách sau khi đã gộp mẫu.
+ *
+ * Chỉ so VỊ TRÍ tâm, không so cỡ: cột form hẹp từ 380 xuống 368 là co bề ngang chứ không
+ * phải đổi bố cục, mà ô nào đổi cột thì tâm của nó dời cả trăm pixel.
+ */
+const doiChoThat = (
+  a: KhungThanhPhan, b: KhungThanhPhan, aD: KhungThanhPhan, bD: KhungThanhPhan, sai: number,
+): boolean => {
+  const tam = (r: KhungThanhPhan) => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
+  const [pa, pb, da, db] = [tam(a), tam(b), tam(aD), tam(bD)];
+  return Math.abs((pb.x - pa.x) - (db.x - da.x)) > sai || Math.abs((pb.y - pa.y) - (db.y - da.y)) > sai;
 };
 
 /** So hai lượt đo, TÁCH bằng chứng co giãn thật khỏi reflow tự nhiên. */
@@ -560,11 +657,15 @@ const phanTichCoGian = (dienThoai: AnhChupKhung, desktop: AnhChupKhung): KetQuaD
 
   const nhomLap = (items: KhungThanhPhan[]) => {
     const m = new Map<string, KhungThanhPhan[]>();
-    items.filter((it) => it.dup > 1).forEach((it) => {
-      const ds = m.get(it.key) || [];
+    items.forEach((it) => {
+      const k = khoaNhom(it);
+      const ds = m.get(k) || [];
       ds.push(it);
-      m.set(it.key, ds);
+      m.set(k, ds);
     });
+    // Một phần tử thì không phải nhóm lặp. Với thành phần gom theo nhãn, điều này trùng
+    // đúng luật cũ `dup > 1`.
+    m.forEach((ds, k) => { if (ds.length < 2) m.delete(k); });
     return m;
   };
   const nhomP = nhomLap(dienThoai.items);
@@ -575,18 +676,53 @@ const phanTichCoGian = (dienThoai: AnhChupKhung, desktop: AnhChupKhung): KetQuaD
     if (!dsD) return;
     const cotP = soCotToiDa(dsP, dienThoai.screen.h * 0.02);
     const cotD = soCotToiDa(dsD, desktop.screen.h * 0.02);
-    if (cotD > cotP) doiCot.push({ key, nhan: dsP[0].label || dsP[0].identifier || key, dienThoai: cotP, desktop: cotD });
+    // Nhóm theo định danh thì hiện MẪU (`user.#`) chứ không hiện nhãn dòng đầu: nhãn dòng là
+    // dữ liệu ("Nguyen Van A ..."), đọc vào không biết đang nói về nhóm nào.
+    if (cotD > cotP) doiCot.push({
+      key, nhan: dsP[0].identifier ? key : (dsP[0].label || key), dienThoai: cotP, desktop: cotD,
+      checked: false, theoDinhDanh: Boolean(dsP[0].identifier) && key.includes("#"),
+    });
   });
+  // Bỏ nhóm CON của một nhóm đã báo: `user.#.xoa`, `user.#.avatar` đổi cột là vì chính dòng
+  // `user.#` chứa chúng đổi cột. Báo cả bốn là một dấu hiệu bị đếm thành bốn, thổi phồng con
+  // số "N dấu hiệu" mà giảng viên dựa vào để tin Golden có responsive.
+  const doiCotGon = doiCot.filter((d) => !doiCot.some((cha) => cha !== d && d.key.startsWith(cha.key + ".")));
+  doiCot.length = 0;
+  doiCot.push(...doiCotGon);
 
-  const chung = donP.filter((it) => mapD.has(it.key));
+  // GỘP CẶP TRÙNG NGHĨA (25/9/2026). Đo thật trên Golden User Manager: 398 cặp đổi quan hệ,
+  // và 40 cặp hiện ra ĐỀU là một câu — "ô form nằm trên → bên trái dòng user" — nhân qua 10
+  // dòng × 4 định danh mỗi dòng (dòng, avatar, sửa, xoá) × mọi ô form. Giảng viên đọc ra
+  // "mọi thứ dồn sang trái", trong khi đó chỉ là MỘT sự thật: form sang cột trái, danh sách
+  // sang cột phải.
+  //
+  // Hai luật, cùng gốc với phép gom cột ở trên:
+  //  · thành phần thuộc nhóm CON (`user.#.avatar` là con của `user.#`) thì bỏ — dòng cha đã
+  //    đại diện cho nó, cái nút bên trong dòng không có vị trí riêng nào đáng kể.
+  //  · hai cặp cùng MẪU hai đầu và cùng đổi y một kiểu thì chỉ giữ cặp đầu. `form.username`
+  //    so với `user.10` hay `user.9` là cùng một câu.
+  const nhomCha = [...nhomP.keys()];
+  const laNhomCon = (it: KhungThanhPhan) => {
+    const k = khoaNhom(it);
+    return nhomCha.some((cha) => cha !== k && k.startsWith(cha + "."));
+  };
+  const chung = donP.filter((it) => mapD.has(it.key) && !laNhomCon(it));
   const capReflow: CapDoiBoCuc[] = [];
+  const daGap = new Set<string>();
   for (let i = 0; i < chung.length; i++) {
     for (let j = i + 1; j < chung.length; j++) {
       const a = chung[i];
       const b = chung[j];
+      const aD = mapD.get(a.key)!;
+      const bD = mapD.get(b.key)!;
       const qhP = quanHeBoCuc(a, b, dienThoai.screen);
-      const qhD = quanHeBoCuc(mapD.get(a.key)!, mapD.get(b.key)!, desktop.screen);
-      if (qhP !== qhD) capReflow.push({ a, b, dienThoai: qhP, desktop: qhD, checked: false });
+      const qhD = quanHeBoCuc(aD, bD, desktop.screen);
+      if (qhP === qhD) continue;
+      if (!doiChoThat(a, b, aD, bD, dienThoai.screen.w * 0.03)) continue;
+      const van = `${khoaNhom(a)}|${khoaNhom(b)}|${qhP}|${qhD}`;
+      if (daGap.has(van)) continue;
+      daGap.add(van);
+      capReflow.push({ a, b, dienThoai: qhP, desktop: qhD, checked: false });
     }
   }
   const dangQuy = (c: CapDoiBoCuc) =>
@@ -1056,6 +1192,9 @@ function BehaviorAuthoringEditor() {
     () => codePreview?.files.find((file) => file.name === previewFileName) || codePreview?.files[0] || null,
     [codePreview, previewFileName],
   );
+  // Tách token một lần mỗi file: behavior_plan.json ~3100 dòng, tách lại ở mỗi lần render là
+  // làm chậm cả trang trong khi hộp đang mở.
+  const dongCode = useMemo(() => (previewFile ? dongCuaFile(previewFile) : []), [previewFile]);
   const databaseName = String(
     suite?.database_contract?.path
       || suite?.database_contract?.database_name
@@ -1078,11 +1217,18 @@ function BehaviorAuthoringEditor() {
     artifacts.filter((item) => item.active).forEach((item) => { result[item.type] = item; });
     return result;
   }, [artifacts]);
+  // Đề có dùng database không — máy chủ suy từ Golden (xem DatabaseCuaGolden.java), màn này
+  // chỉ đọc lại. Chưa biết (đang nạp, bản máy chủ cũ không trả khóa này) thì coi như CÓ, giữ luật cũ.
+  const canDatabase = readiness?.database_required !== false;
   // Database phát sinh viên KHÔNG còn là điều kiện: engine chỉ nạp database ẩn, không bao
   // giờ mở student.db, và việc canh cấu trúc đã chuyển sang khâu kiểm đồng bộ khung phát.
+  // Database ẩn cũng chỉ là điều kiện khi Golden có dùng database (26/9/2026).
   const recordingInputsReady = Boolean(
-    activeByType.HIDDEN_DATABASE && activeByType.GOLDEN_SOLUTION,
+    activeByType.GOLDEN_SOLUTION && (!canDatabase || activeByType.HIDDEN_DATABASE),
   );
+  /** Ô database không còn là bước phải làm khi đề không dùng database. */
+  const laODatabase = (type: ArtifactType) => type === "HIDDEN_DATABASE" || type === "OUTPUT_DATABASE";
+  const artifactCanCo = (type: ArtifactType) => canDatabase || !laODatabase(type);
   const refresh = useCallback(async (suiteId: string) => {
     const [suiteData, artifactData, readyData, validationData, runtimeData] = await Promise.all([
       api<Suite>(`/behavior-authoring/suites/${suiteId}`),
@@ -1894,8 +2040,9 @@ function BehaviorAuthoringEditor() {
     const recordingId = activeRecordingId.current;
     if (!respKq || !suite) return;
     const manh = respKq.bangChung.filter((b) => b.checked);
+    const cot = respKq.doiCot.filter((d) => d.checked && d.theoDinhDanh);
     const yeu = respKq.capReflow.filter((c) => c.checked);
-    if (manh.length + yeu.length === 0) { setError("Chưa tick mục nào."); return; }
+    if (manh.length + cot.length + yeu.length === 0) { setError("Chưa tick mục nào."); return; }
     // GOLDEN PHẢI THẬT SỰ CÓ MÃ RESPONSIVE MỚI ĐƯỢC CHẤM KĨ NĂNG NÀY.
     //
     // Cửa chặn cứng chứ không phải lời nhắc: cặp "đổi quan hệ" ở rổ dưới thì Wrap tự xếp lại,
@@ -1923,7 +2070,7 @@ function BehaviorAuthoringEditor() {
       // Checkpoint phải đứng sau giá trị cuối của ô đang nhập — giống saveUiCriteria.
       await requestRecorderFlush();
       await awaitRecorderEvents();
-      const diemDong = chiaDeu(score, manh.length + yeu.length);
+      const diemDong = chiaDeu(score, manh.length + cot.length + yeu.length);
       // Cờ `khung` là thứ materializer đọc để đẩy case sang 1280×800; thiếu nó là tiêu chí
       // âm thầm chạy ở khung điện thoại và luôn đạt.
       const nen = {
@@ -1951,6 +2098,21 @@ function BehaviorAuthoringEditor() {
           });
         daLuu++;
       }
+      for (let i = 0; i < cot.length; i++) {
+        const d = cot[i];
+        // Tối thiểu = số cột ở khung điện thoại + 1, KHÔNG phải số cột của Golden ở desktop.
+        // Kĩ năng là "nhiều cột hơn khi màn rộng ra"; bài chia 3 cột trong khi Golden chia 2
+        // vẫn là lưới đúng, bắt khớp đúng số cột Golden là chấm một con số chứ không chấm kĩ
+        // năng. Và vì bảng dò chỉ báo khi desktop > điện thoại, Golden luôn tự đạt mốc này.
+        const toiThieu = d.dienThoai + 1;
+        await ghi({
+          ...nen, kind: "group_columns",
+          group_pattern: d.key, min_columns: toiThieu,
+          weight: diemDong[manh.length + i],
+          name: `Responsive — nhóm ${d.key} xếp từ ${toiThieu} cột trở lên ở khung desktop`,
+        });
+        daLuu++;
+      }
       for (let i = 0; i < yeu.length; i++) {
         const c = yeu[i];
         await ghi({
@@ -1958,8 +2120,10 @@ function BehaviorAuthoringEditor() {
           // auto = lấy chuẩn từ chính Golden lúc capture, ở đúng khung desktop.
           relation: "auto",
           target: dichCuaThanhPhan(c.a), relative_to: dichCuaThanhPhan(c.b),
-          weight: diemDong[manh.length + i],
-          name: `Responsive — ${c.a.label || c.a.identifier} và ${c.b.label || c.b.identifier} đổi từ "${TEN_QUAN_HE[c.dienThoai] || c.dienThoai}" sang "${TEN_QUAN_HE[c.desktop] || c.desktop}"`,
+          weight: diemDong[manh.length + cot.length + i],
+          // Có chiều, như trên bảng tick: "A và B đổi từ nằm trên sang bên trái" không nói ai
+          // bên trái ai, người đọc bảng điểm phải đoán.
+          name: `Responsive — ${tenThanhPhan(c.a)} ${TEN_QUAN_HE[c.dienThoai] || c.dienThoai} ${tenThanhPhan(c.b)} → ${TEN_QUAN_HE[c.desktop] || c.desktop} ${tenThanhPhan(c.b)} ở khung desktop`,
         });
         daLuu++;
       }
@@ -2360,6 +2524,15 @@ function BehaviorAuthoringEditor() {
     setPreviewFileName(result.files[0]?.name || "");
   });
 
+  // Esc đóng hộp xem code. Hộp chỉ để ĐỌC, không có gì để mất, nên đóng nhanh bằng phím hay bấm
+  // ra nền đều an toàn — không bắt người ta phải tìm đúng nút X ở góc trên.
+  useEffect(() => {
+    if (!codePreview) return;
+    const dong = (event: KeyboardEvent) => { if (event.key === "Escape") setCodePreview(null); };
+    window.addEventListener("keydown", dong);
+    return () => window.removeEventListener("keydown", dong);
+  }, [codePreview]);
+
   const moChiaDiem = (item: JsonMap) => {
     const id = String(item.id || "");
     if (chiaDiemId === id) { setChiaDiemId(""); return; }
@@ -2697,11 +2870,23 @@ function BehaviorAuthoringEditor() {
           <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div><h2 className="mt-1 text-lg font-bold">Dữ liệu đầu vào</h2></div>
-              <span className={`text-xs font-semibold ${recordingInputsReady ? "text-emerald-600" : "text-slate-500"}`}>{ARTIFACTS.filter((item) => item.owner === "teacher" && activeByType[item.type]).length}/2 file đã tải</span>
+              <span className={`text-xs font-semibold ${recordingInputsReady ? "text-emerald-600" : "text-slate-500"}`}>{ARTIFACTS.filter((item) => item.owner === "teacher" && artifactCanCo(item.type) && activeByType[item.type]).length}/{ARTIFACTS.filter((item) => item.owner === "teacher" && artifactCanCo(item.type)).length} file đã tải</span>
             </div>
             <div className="grid gap-3 md:grid-cols-2">
               {ARTIFACTS.filter((item) => item.owner === "teacher").map((item) => {
                 const current = activeByType[item.type]; const Icon = item.icon; const uploading = busy === `upload-${item.type}`;
+                // Giữ chỗ của ô thay vì giấu đi: ô biến mất không lời thì người ra đề tưởng màn hỏng, còn
+                // ô nói rõ "không cần" thì họ biết máy đã đọc Golden và hiểu đề của họ.
+                if (!artifactCanCo(item.type)) {
+                  return <div key={item.type} className="min-w-0 rounded-xl border border-dashed border-slate-200 px-3 py-2.5 dark:border-slate-700">
+                    <div className="flex items-center gap-2">
+                      <span className="rounded-lg bg-slate-100 p-1.5 text-slate-400 dark:bg-slate-800"><Icon size={17} /></span>
+                      <div className="min-w-0 flex-1"><h3 className="text-sm font-semibold text-slate-500">{item.title.replace(/^\d+\.\s*/, "")}</h3></div>
+                    </div>
+                    <p className="mt-2 text-sm text-slate-500">Không cần — Golden không dùng database.</p>
+                    {current && <p className="mt-1 text-xs text-slate-400">File đã tải trước đó ({current.file_name}) sẽ không được nạp.</p>}
+                  </div>;
+                }
                 return <div key={item.type} className="min-w-0 rounded-xl border border-slate-200 px-3 py-2.5 dark:border-slate-700">
                   <div className="flex items-center gap-2">
                     <span className="rounded-lg bg-indigo-50 p-1.5 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-300"><Icon size={17} /></span>
@@ -2712,16 +2897,16 @@ function BehaviorAuthoringEditor() {
                     <div className="min-w-0 flex-1">{current ? <><p className="truncate text-sm font-medium" title={current.file_name}>{current.file_name}</p><p className="mt-1 text-xs text-slate-500">Bản {current.version} · {bytes(current.size_bytes)}</p></> : <p className="text-sm text-slate-400">Chưa tải file</p>}</div>
                     <label className={`inline-flex shrink-0 items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold dark:border-slate-700 ${busy ? "cursor-not-allowed opacity-50" : "cursor-pointer hover:border-indigo-400 hover:text-indigo-600"}`}>{uploading ? <Loader2 size={15} className="animate-spin" /> : <UploadCloud size={15} />} {current ? "Thay file" : "Tải file"}<input aria-label={`Tải ${item.title.replace(/^\d+\.\s*/, "")}`} type="file" accept={item.accept} disabled={Boolean(busy)} className="hidden" onChange={(e) => { const file = e.target.files?.[0]; e.target.value = ""; if (file) uploadArtifact(item.type, file); }} /></label>
                   </div>
-                  {item.type === "GOLDEN_SOLUTION" && current && <p className="mt-2 text-xs text-slate-500">Database: {databaseName ? <code className="break-all font-semibold text-slate-700 dark:text-slate-300">{databaseName}</code> : <span className="text-amber-600">Chưa xác định — hãy tải lại ZIP Golden</span>}<span className="ml-2 text-slate-400">· Tự động nhận diện</span></p>}
+                  {item.type === "GOLDEN_SOLUTION" && current && <p className="mt-2 text-xs text-slate-500">Database: {!canDatabase ? <span className="font-semibold text-slate-700 dark:text-slate-300">không dùng</span> : databaseName ? <code className="break-all font-semibold text-slate-700 dark:text-slate-300">{databaseName}</code> : <span className="text-amber-600">Chưa xác định — hãy tải lại ZIP Golden</span>}<span className="ml-2 text-slate-400">· Tự động nhận diện</span></p>}
                 </div>;
               })}
             </div>
             <details className="group mt-4 border-t border-slate-100 pt-4 dark:border-slate-800">
-              <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium text-slate-500 [&::-webkit-details-marker]:hidden"><ChevronDown size={15} className="-rotate-90 transition-transform group-open:rotate-0" /> Thành phần hệ thống tự sinh<span className="ml-auto text-xs">{ARTIFACTS.filter((item) => item.owner === "system" && activeByType[item.type]).length}/4 đã có</span></summary>
+              <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium text-slate-500 [&::-webkit-details-marker]:hidden"><ChevronDown size={15} className="-rotate-90 transition-transform group-open:rotate-0" /> Thành phần hệ thống tự sinh<span className="ml-auto text-xs">{ARTIFACTS.filter((item) => item.owner === "system" && artifactCanCo(item.type) && activeByType[item.type]).length}/{ARTIFACTS.filter((item) => item.owner === "system" && artifactCanCo(item.type)).length} đã có</span></summary>
               <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
                 {ARTIFACTS.filter((item) => item.owner === "system").map((item) => {
                   const current = activeByType[item.type]; const Icon = item.icon;
-                  return <div key={item.type} className="min-w-0 rounded-lg bg-slate-50 p-3 dark:bg-slate-800/50"><div className="flex items-center gap-2"><Icon size={15} className="shrink-0 text-slate-400" /><span className="flex-1 text-xs font-semibold">{item.title.replace(/^\d+\.\s*/, "")}</span>{current && <CheckCircle2 size={15} className="shrink-0 text-emerald-500" />}</div><p className="mt-2 text-xs leading-relaxed text-slate-500">{current ? <span className="block truncate" title={current.file_name}>{current.file_name} · bản {current.version}</span> : item.hint}</p></div>;
+                  return <div key={item.type} className="min-w-0 rounded-lg bg-slate-50 p-3 dark:bg-slate-800/50"><div className="flex items-center gap-2"><Icon size={15} className="shrink-0 text-slate-400" /><span className="flex-1 text-xs font-semibold">{item.title.replace(/^\d+\.\s*/, "")}</span>{current && artifactCanCo(item.type) && <CheckCircle2 size={15} className="shrink-0 text-emerald-500" />}</div><p className="mt-2 text-xs leading-relaxed text-slate-500">{!artifactCanCo(item.type) ? "Không cần — Golden không dùng database." : current ? <span className="block truncate" title={current.file_name}>{current.file_name} · bản {current.version}</span> : item.hint}</p></div>;
                 })}
               </div>
             </details>
@@ -2808,11 +2993,6 @@ function BehaviorAuthoringEditor() {
                     </button>
                     <button onClick={() => { setIconInventory(null); setIconScenario(null); }} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-bold text-slate-600 dark:border-slate-600 dark:text-slate-300">Đóng</button>
                   </div>
-                  <p className="mt-2 text-[11px] text-slate-500">
-                    Dành cho nút chỉ có hình và cho ảnh (avatar): chấm đúng hình, đúng chỗ, đúng màu mà KHÔNG bắt sinh viên gắn nhãn ngữ nghĩa chỉ để máy tìm.
-                    Bảng này do máy chấm đo trên cây widget lúc capture, không phải quét DOM — nút không nhãn thì DOM web không thấy.
-                    Icon lặp ở mỗi dòng danh sách được chấm ở <b>mọi dòng</b>: thiếu một dòng là trượt, còn vị trí đo tương đối trong dòng nên dòng đầu và dòng cuối cùng một chuẩn.
-                  </p>
                   <div className="mt-2 grid max-h-56 gap-1 overflow-auto pr-1">
                     {iconInventory.map((it, i) => (
                       <label key={it.loai + it.ten} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 text-sm hover:bg-teal-100/60 dark:hover:bg-teal-900/30">
@@ -2832,12 +3012,10 @@ function BehaviorAuthoringEditor() {
                   <span className="font-bold">Chấm mặt nào:</span>
                   <label className="flex cursor-pointer items-center gap-1"><input type="checkbox" checked={iconCoMatOn} onChange={() => setIconCoMatOn((v) => !v)} /> có mặt</label>
                   <label className="flex cursor-pointer items-center gap-1"><input type="checkbox" checked={iconViTriOn} onChange={() => setIconViTriOn((v) => !v)} /> vị trí</label>
-                  <label className="flex cursor-pointer items-center gap-1" title="Với ảnh cho sẵn thì màu không nói lên điều gì: sinh viên không vẽ ra tấm ảnh đó.">
+                  <label className="flex cursor-pointer items-center gap-1">
                     <input type="checkbox" checked={iconMauOn} onChange={() => setIconMauOn((v) => !v)} /> màu
                   </label>
-                  <span className="text-[11px] text-slate-500">Số điểm mỗi mặt lấy theo các ô đã đặt ở bảng “Quét thành phần UI”.</span>
                 </div>
-                <p className="mt-2 text-[11px] text-slate-500">Với ảnh cho sẵn, nên để <b>tắt</b> phần màu: sinh viên không vẽ ra tấm ảnh đó nên màu của nó không phản ánh bài làm. Lưu xong hệ thống tự capture lại để đo giá trị chuẩn.</p>
                 </div>
               )}
               <div className="mt-4 grid gap-3 sm:grid-cols-3"><div><input value={groupCode} onChange={(e) => setGroupCode(e.target.value)} list="ma-nhom-co-san" title="Gõ mã nhóm mới hoặc chọn một mã đã dùng. Để trống nếu luồng này không thuộc nhóm nào." placeholder="Mã nhóm (vd: FILTER — để trống nếu không nhóm)" className="w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><datalist id="ma-nhom-co-san">{maNhomCoSan.map((ma) => <option key={ma} value={ma} />)}</datalist></div><input value={scenarioName} onChange={(e) => setScenarioName(e.target.value)} placeholder="Tên luồng (vd: Thêm khoản chi)" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /><input type="text" inputMode="decimal" value={scenarioWeight} onChange={(e) => setScenarioWeight(e.target.value)} placeholder="Nhập điểm" aria-label="Điểm của luồng" className="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700" /></div>
@@ -2867,7 +3045,7 @@ function BehaviorAuthoringEditor() {
                   {khungDesktop && <span className="font-bold text-indigo-600 dark:text-indigo-400">1280×800 — khung chấm responsive</span>}
                 </div>
               )}
-              {!recording ? <><button onClick={startRecording} disabled={!recordingInputsReady || Boolean(busy)} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-rose-600 px-4 py-2.5 font-bold text-white disabled:opacity-40"><Radio size={18} /> Bắt đầu record</button>{!recordingInputsReady && <p className="mt-2 text-xs text-amber-600">Cần đủ Database ẩn và Golden Solution.</p>}</> : <>
+              {!recording ? <><button onClick={startRecording} disabled={!recordingInputsReady || Boolean(busy)} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-rose-600 px-4 py-2.5 font-bold text-white disabled:opacity-40"><Radio size={18} /> Bắt đầu record</button>{!recordingInputsReady && <p className="mt-2 text-xs text-amber-600">{canDatabase ? "Cần đủ Database ẩn và Golden Solution." : "Cần Golden Solution."}</p>}</> : <>
                 <div className="mt-5 rounded-xl border border-slate-200 dark:border-slate-700">
                   <button onClick={() => setMoThemAction((v) => !v)} className="flex w-full items-center gap-2 px-4 py-2.5 text-left">
                     <ChevronDown size={16} className={`shrink-0 text-slate-400 transition-transform ${moThemAction ? "" : "-rotate-90"}`} />
@@ -3023,7 +3201,9 @@ function BehaviorAuthoringEditor() {
                         </p>
                         {respKq && (() => {
                           const soManh = respKq.bangChung.length + respKq.doiCot.length;
-                          const daTick = respKq.bangChung.filter((b) => b.checked).length + respKq.capReflow.filter((c) => c.checked).length;
+                          const daTick = respKq.bangChung.filter((b) => b.checked).length
+                            + respKq.doiCot.filter((d) => d.checked && d.theoDinhDanh).length
+                            + respKq.capReflow.filter((c) => c.checked).length;
                           return (
                           <div className="mt-2 space-y-2 border-t border-sky-200 pt-2 dark:border-sky-900">
                             {soManh === 0 ? (
@@ -3035,8 +3215,17 @@ function BehaviorAuthoringEditor() {
                             ) : (
                               <div className="space-y-1">
                                 <p className="text-xs font-bold text-emerald-700 dark:text-emerald-300">RESPONSIVE THẬT — {soManh} dấu hiệu. Reflow tự nhiên không tạo ra được những thứ này.</p>
-                                {respKq.doiCot.map((d) => (
-                                  <p key={d.key} className="text-xs text-emerald-700 dark:text-emerald-300">· Nhóm &ldquo;{d.nhan}&rdquo; đổi từ {d.dienThoai} cột sang {d.desktop} cột — list thành grid</p>
+                                {respKq.doiCot.map((d, i) => d.theoDinhDanh ? (
+                                  <label key={d.key} className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-white px-2 py-1 text-xs dark:border-emerald-900 dark:bg-slate-900">
+                                    <input type="checkbox" checked={d.checked} onChange={() => setRespKq((prev) => prev ? { ...prev, doiCot: prev.doiCot.map((x, j) => (j === i ? { ...x, checked: !x.checked } : x)) } : prev)} />
+                                    <span className="shrink-0 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">đổi cột</span>
+                                    <span className="truncate text-slate-600 dark:text-slate-300">Nhóm <code>{d.nhan}</code> đổi từ {d.dienThoai} cột sang {d.desktop} cột — list thành grid</span>
+                                  </label>
+                                ) : (
+                                  // Nhóm gom theo NHÃN (không có định danh theo dòng): vẫn là bằng chứng
+                                  // thật nên vẫn mở khoá cổng, nhưng engine không có mẫu nào để tìm lại
+                                  // nhóm này lúc chấm nên không cho tick.
+                                  <p key={d.key} className="text-xs text-emerald-700 dark:text-emerald-300" title="Engine đếm cột bằng định danh theo dòng (vd user.#). Nhóm này chỉ gom được theo nhãn nên không chấm được — gắn Semantics(identifier:) cho từng dòng trong Golden để chấm.">· Nhóm &ldquo;{d.nhan}&rdquo; đổi từ {d.dienThoai} cột sang {d.desktop} cột — list thành grid <span className="text-slate-400">(chưa có định danh theo dòng nên chưa chấm được)</span></p>
                                 ))}
                                 <div className="max-h-40 space-y-1 overflow-y-auto">
                                   {respKq.bangChung.map((b, i) => (
@@ -3063,12 +3252,14 @@ function BehaviorAuthoringEditor() {
                               {respKq.capReflow.map((c, i) => (
                                 <label key={`${c.a.key}|${c.b.key}`} className={`flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs dark:border-slate-700 dark:bg-slate-900 ${soManh === 0 ? "opacity-40" : ""}`}>
                                   <input type="checkbox" disabled={soManh === 0} checked={c.checked} onChange={() => setRespKq((prev) => prev ? { ...prev, capReflow: prev.capReflow.map((x, j) => (j === i ? { ...x, checked: !x.checked } : x)) } : prev)} />
-                                  <span className="truncate font-bold text-slate-700 dark:text-slate-200">{c.a.label || c.a.identifier}</span>
-                                  <span className="shrink-0 text-slate-400">↔</span>
-                                  <span className="truncate font-bold text-slate-700 dark:text-slate-200">{c.b.label || c.b.identifier}</span>
-                                  <span className="ml-auto shrink-0 rounded bg-slate-200 px-1.5 py-0.5 text-[10px] font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">{TEN_QUAN_HE[c.dienThoai] || c.dienThoai}</span>
+                                  {/* Đọc thành CÂU: "A [nằm trên → bên trái] B". Trước đây hiện "A ↔ B | nằm
+                                      trên → bên trái": mũi tên hai chiều giấu mất chiều của quan hệ, nên
+                                      "form bên trái danh sách" đọc ra thành "mọi thứ dồn sang trái". */}
+                                  <span className="truncate font-bold text-slate-700 dark:text-slate-200">{tenThanhPhan(c.a)}</span>
+                                  <span className="shrink-0 rounded bg-slate-200 px-1.5 py-0.5 text-[10px] font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">{TEN_QUAN_HE[c.dienThoai] || c.dienThoai}</span>
                                   <span className="shrink-0 text-slate-400">→</span>
                                   <span className="shrink-0 rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-bold text-amber-800 dark:bg-amber-900 dark:text-amber-200">{TEN_QUAN_HE[c.desktop] || c.desktop}</span>
+                                  <span className="truncate font-bold text-slate-700 dark:text-slate-200">{tenThanhPhan(c.b)}</span>
                                 </label>
                               ))}
                             </div>
@@ -3442,23 +3633,49 @@ function BehaviorAuthoringEditor() {
             </div>
           </section>
         </>}
-        {codePreview && previewFile && <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/75 p-3 backdrop-blur-sm sm:p-6">
-          <div className="flex h-[min(900px,94vh)] w-full max-w-[1500px] min-w-0 flex-col overflow-hidden rounded-2xl border border-slate-700 bg-slate-950 text-slate-100 shadow-2xl">
-            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-800 px-5 py-4">
-              <div className="min-w-0"><p className="text-xs font-bold uppercase tracking-widest text-indigo-400">Code sinh theo bộ Golden</p><h2 className="mt-1 truncate text-xl font-bold">{suite?.name || name}</h2><p className="mt-1 text-sm text-slate-400">{codePreview.scenario_count} scenario · {codePreview.criterion_count} đầu điểm. File hiển thị được sinh từ cùng engine dùng khi publish.</p></div>
+        {/* PORTAL RA BODY. Khung nội dung của SidebarLayout mang `transform` (hiệu ứng
+            fade-in-up), mà phần tử có transform thì thành khung quy chiếu cho mọi con
+            `position: fixed` bên trong. Đo trên màn này khung 1440×900: `fixed inset-0` đặt
+            trong khung nội dung ra (288,104) 1120×450, đặt ở body mới ra (0,0) 1440×900.
+            Trang bộ chấm dài hàng nghìn px nên hộp căn giữa theo CHIỀU CAO CẢ TRANG thay vì
+            theo màn hình: bấm "Xem code" ở đâu cũng phải cuộn đi tìm hộp, còn nền mờ thì hở
+            cả thanh bên lẫn thanh tiêu đề. Bảng điểm và thông báo ở đầu file đã portal từ trước,
+            hộp này sót.
+
+            Cửa sổ VỪA PHẢI chứ không tràn màn (yêu cầu 24/9): trước đây tới 1500×900 với nền tối
+            75% + làm mờ, đè kín trang phía sau. Gọn lại và nền nhẹ hơn để vẫn thấy mình đang ở đâu. */}
+        {mounted && codePreview && previewFile && createPortal(<div onClick={(event) => { if (event.target === event.currentTarget) setCodePreview(null); }} className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/50 p-3 sm:p-6">
+          <div role="dialog" aria-modal="true" aria-label="Code sinh theo bộ Golden" className="flex h-[min(760px,86vh)] w-full max-w-[1100px] min-w-0 flex-col overflow-hidden rounded-2xl border border-slate-700 bg-slate-950 text-slate-100 shadow-2xl">
+            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-800 px-5 py-3">
+              <div className="min-w-0"><p className="text-xs font-bold uppercase tracking-widest text-indigo-400">Code sinh theo bộ Golden</p><h2 className="mt-1 truncate text-lg font-bold">{suite?.name || name}</h2><p className="mt-1 text-sm text-slate-400">{codePreview.scenario_count} scenario · {codePreview.criterion_count} đầu điểm. File hiển thị được sinh từ cùng engine dùng khi publish.</p></div>
               <button onClick={() => setCodePreview(null)} title="Đóng bản xem code" className="rounded-lg border border-slate-700 p-2 text-slate-300 hover:bg-slate-800"><X size={20} /></button>
             </div>
             <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-              <aside className="flex shrink-0 gap-2 overflow-x-auto border-b border-slate-800 p-3 lg:w-72 lg:flex-col lg:overflow-y-auto lg:border-b-0 lg:border-r">
+              <aside className="flex shrink-0 gap-2 overflow-x-auto border-b border-slate-800 p-3 lg:w-60 lg:flex-col lg:overflow-y-auto lg:border-b-0 lg:border-r">
                 {codePreview.files.map((file) => <button key={file.name} onClick={() => setPreviewFileName(file.name)} className={`min-w-max rounded-lg border px-3 py-2 text-left transition lg:min-w-0 ${previewFile.name === file.name ? "border-indigo-500 bg-indigo-500/15 text-indigo-200" : "border-slate-800 text-slate-400 hover:border-slate-600 hover:text-slate-200"}`}><span className="block font-mono text-xs font-bold">{file.name}</span><span className="mt-1 hidden text-[11px] leading-4 lg:block">{file.description}</span></button>)}
               </aside>
               <main className="flex min-h-0 min-w-0 flex-1 flex-col">
                 <div className="flex items-center justify-between gap-3 border-b border-slate-800 px-4 py-3"><div className="min-w-0"><p className="truncate font-mono text-sm font-bold text-indigo-300">{previewFile.name}</p><p className="truncate text-xs text-slate-400">{previewFile.description}</p></div><button onClick={() => void navigator.clipboard.writeText(previewFile.content)} className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-slate-700 px-3 py-2 text-xs font-bold hover:bg-slate-800"><Copy size={15} /> Sao chép</button></div>
-                <pre className="min-h-0 flex-1 overflow-auto whitespace-pre p-4 font-mono text-xs leading-5 text-slate-200"><code>{previewFile.content}</code></pre>
+                {/* BẢNG hai cột chứ không phải <pre> trơn: cột số dòng `sticky left-0` đứng yên khi
+                    cuộn ngang — skills_matrix.json có dòng dài 800 ký tự, cuộn ra giữa mà mất số dòng
+                    thì không biết mình đang ở đâu. `select-none` để bôi đen chép tay không dính số
+                    vào; muốn lấy nguyên file thì đã có nút Sao chép. */}
+                <div className="min-h-0 flex-1 overflow-auto py-3">
+                  <table className="min-w-full border-collapse font-mono text-xs leading-5">
+                    <tbody>
+                      {dongCode.map((manh, i) => (
+                        <tr key={i} className="group hover:bg-slate-900">
+                          <td className="sticky left-0 select-none border-r border-slate-800 bg-slate-950 px-3 text-right align-top tabular-nums text-slate-600 group-hover:bg-slate-900">{i + 1}</td>
+                          <td className="w-full whitespace-pre px-4">{manh.map((m, j) => <span key={j} className={MAU_MANH[m.loai]}>{m.chu}</span>)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </main>
             </div>
           </div>
-        </div>}
+        </div>, document.body)}
       </div>
     </SidebarLayout>
   );

@@ -47,6 +47,9 @@ public class BehaviorAuthoringService {
             // Quan hệ bố cục giữa HAI thành phần. Không so pixel/screenshot: engine chỉ
             // đo hình chữ nhật logic để xác nhận trên/dưới, cùng hàng/cột, chứa nhau...
             "layout_relation",
+            // SỐ CỘT của một nhóm lặp (user.#) ở khung desktop — kĩ năng responsive
+            // "danh sách thành lưới". Engine đếm cột, không so thứ tự từng dòng.
+            "group_columns",
             "component_color",
             // Trạng thái thật bên trong widget: công tắc bật hay tắt, dải trượt bao nhiêu,
             // ô nhập có dùng bàn phím số không, nút có đúng loại không. Khác
@@ -437,6 +440,8 @@ public class BehaviorAuthoringService {
             event.putIfAbsent("browser", "flutter_tester");
         } else if ("layout_relation".equals(kind)) {
             validateLayoutRelation(event);
+        } else if ("group_columns".equals(kind)) {
+            validateGroupColumns(event);
         } else if ("route_state".equals(kind)) {
             validateRouteState(event);
         } else if ("component_position".equals(kind) || "component_color".equals(kind)) {
@@ -734,6 +739,9 @@ public class BehaviorAuthoringService {
                     || "component_present".equals(kind)
                     || "component_position".equals(kind)
                     || "layout_relation".equals(kind)
+                    // Thiếu dòng này thì abstract ÂM THẦM bỏ event group_columns — đúng cái
+                    // bẫy đã nuốt cả 8 kind Ch.7 trước đây (xem chú thích ngay dưới).
+                    || "group_columns".equals(kind)
                     || "component_color".equals(kind)
                     || "widget_state".equals(kind)
                     || "text_style".equals(kind)
@@ -1743,6 +1751,41 @@ public class BehaviorAuthoringService {
         event.putIfAbsent("scope", "navigation");
         event.putIfAbsent("stage", "ASSERT");
         event.putIfAbsent("action", "observe_route");
+        event.putIfAbsent("browser", "flutter_tester");
+    }
+
+    /**
+     * SỐ CỘT CỦA NHÓM LẶP (25/9/2026) — tiêu chí responsive "danh sách thành lưới".
+     *
+     * <p>Chặn ngay lúc ghi cả ba thứ engine cần, vì thiếu thứ nào thì tới lượt capture mới nổ:
+     * <ul>
+     *   <li>{@code group_pattern} có dấu {@code #} — engine thay nó bằng {@code \d+} để gom
+     *       {@code user.1 … user.10}. Không có {@code #} thì mẫu chỉ khớp đúng một định danh,
+     *       nhóm luôn một phần tử và tiêu chí luôn trượt.</li>
+     *   <li>{@code min_columns} từ 2 trở lên — dưới 2 thì một danh sách dọc cũng đạt.</li>
+     *   <li>khung desktop — ở khung điện thoại danh sách đúng đề là MỘT cột, tiêu chí này
+     *       chạy ở đó thì Golden tự trượt.</li>
+     * </ul>
+     */
+    private void validateGroupColumns(Map<String, Object> event) {
+        String mau = text(event, "group_pattern", "").trim();
+        if (!mau.contains("#") || !mau.matches("[A-Za-z0-9_.#-]+")) {
+            throw new IllegalArgumentException(
+                    "Tiêu chí số cột phải có group_pattern gồm chữ/số/._- và chứa \"#\" (ví dụ user.#): " + mau);
+        }
+        int toiThieu = (int) Math.round(number(event.get("min_columns"), 2));
+        if (toiThieu < 2 || toiThieu > 12) {
+            throw new IllegalArgumentException("Số cột tối thiểu phải từ 2 đến 12: " + toiThieu);
+        }
+        if (!BehaviorSuiteMaterializer.KHUNG_DESKTOP_CO.equals(text(event, "khung", ""))) {
+            throw new IllegalArgumentException("Tiêu chí số cột chỉ chạy ở khung desktop (khung: \"desktop\")");
+        }
+        event.put("group_pattern", mau);
+        event.put("min_columns", toiThieu);
+        event.putIfAbsent("checkpoint", true);
+        event.putIfAbsent("scope", "ui");
+        event.putIfAbsent("stage", "ASSERT");
+        event.putIfAbsent("action", "observe_ui");
         event.putIfAbsent("browser", "flutter_tester");
     }
 
